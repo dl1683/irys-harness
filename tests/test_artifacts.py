@@ -76,6 +76,24 @@ class ArtifactRenderingTests(unittest.TestCase):
             self.assertIn("Class 1 interest underpayment", text)
             self.assertNotIn("<base64_file>", text)
 
+    def test_docx_renderer_preserves_structured_appendix(self) -> None:
+        packet = {
+            "draft_answer": "Clean memo narrative.",
+            "artifact_appendix": "Score-critical row: 2023 Merger Guidelines threshold.",
+            "verified_evidence": [],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            artifacts = render_deliverables(
+                output_dir=tmp,
+                deliverables=["memo.docx"],
+                title="Memo",
+                packet=packet,
+            )
+            doc = Document(Path(artifacts[0]["path"]))
+            text = "\n".join(paragraph.text for paragraph in doc.paragraphs)
+            self.assertIn("Structured Findings Appendix", text)
+            self.assertIn("2023 Merger Guidelines threshold", text)
+
 
 if __name__ == "__main__":
     unittest.main()

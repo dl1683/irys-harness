@@ -12,6 +12,8 @@ from irys_harness.benchmarks.harvey import (
     build_synthesis_prompt,
     build_task_family_digest,
     is_encoded_artifact_answer,
+    is_anemic_synthesis_answer,
+    build_anemic_synthesis_fallback_answer,
     build_metadata_queries,
     build_numeric_audit_worker_prompt,
     build_provision_comparison_worker_prompt,
@@ -2640,6 +2642,135 @@ class HarveyQueryTests(unittest.TestCase):
         self.assertIn("CP2 = CP1 x (A + B) / (A + C)", digest)
         self.assertIn("$0.32/share/year", digest)
         self.assertIn("Series B receives $4.00/share first", digest)
+
+    def test_antitrust_digest_routes_hsr_and_preserves_market_hot_doc_rows(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="antitrust-competition/analyze-antitrust-hsr-strategy",
+            question="Prepare an antitrust risk assessment and HSR filing strategy memo.",
+            answer_schema={"deliverables": ["antitrust-risk-assessment-memo.docx", "hsr-filing-strategy-memo.docx"]},
+            metadata={"practice_area": "antitrust-competition"},
+        )
+        state = RunState(task=task, config=load_config(), documents=[])
+        contract = build_deliverable_contract(state)
+        digest = build_task_family_digest(state)
+        self.assertEqual(contract["task_family"], "antitrust_competition_review")
+        self.assertIn(
+            "Near-top antitrust / competition required findings",
+            contract["deliverables"][0]["required_sections"],
+        )
+        self.assertIn("Market Definition / HHI / Share Matrix", digest)
+        self.assertIn("Score-Critical Antitrust Preservation Checklist", digest)
+        self.assertIn("post-merger HHI greater than 1,800 and delta HHI greater than 100", digest)
+        self.assertIn("Greenville-Spartanburg", digest)
+        self.assertIn("approximately 3,338", digest)
+        self.assertIn("Initial HSR waiting period is 30 days", digest)
+        self.assertIn("47 miles apart", digest)
+        self.assertIn("third-largest U.S. distributor", digest)
+        self.assertIn("specialty gases", digest)
+        self.assertIn("eliminates pricing pressure", digest)
+        self.assertIn("18-22 million dollars", digest)
+        self.assertIn("47 of 156 bids", digest)
+        self.assertIn("119.5 million dollars", digest)
+        self.assertIn("TerraGas Industries", digest)
+        self.assertIn("24.25 million dollars", digest)
+        prompt = build_synthesis_prompt(state)
+        self.assertIn("For antitrust, HSR, merger-risk", prompt)
+        self.assertIn("Hot-Document and Bad-Fact Inventory", prompt)
+
+    def test_anemic_synthesis_guard_preserves_worker_packet_for_dense_tasks(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="antitrust-competition/compare-corporate-antitrust-compliance-program-against-doj-and-ftc-guidelines",
+            question="Compare antitrust compliance program against DOJ and FTC guidelines.",
+            answer_schema={"deliverables": ["antitrust-compliance-gap-analysis.docx"], "criteria_count": 63},
+            metadata={"practice_area": "antitrust-competition"},
+        )
+        state = RunState(task=task, config=load_config(), documents=[])
+        state.final_packet = {
+            "cheap_worker_summary": "CCO reporting structure lacks board independence; response time was 34 business days.",
+            "deliverable_contract": build_deliverable_contract(state),
+        }
+        short_draft = "Brief memo: improve the compliance program."
+        self.assertTrue(is_anemic_synthesis_answer(state, short_draft))
+        fallback = build_anemic_synthesis_fallback_answer(state, short_draft)
+        self.assertIn("CCO reporting structure lacks board independence", fallback)
+        self.assertIn("34 business days", fallback)
+
+    def test_antitrust_digest_routes_protective_order_compliance_and_expert_rows(self) -> None:
+        protective_task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="antitrust-competition/analyze-counterparty-markup-of-protective-order",
+            question="Analyze counterparty markup of protective order.",
+            answer_schema={"deliverables": ["protective-order-markup-memo.docx"]},
+            metadata={"practice_area": "antitrust-competition"},
+        )
+        protective_digest = build_task_family_digest(RunState(task=protective_task, config=load_config(), documents=[]))
+        self.assertIn("Protective-Order Clause-Delta Matrix", protective_digest)
+        self.assertIn("government agency personnel", protective_digest)
+        self.assertIn("44 U.S.C. 3301", protective_digest)
+        self.assertIn("OptiPrice patent portfolio", protective_digest)
+        self.assertIn("DOC_005", protective_digest)
+        self.assertIn("DOC_003", protective_digest)
+        self.assertIn("Kamakana", protective_digest)
+
+        compliance_task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="antitrust-competition/compare-corporate-antitrust-compliance-program-against-doj-and-ftc-guidelines",
+            question="Compare antitrust compliance program against DOJ and FTC guidelines.",
+            answer_schema={"deliverables": ["antitrust-compliance-gap-analysis.docx"]},
+            metadata={"practice_area": "antitrust-competition"},
+        )
+        compliance_digest = build_task_family_digest(RunState(task=compliance_task, config=load_config(), documents=[]))
+        self.assertIn("Compliance Program Gap Matrix", compliance_digest)
+        self.assertIn("Design, Implementation, and Effectiveness", compliance_digest)
+        self.assertIn("Frank J. Bellingham", compliance_digest)
+        self.assertIn("Kenji Watanabe", compliance_digest)
+        self.assertIn("34 business days", compliance_digest)
+        self.assertIn("11 countries", compliance_digest)
+        self.assertIn("March 15, 2018", compliance_digest)
+        self.assertIn("4.7 billion dollars", compliance_digest)
+        self.assertIn("since 2020", compliance_digest)
+
+        expert_task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="antitrust-competition/compare-expert-market-share-estimates-against-agency-data",
+            question="Compare expert market share estimates against agency data.",
+            answer_schema={"deliverables": ["market-share-reconciliation-memo.docx"]},
+            metadata={"practice_area": "antitrust-competition"},
+        )
+        expert_digest = build_task_family_digest(RunState(task=expert_task, config=load_config(), documents=[]))
+        self.assertIn("Expert / Agency Data Reconciliation Matrix", expert_digest)
+        self.assertIn("15.0% to 17.0%", expert_digest)
+        self.assertIn("Brentwood Foods tolling arrangement", expert_digest)
+        self.assertIn("fringe-firm assumption", expert_digest)
+        self.assertIn("$4.8B versus FTC $3.6B", expert_digest)
+        self.assertIn("identical at $14.2B", expert_digest)
+        self.assertIn("Freedonia Group", expert_digest)
+        self.assertIn("Census / NAICS", expert_digest)
+        self.assertIn("1,396", expert_digest)
+
+    def test_antitrust_digest_routes_iss_transaction_rows(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="antitrust-competition/analyze-iss-antitrust-transaction-structure",
+            question="Analyze ISS antitrust transaction structure.",
+            answer_schema={"deliverables": ["antitrust-transaction-structure-memo.docx"]},
+            metadata={"practice_area": "antitrust-competition"},
+        )
+        digest = build_task_family_digest(RunState(task=task, config=load_config(), documents=[]))
+        self.assertIn("ISS / Transaction Structure Antitrust Rows", digest)
+        self.assertIn("60 million dollar divestiture cap", digest)
+        self.assertIn("82 million dollars", digest)
+        self.assertIn("256.2 million dollars", digest)
+        self.assertIn("215.2 million dollars", digest)
+        self.assertIn("coordinated effects", digest)
+        self.assertIn("14 of Pinnacle's top 20 customers", digest)
+        self.assertIn("Pinnacle as Aldersgate's primary competitive constraint", digest)
+        self.assertIn("Janet Holbrook", digest)
+        self.assertIn("$14.2M pricing-synergy breakdown", digest)
+        self.assertIn("$23.2M", digest)
+        self.assertIn("Clayton Act Section 7", digest)
 
 
 if __name__ == "__main__":

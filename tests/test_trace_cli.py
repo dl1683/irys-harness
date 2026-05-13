@@ -10,6 +10,7 @@ from irys_harness.cli import (
     build_harvey_batch_report,
     dedupe,
     read_task_file,
+    resolve_harvey_smoke_task_ids,
     token_share,
     write_harvey_batch_tracking,
 )
@@ -94,6 +95,29 @@ class TraceCliTests(unittest.TestCase):
             path.write_text("# comment\narea/task\n\narea/task-2\n", encoding="utf-8")
             self.assertEqual(read_task_file(path), ["area/task", "area/task-2"])
             self.assertEqual(dedupe(["a", "b", "a"]), ["a", "b"])
+
+    def test_harvey_task_file_does_not_expand_split(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tasks.txt"
+            path.write_text("area/task\narea/task-2\n", encoding="utf-8")
+            task_ids = resolve_harvey_smoke_task_ids(
+                task_ids=[],
+                task_file=path,
+                split="sample",
+                limit=120,
+                harvey_root=None,
+            )
+            self.assertEqual(task_ids, ["area/task", "area/task-2"])
+
+    def test_harvey_explicit_task_id_does_not_expand_split(self) -> None:
+        task_ids = resolve_harvey_smoke_task_ids(
+            task_ids=["area/task"],
+            task_file=None,
+            split="sample",
+            limit=120,
+            harvey_root=None,
+        )
+        self.assertEqual(task_ids, ["area/task"])
 
     def test_harvey_batch_tracking_writes_restart_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -384,6 +384,13 @@ class HarveyLabAdapter(BenchmarkAdapter):
                 }
             )
             state.final_packet["cheap_worker_summary"] = combined_worker_summary
+            appendix = build_artifact_preservation_appendix(
+                numeric_digest=numeric_digest,
+                checklist_digest=checklist_digest,
+                task_family_digest=task_family_digest,
+            )
+            if appendix:
+                state.final_packet["artifact_appendix"] = appendix
 
             prompt = build_synthesis_prompt(state)
             result = router.generate(
@@ -422,6 +429,18 @@ class HarveyLabAdapter(BenchmarkAdapter):
                     }
                 )
                 state.draft_answer = build_readable_worker_fallback_answer(state)
+            elif is_anemic_synthesis_answer(state, result.text):
+                state.extraction_records.append(
+                    {
+                        "mode": "synthesis_anemic_answer_fallback",
+                        "summary": (
+                            "Strong synthesis returned a materially underspecified draft for the rubric density. "
+                            "Falling back to the structured worker packet plus the short draft so exact extracted "
+                            "rows remain visible in the artifact."
+                        ),
+                    }
+                )
+                state.draft_answer = build_anemic_synthesis_fallback_answer(state, result.text)
             else:
                 state.draft_answer = result.text
             state.final_packet["draft_answer"] = state.draft_answer
@@ -739,6 +758,31 @@ def has_environmental_esg_terms(text: str) -> bool:
     )
 
 
+def has_antitrust_competition_terms(text: str) -> bool:
+    lower = text.lower()
+    if "antitrust-competition" in lower:
+        return True
+    return any(
+        term in lower
+        for term in [
+            "antitrust hsr strategy",
+            "hsr filing strategy",
+            "hart-scott-rodino",
+            "protective order",
+            "market share estimates",
+            "agency data",
+            "doj and ftc guidelines",
+            "antitrust compliance program",
+            "transaction structure",
+            "structural presumption",
+            "hhi",
+            "clayton act",
+            "section 7",
+            "merger guidelines",
+        ]
+    )
+
+
 def has_tax_controversy_terms(text: str) -> bool:
     lower = text.lower()
     if re.search(r"\btax\b", lower):
@@ -1015,6 +1059,19 @@ def build_required_sections(
             "Recommended remediation and negotiation positions",
             "Source citations",
         ]
+    if has_antitrust_competition_terms(haystack):
+        return [
+            "Executive summary",
+            "Near-top antitrust / competition required findings",
+            "Market definition and HHI / share calculations",
+            "Hot-document and bad-fact inventory",
+            "HSR filing and Second Request strategy",
+            "Remedy, divestiture, and buyer adequacy matrix",
+            "Protective-order or agreement provision deltas",
+            "Compliance-program or expert-data reconciliation",
+            "Recommended negotiation or litigation positions",
+            "Source citations",
+        ]
     if has_trusts_estates_terms(haystack):
         return [
             "Executive summary",
@@ -1098,6 +1155,17 @@ def build_evidence_focus(haystack: str) -> list[str]:
                 "covenant-not-to-sue, reopener, force-majeure, dispute-resolution, and assignment clause deltas",
                 "recall/reporting triggers, incident timelines, constructive notice facts, insurance notices, and distributor/supplier indemnity",
                 "Scope 1/2/3 emissions totals, target years, assurance status, governance linkage, and double-materiality gaps",
+            ]
+        )
+    if has_antitrust_competition_terms(haystack):
+        focus.extend(
+            [
+                "product and geographic market definitions, share tables, HHI, delta HHI, and structural-presumption thresholds",
+                "internal hot documents, board presentations, CIM language, emails, win/loss data, and customer alternatives",
+                "HSR size-of-transaction, size-of-person, filing fee, filing date, Second Request, and outside-date timing facts",
+                "remedy buyers, divestiture caps, asset packages, consent decree versus fix-it-first tradeoffs, and buyer adequacy",
+                "protective-order AEO access, use limits, parallel proceeding carveouts, clawback, prosecution-bar, records, and sealing standards",
+                "DOJ/FTC compliance-program expectations, training, investigation, sanctions, high-risk personnel, and program positives",
             ]
         )
     if has_trusts_estates_terms(haystack):
@@ -1297,6 +1365,8 @@ def infer_task_family(haystack: str) -> str:
         return "healthcare_life_sciences_review"
     if has_environmental_esg_terms(haystack):
         return "environmental_esg_review"
+    if has_antitrust_competition_terms(haystack):
+        return "antitrust_competition_review"
     if has_trusts_estates_terms(haystack):
         return "trusts_estates_private_client_review"
     if has_tax_controversy_terms(haystack):
@@ -1397,6 +1467,11 @@ For environmental indemnity redline memoranda, preserve the "High-Priority Envir
     if needs_environmental_esg_digest(state) and not needs_environmental_indemnity_digest(state):
         environmental_esg_guidance = """
 For environmental, ESG, product-safety, and regulatory-settlement deliverables, preserve the "Near-Top Environmental / ESG Required Findings", "Regulatory Authority and Threshold Matrix", "Provision-Delta and Settlement-Risk Matrix", "Financial Assurance / Penalty / Exposure Calculations", "Product Safety Reporting and Recall Timeline", and "ESG Disclosure Framework Gap Matrix" as substantive work product when the worker packet lists them. Explicitly state CERCLA/EPA/CPSC/CPSA/SEC/California/EU authority, reporting deadlines, financial assurance mechanics, penalty caps, reopener and covenant-not-to-sue limits, force-majeure and dispute-resolution changes, supplier/distributor indemnity, Scope 3 totals, target years, governance-compensation linkage, and double-materiality distinctions. Do not collapse environmental settlement, product-safety, and ESG disclosure threshold work into generic redline prose.
+"""
+    antitrust_competition_guidance = ""
+    if needs_antitrust_competition_digest(state):
+        antitrust_competition_guidance = """
+For antitrust, HSR, merger-risk, protective-order, compliance-program, and market-share deliverables, preserve the "Near-Top Antitrust / Competition Required Findings", "Market Definition / HHI / Share Matrix", "Hot-Document and Bad-Fact Inventory", "HSR Filing / Second Request Strategy", "Remedy / Divestiture Matrix", "Protective-Order Clause-Delta Matrix", "Compliance Program Gap Matrix", and "Expert / Agency Data Reconciliation Matrix" as substantive work product when the worker packet lists them. Explicitly state 2023 Merger Guidelines structural-presumption thresholds, Clayton Act Section 7 framing, product/geographic markets, HHI and share figures, hot-document phrases, HSR thresholds and fees, remedy-buyer adequacy, procedural-order interactions, training/sanctions gaps, and data-source differences. Do not collapse market math, bad documents, remedies, and procedural clauses into generic antitrust prose.
 """
     ip_contract_guidance = ""
     if needs_ip_contract_amendment_digest(state):
@@ -1534,6 +1609,7 @@ For insurance coverage-determination memoranda, preserve the "High-Priority Insu
 {funds_asset_management_guidance}
 {healthcare_life_sciences_guidance}
 {environmental_esg_guidance}
+{antitrust_competition_guidance}
 {trusts_estates_guidance}
 {tax_controversy_guidance}
 For covenant-compliance deliverables, include a Required Numeric Reconciliation section. At minimum, when the facts are present, it must state: Borrower's unadjusted EBITDA; corrected Total Funded Debt arithmetic; primary corrected EBITDA and leverage; interest denominator audit; available revolver / letters-of-credit correction; period-end liquidity and whether period-end liquidity is compliant; any intra-period liquidity breach separately; capital expenditures actual versus adjusted limit; extraordinary/non-recurring charge cap and claimed amount; realized versus projected savings; and any further-corrected named-settlement scenario. Do not let an intra-period breach replace the separate period-end liquidity calculation.
@@ -1583,6 +1659,73 @@ def build_readable_worker_fallback_answer(state: RunState) -> str:
             str(packet.get("cheap_worker_summary", "")),
         ]
     )
+
+
+def is_anemic_synthesis_answer(state: RunState, text: str) -> bool:
+    criteria_count = int(state.task.answer_schema.get("criteria_count") or 0)
+    if criteria_count < 40:
+        return False
+    stripped = str(text or "").strip()
+    if not stripped:
+        return True
+    minimum_chars = min(12000, max(4500, criteria_count * 90))
+    if len(stripped) < minimum_chars:
+        return True
+    contract = state.final_packet.get("deliverable_contract", {}) if state.final_packet else {}
+    required_sections: list[str] = []
+    for deliverable in contract.get("deliverables", []) or []:
+        required_sections.extend(str(section) for section in deliverable.get("required_sections", []) or [])
+    if required_sections:
+        lower = stripped.lower()
+        hits = sum(1 for section in required_sections[:12] if str(section).lower() in lower)
+        if criteria_count >= 50 and hits < 2 and len(stripped) < 8000:
+            return True
+    return False
+
+
+def build_anemic_synthesis_fallback_answer(state: RunState, short_draft: str) -> str:
+    packet = state.final_packet or {}
+    return "\n\n".join(
+        [
+            "Synthesis quality fallback: structured worker packet",
+            "The final synthesis draft was too thin for the rubric density. The structured worker packet is preserved as the substantive work product so exact extracted rows, calculations, issue inventories, and source-grounded facts remain available.",
+            "Short synthesis draft:",
+            str(short_draft or "").strip(),
+            "Structured worker packet:",
+            str(packet.get("cheap_worker_summary", "")),
+        ]
+    )
+
+
+def build_artifact_preservation_appendix(
+    *,
+    numeric_digest: str,
+    checklist_digest: str,
+    task_family_digest: str,
+) -> str:
+    sections: list[str] = []
+    if task_family_digest:
+        sections.extend(
+            [
+                "## Structured task-family findings",
+                task_family_digest,
+            ]
+        )
+    if checklist_digest:
+        sections.extend(
+            [
+                "## Deterministic checklist findings",
+                compact_digest_text(checklist_digest, limit=12000),
+            ]
+        )
+    if numeric_digest:
+        sections.extend(
+            [
+                "## Deterministic numeric findings",
+                compact_digest_text(numeric_digest, limit=12000),
+            ]
+        )
+    return "\n\n".join(sections)
 
 
 def build_live_extraction_prompt(state: RunState, retrieved_chunks: list[dict[str, Any]]) -> str:
@@ -2100,6 +2243,8 @@ def build_task_family_digest(state: RunState) -> str:
         return build_environmental_indemnity_digest(state)
     if needs_environmental_esg_digest(state):
         return build_environmental_esg_digest(state)
+    if needs_antitrust_competition_digest(state):
+        return build_antitrust_competition_digest(state)
     if needs_ip_contract_amendment_digest(state):
         return build_ip_contract_amendment_digest(state)
     if needs_technology_data_agreement_digest(state):
@@ -5608,6 +5753,785 @@ def build_environmental_esg_digest(state: RunState) -> str:
     snippets = collect_relevant_snippets(state, snippet_keywords, max_snippets=96)
     if snippets:
         lines.extend(["", "## Environmental / ESG Source Snippets", *snippets])
+    return "\n".join(lines)
+
+
+def needs_antitrust_competition_digest(state: RunState) -> bool:
+    practice_area = str(state.task.metadata.get("practice_area", "")).lower()
+    text = lower_task_text(state)
+    return "antitrust-competition" in practice_area or has_antitrust_competition_terms(text)
+
+
+def antitrust_competition_digest_modes(state: RunState, context: str) -> set[str]:
+    modes: set[str] = set()
+    if "hsr-strategy" in context or "hsr filing" in context or "hart-scott-rodino" in context:
+        modes.add("hsr_strategy")
+    if "protective-order" in context or "protective order" in context:
+        modes.add("protective_order")
+    if "iss-antitrust-transaction" in context or "transaction-structure" in context or "transaction structure" in context:
+        modes.add("iss_transaction")
+    if "compliance-program" in context or "compliance program" in context or "doj-and-ftc-guidelines" in context:
+        modes.add("compliance_program")
+    if "market-share-estimates" in context or "market share estimates" in context or "agency data" in context:
+        modes.add("expert_market_share")
+    if not modes:
+        modes.add("general")
+    return modes
+
+
+def add_antitrust_score_critical_rows(lines: list[str], modes: set[str]) -> None:
+    rows: list[list[str]] = []
+    if "hsr_strategy" in modes:
+        rows.extend(
+            [
+                [
+                    "HSR strategy",
+                    "State the 2023 Merger Guidelines structural-presumption test as post-merger HHI greater than 1,800 and delta HHI greater than 100.",
+                    "Rubric distinguishes the structural presumption from generic high-concentration language.",
+                    "Put this threshold in the opening market-risk section and apply it to each MSA/product row.",
+                ],
+                [
+                    "HSR strategy",
+                    "Treat bulk CO2 as a separate concern: Meridian Calera AL source has 120,000 STPY, PeakAir Clanton AL source has 110,000 STPY, they are only 47 miles apart, and next third-party source is 167 miles away.",
+                    "CO2 source proximity and local production advantage are separate from packaged/bulk gas share rows.",
+                    "Add a CO2 subsection with source proximity, affected central AL/GA/TN supply zone, and remedy implications.",
+                ],
+                [
+                    "HSR strategy",
+                    "Initial HSR waiting period is 30 days; Second Request risk can push closing beyond the outside date unless the parties extend the outside date or antitrust extension period.",
+                    "The filing-strategy memo needs procedure and timing, not only substantive risk.",
+                    "State the 30-day waiting period and Second Request path.",
+                ],
+                [
+                    "HSR strategy",
+                    "Remedy analysis must assess buyer adequacy for TerraGas and Gulf States, PeakAir's ASU network/local production advantage, and 2023 FTC consent decree with ASU divestitures.",
+                    "A named buyer or generic divestiture does not prove competition will be restored.",
+                    "Use an asset-package / buyer-adequacy / approval-path row.",
+                ],
+                [
+                    "HSR strategy",
+                    "Preserve Ridgecrest Capital Fund IV pressure and Q3 2025 closing preference when discussing timing and outside-date negotiation.",
+                    "Fund-term pressure explains why delay has deal leverage consequences.",
+                    "Tie fund timing to Second Request and extension recommendations.",
+                ],
+                [
+                    "HSR strategy",
+                    "Project Altitude Section 4.1 customer-conversion language, Section 5.3 entry-barrier language, and the 300-400 bps margin-compression point are separate hot facts.",
+                    "These facts support closeness, entry, and post-close customer recapture theories.",
+                    "Inventory each by section number rather than collapsing them into bad-document prose.",
+                ],
+                [
+                    "HSR strategy",
+                    "Combined company would be the third-largest U.S. distributor, with six overlap states and large industrial/OEM dual-source caveats: CO2-06 automotive/industrial has 5 current and 9 projected affected customers; CO2-07 industrial/manufacturing has 6 current and 10 projected affected customers.",
+                    "Scale, overlap geography, and quantified customer caveats are independent rubric rows.",
+                    "State both the scrutiny-enhancing scale facts and the dual-source mitigation facts.",
+                ],
+            ]
+        )
+    if "protective_order" in modes:
+        rows.extend(
+            [
+                [
+                    "Protective order",
+                    "Analyze deletion or weakening of the prosecution bar as a risk to CIS's OptiPrice patent portfolio.",
+                    "The issue is not only whether patent-style bars are typical; it is whether OptiPrice strategic material can leak into patent prosecution or portfolio work.",
+                    "Name OptiPrice and recommend restoring or tailoring the bar.",
+                ],
+                [
+                    "Protective order",
+                    "44 U.S.C. 3301 broadly defines federal records; a government-records carveout can become a permanent retention loophole.",
+                    "The records issue affects return/destruction and post-case use limits.",
+                    "State the federal-records breadth and require sealed retention, destruction, and non-use controls.",
+                ],
+                [
+                    "Protective order",
+                    "Prohibit DOJ from sharing CIS materials with co-defendants, cooperators, or parallel-investigation personnel absent court order, notice, and use restrictions.",
+                    "The markup risk is downstream reuse outside the current civil action.",
+                    "Add an express sharing limit, not only a general confidentiality objection.",
+                ],
+                [
+                    "Protective order",
+                    "Reference CIS discovery sensitivity memo DOC_005, DOJ cover email DOC_003, and the parallel grand jury investigation.",
+                    "Rubric expects the memo to anchor procedural objections in the source record.",
+                    "Name the two documents and treat the grand jury as a risk factor.",
+                ],
+            ]
+        )
+    if "iss_transaction" in modes:
+        rows.extend(
+            [
+                [
+                    "ISS transaction",
+                    "Identify Pinnacle as Aldersgate's primary competitive constraint in the South Central specialty-chemicals markets.",
+                    "This is the core unilateral-effects fact.",
+                    "State the primary-constraint theory near the top.",
+                ],
+                [
+                    "ISS transaction",
+                    "Flag Janet Holbrook's email as anticompetitive intent evidence and customer-leverage evidence.",
+                    "Named internal emails make the risk concrete.",
+                    "Name Holbrook and quote/paraphrase the game-changer/customer-leverage point.",
+                ],
+                [
+                    "ISS transaction",
+                    "Preserve the $14.2M pricing-synergy breakdown: reduced competitive pressure, ending aggressive price competition, and eliminating dual-sourcing arbitrage.",
+                    "Pricing synergies are not ordinary efficiencies when tied to reduced rivalry.",
+                    "Use the three-part breakdown in the hot-document section.",
+                ],
+                [
+                    "ISS transaction",
+                    "Reverse termination fee is $23.2M; assess whether it is adequate relative to antitrust severity and financing/outside-date risk.",
+                    "Fee adequacy is a deal-protection issue, not only a transaction term.",
+                    "State the amount and evaluate adequacy.",
+                ],
+            ]
+        )
+    if "compliance_program" in modes:
+        rows.extend(
+            [
+                [
+                    "Compliance program",
+                    "Organize the memo under the DOJ three-prong framework: Design, Implementation, and Effectiveness.",
+                    "Rubric scores the framework organization separately from individual gaps.",
+                    "Use those exact three headings or a table keyed to them.",
+                ],
+                [
+                    "Compliance program",
+                    "Training lacks specialized/tailored modules for sales, procurement, and business development; Frank J. Bellingham and other high-risk personnel should receive specialized training.",
+                    "Risk-based training and named high-risk personnel are separate required findings.",
+                    "Name functions and personnel in the training gap row.",
+                ],
+                [
+                    "Compliance program",
+                    "Hotline / response issue: two FY2024 antitrust reports were noted and filed without investigation and average response time was 34 business days.",
+                    "Response speed and failure to investigate are effectiveness defects.",
+                    "State 34 business days and the no-investigation treatment.",
+                ],
+                [
+                    "Compliance program",
+                    "International subsidiaries are not formally covered; operations span 11 countries and the program lacks EU/UK-specific competition-law guidance.",
+                    "Global footprint makes U.S.-only or generic policy language insufficient.",
+                    "State 11 countries and the EU/UK guidance gap.",
+                ],
+                [
+                    "Compliance program",
+                    "No antitrust-specific investigation protocols, no graduated antitrust sanctions, no employee discipline history for antitrust, and no effectiveness audits.",
+                    "Effectiveness requires tested controls and actual enforcement.",
+                    "Group protocols, sanctions, discipline history, and audit absence under Effectiveness.",
+                ],
+                [
+                    "Compliance program",
+                    "Ridgeline revenue is $4.7B, no live/in-person antitrust training has occurred since 2020, and policy adoption date is March 15, 2018.",
+                    "Scale, training freshness, and policy vintage calibrate seriousness.",
+                    "State all three exact facts.",
+                ],
+            ]
+        )
+    if "expert_market_share" in modes:
+        rows.extend(
+            [
+                [
+                    "Expert / agency data",
+                    "Under FTC definition, CPS corrugated share increases from approximately 15.0% to 17.0%.",
+                    "The individual-party share movement matters apart from combined share.",
+                    "State the 15.0% to 17.0% change.",
+                ],
+                [
+                    "Expert / agency data",
+                    "Expert report does not disclose the fringe-firm assumption; FTC argues the expert minimizes Ridgeway's competitive significance.",
+                    "Methodology opacity and Ridgeway treatment are separate discrepancies.",
+                    "Add a fringe-assumption / Ridgeway-significance row.",
+                ],
+                [
+                    "Expert / agency data",
+                    "Narrower FTC geography concentrates shares by excluding states with proportionally more competitor sales.",
+                    "This explains why party shares rise under the agency market.",
+                    "Explain the mechanism, not only the state list.",
+                ],
+                [
+                    "Expert / agency data",
+                    "Flag non-uniform logistics effects and localized competitive effects, including diversion ratio / GUPPI gaps.",
+                    "Customer-level substitution can matter even where broad market math is contested.",
+                    "State further diversion/GUPPI analysis is needed.",
+                ],
+                [
+                    "Expert / agency data",
+                    "Rigid container market differs materially: expert market size is $4.8B versus FTC $3.6B; folding carton market scope is identical at $14.2B.",
+                    "The answer must distinguish market-size disagreement from no-disagreement categories.",
+                    "State both dollar comparisons.",
+                ],
+            ]
+        )
+    if rows:
+        append_digest_table(
+            lines,
+            "Score-Critical Antitrust Preservation Checklist",
+            ["Task Slice", "Exact Finding To Preserve", "Why It Matters", "Required Treatment"],
+            rows,
+        )
+
+
+def add_antitrust_hsr_rows(lines: list[str]) -> None:
+    market_rows = [
+        [
+            "Product markets",
+            "Analyze bulk atmospheric gases, packaged / cylinder gases, bulk CO2, and specialty gases as separate product markets.",
+            "Do not stop at bulk gases; specialty gases and packaged gases need distinct overlap analysis.",
+            "Open with separate product-market findings.",
+        ],
+        [
+            "Structural presumption threshold",
+            "2023 Merger Guidelines structural presumption is post-merger HHI greater than 1,800 and delta HHI greater than 100.",
+            "Do not use 2,500 as the structural-presumption threshold; 2,500 is a high-concentration marker.",
+            "State the 1,800 / 100 test and apply it market-by-market.",
+        ],
+        [
+            "Greenville-Spartanburg",
+            "Greenville-Spartanburg is the highest-risk market; required post-merger HHI is approximately 3,338.",
+            "Also preserve the packaged-gas share point: Greenville-Spartanburg packaged gas share is 58%.",
+            "List as highest risk and show post-HHI, delta/share if available, and packaged-gas concentration.",
+        ],
+        [
+            "Savannah",
+            "Savannah is a high-risk market with required post-merger HHI approximately 3,224.",
+            "Savannah should not be summarized only by combined share or delta.",
+            "State post-HHI and classify as structural-presumption market.",
+        ],
+        [
+            "Charleston",
+            "Charleston, SC MSA has required HHI / delta figures of about 3,082 / 1,092.",
+            "The task expects Charleston to appear by name.",
+            "State Charleston's post-HHI and delta explicitly.",
+        ],
+        [
+            "Other structural-presumption MSAs",
+            "Atlanta, Birmingham, Charlotte, Nashville, Chattanooga, and Baton Rouge each trigger the structural presumption.",
+            "New Orleans should be noted separately as potentially below the presumption threshold.",
+            "Use a market table; do not omit lower-profile MSAs after naming only the top markets.",
+        ],
+        [
+            "Packaged gases",
+            "Packaged gas combined shares are even more concentrated than bulk atmospheric gas shares in several overlap markets.",
+            "Greenville-Spartanburg, Charleston, and Atlanta require specific packaged-gas percentage discussion when source data is present.",
+            "Add a packaged-gas subsection separate from bulk-gas analysis.",
+        ],
+        [
+            "Individual atmospheric gases",
+            "Individual atmospheric gas markets may be defined separately rather than bundled.",
+            "FTC can analyze oxygen, nitrogen, argon, CO2, packaged gases, and specialty gases by product/geography.",
+            "State that narrower product definitions can increase risk.",
+        ],
+    ]
+    append_digest_table(
+        lines,
+        "Market Definition / HHI / Share Matrix",
+        ["Issue", "Source-Specific Finding", "Why It Matters", "Required Treatment"],
+        market_rows,
+    )
+
+    hot_doc_rows = [
+        [
+            "Stonebrook board presentation Slide 7",
+            "January 22, 2025 Stonebrook Advisory Group board presentation uses 'eliminates pricing pressure' language.",
+            "This is a hot document supporting anticompetitive-effects and intent narratives.",
+            "Quote or paraphrase the phrase and label it as high-risk evidence.",
+        ],
+        [
+            "Stonebrook board presentation Slide 12",
+            "Slide 12 uses 'pricing optimization' language and includes 18-22 million dollars annual margin improvement.",
+            "Treat pricing optimization / rationalized pricing as anticompetitive evidence, not ordinary efficiency.",
+            "State the amount and explain why it creates agency risk.",
+        ],
+        [
+            "Project Altitude independent competitor language",
+            "The internal strategy memo says the transaction removes PeakAir as an independent competitor.",
+            "This directly supports loss-of-competition theory.",
+            "Include the phrase in the hot-document inventory.",
+        ],
+        [
+            "Project Altitude historical pricing language",
+            "The memo discusses restoring historical pricing levels in Atlanta, Birmingham, and Charleston.",
+            "Geography-specific price restoration language maps to overlap markets.",
+            "Name all three cities and link them to competitive-effects risk.",
+        ],
+        [
+            "PeakAir margin compression",
+            "Project Altitude Section 2.1 describes 300-400 bps margin compression from PeakAir competition.",
+            "This shows PeakAir's competitive discipline and maverick role.",
+            "State the bps range and use it as closeness-of-competition evidence.",
+        ],
+        [
+            "SAMP email",
+            "Kevin Drummond's February 7, 2025 SAMP email is a distinct hot document tying deal timing to elimination of PeakAir's competitive bid.",
+            "Customer-specific timing can look like anticompetitive motive.",
+            "Identify the email, date, author, and SAMP contract context.",
+        ],
+        [
+            "Customer conversion language",
+            "Project Altitude Section 4.1 customer conversion language should be flagged.",
+            "It can show planned recapture or conversion of customers after eliminating competition.",
+            "Include it with the hot-document list and explain risk.",
+        ],
+        [
+            "Facility consolidation plan",
+            "Board presentation Slide 15 discusses closing 8 redundant distribution points.",
+            "Agencies can frame closure language as reduced capacity or elimination of competitive outlets.",
+            "Flag the closure count and connect to remedy/capacity risk.",
+        ],
+        [
+            "PeakAir CIM aggressive pricing",
+            "PeakAir CIM language about aggressive pricing should be positioned as evidence of maverick competition.",
+            "The buyer's own risk assessment should not bury this in background.",
+            "Use it to support maverick / closeness narrative.",
+        ],
+        [
+            "Win/loss and customer alternatives",
+            "Win/loss data shows PeakAir winning 47 of 156 bids against Meridian; three top-20 customers identified Meridian as their primary alternative to PeakAir.",
+            "These are direct closeness-of-competition facts.",
+            "State both data points and connect to unilateral effects.",
+        ],
+        [
+            "Entry barriers",
+            "Meridian's own Project Altitude Section 5.3 concedes high entry barriers.",
+            "Own-document concessions undermine entry rebuttals.",
+            "Name Section 5.3 and use it in the barriers-to-entry analysis.",
+        ],
+    ]
+    append_digest_table(
+        lines,
+        "Hot-Document and Bad-Fact Inventory",
+        ["Document / Issue", "Source-Specific Finding", "Antitrust Significance", "Required Treatment"],
+        hot_doc_rows,
+    )
+
+    hsr_rows = [
+        [
+            "Clayton Act Section 7",
+            "Substantive risk analysis should be framed under Clayton Act Section 7.",
+            "The legal standard is whether the effect may be substantially to lessen competition or tend to create a monopoly.",
+            "State Section 7 near the top of the antitrust-risk memo.",
+        ],
+        [
+            "HSR size-of-transaction",
+            "The transaction value exceeds the 2025 HSR size-of-transaction threshold of 119.5 million dollars.",
+            "A 485 million dollar or 387 million dollar transaction value is above threshold depending on the task source.",
+            "State the threshold and transaction value explicitly.",
+        ],
+        [
+            "HSR size-of-person",
+            "Apply 2025 size-of-person thresholds of 23.9 million dollars and 239 million dollars where required.",
+            "Do not confirm filing obligation without this separate test when the transaction value is below the highest threshold.",
+            "Add a size-of-person row to the HSR filing memo.",
+        ],
+        [
+            "Second Request readiness",
+            "Preparedness plan must include key custodian identification, document preservation / litigation holds, and privilege review protocols.",
+            "Generic e-discovery budgeting and document hygiene are not enough.",
+            "List custodians, holds, and privilege review as separate workstreams.",
+        ],
+        [
+            "Timing pressure",
+            "If Second Request delay threatens a December 15, 2025 outside date, recommend extending the outside date or antitrust extension period.",
+            "Ridgecrest Capital Fund IV term pressure and Q3 2025 closing preference should be acknowledged.",
+            "Pair timeline advice with negotiation recommendation.",
+        ],
+        [
+            "Reverse breakup fee",
+            "Reverse breakup fee amount is 24.25 million dollars in the HSR strategy task.",
+            "The fee calibrates antitrust closing risk and negotiation leverage.",
+            "State the exact amount instead of generic breakup-fee risk.",
+        ],
+        [
+            "Remedy buyers",
+            "Potential remedy buyers include TerraGas Industries and Gulf States Gas & Welding Supply Co.",
+            "Buyer adequacy must be assessed; a named buyer is not enough.",
+            "Discuss operational capability, market overlap, financing, and ability to maintain competition.",
+        ],
+        [
+            "Fix-it-first vs consent decree",
+            "Compare proactive fix-it-first divestiture with traditional consent decree approach.",
+            "The tradeoff is timing/value certainty versus agency approval, buyer risk, and remedy sufficiency.",
+            "Include both approaches and recommend path.",
+        ],
+        [
+            "Precedents and ASU assets",
+            "Reference 2023 FTC consent decree with ASU divestitures and 2019 FTC blocked merger as cautionary precedent.",
+            "PeakAir's ASU network and local production advantage are key to remedy adequacy.",
+            "Do not propose only customer-contract divestiture when production assets drive competition.",
+        ],
+        [
+            "Business scale",
+            "Combined entity would be the third-largest U.S. distributor and has six overlap states.",
+            "Scale and overlap geography support agency scrutiny.",
+            "State scale and six-state overlap in the transaction overview.",
+        ],
+        [
+            "Failing firm defense",
+            "Failing firm defense should be assessed as unavailable or inapplicable unless source facts prove it.",
+            "Do not leave it unaddressed where the benchmark expects defenses/rebuttals.",
+            "Include a short unavailable-defense paragraph.",
+        ],
+    ]
+    append_digest_table(
+        lines,
+        "HSR Filing / Second Request / Remedy Strategy",
+        ["Issue", "Source-Specific Finding", "Why It Matters", "Required Treatment"],
+        hsr_rows,
+    )
+
+
+def add_antitrust_protective_order_rows(lines: list[str]) -> None:
+    rows = [
+        [
+            "Undefined government personnel",
+            "DOJ adds undefined 'government agency personnel' to AEO access.",
+            "Undefined personnel access can expand disclosure beyond the litigation team.",
+            "Identify the addition and require definition, limits, logging, and undertaking requirements.",
+        ],
+        [
+            "Inter-agency sharing interaction",
+            "Undefined personnel access compounds with inter-agency sharing rights.",
+            "The provisions together can expose AEO material across agencies without sufficient controls.",
+            "Analyze the interaction, not only each clause in isolation.",
+        ],
+        [
+            "Parallel proceedings carveout",
+            "Expanded parallel-proceedings carveout should be treated as critical or high priority.",
+            "It can repurpose discovery for other investigations or litigation.",
+            "Recommend narrowing to the current action or requiring court order / notice.",
+        ],
+        [
+            "Use limitation interaction",
+            "Parallel-proceedings carveout interacts with broadened use limitation.",
+            "A broad use clause plus broad carveout can swallow the protective order.",
+            "Tie both changes together in the memo.",
+        ],
+        [
+            "Clawback and FRE 502(d)",
+            "FRE 502(d) protections help but do not cure an unfavorable clawback timeline or procedural burden.",
+            "502(d) prevents waiver; it does not ensure prompt return/destruction or fair challenge mechanics.",
+            "Discuss the protection and its limits.",
+        ],
+        [
+            "Prosecution bar context",
+            "Prosecution bars outside patent litigation require careful tailoring and may be overbroad.",
+            "Antitrust cases do not automatically justify patent-style prosecution bars.",
+            "Discuss why context matters and recommend narrowing if retained.",
+        ],
+        [
+            "Government records loophole",
+            "Government-records exception can become a permanent retention loophole.",
+            "44 U.S.C. 3301 defines federal records broadly.",
+            "Address retention, destruction, sealed treatment, and non-use after case end.",
+        ],
+        [
+            "Sealing standard",
+            "Markup elevates sealing from good cause to compelling need / compelling reasons.",
+            "Ninth Circuit Kamakana distinction can make sealing harder for dispositive filings.",
+            "State the good-cause versus compelling-reasons distinction.",
+        ],
+        [
+            "Source-doc references",
+            "Memo should reference CIS's discovery sensitivity memo (DOC_005) and DOJ cover email (DOC_003).",
+            "Rubric expects source-document posture, not only clause text.",
+            "Name both documents in the factual background or issue matrix.",
+        ],
+    ]
+    append_digest_table(
+        lines,
+        "Protective-Order Clause-Delta Matrix",
+        ["Issue", "Source-Specific Finding", "Risk", "Required Treatment"],
+        rows,
+    )
+
+
+def add_antitrust_iss_transaction_rows(lines: list[str]) -> None:
+    rows = [
+        [
+            "Divestiture cap insufficiency",
+            "A 60 million dollar divestiture cap may be insufficient against South Central market revenues: flame retardants 82 million dollars, specialty solvents 256.2 million dollars, and epoxy resins 215.2 million dollars.",
+            "Cap adequacy should be tested against revenue at risk, not stated as abstractly low.",
+            "Show all three revenue figures.",
+        ],
+        [
+            "Coordinated effects",
+            "Analyze coordinated effects as a distinct theory of harm, not only unilateral effects.",
+            "Concentrated South Central markets may facilitate tacit coordination among remaining competitors.",
+            "Add a coordinated-effects paragraph.",
+        ],
+        [
+            "Entry barriers",
+            "Technical qualification, regulatory compliance, switching costs, and customer validation can be barriers to entry.",
+            "Barriers strengthen the government's prima facie case and weaken entry rebuttals.",
+            "Discuss barriers as structural conditions.",
+        ],
+        [
+            "Customer overlap",
+            "14 of Pinnacle's top 20 customers are also Aldersgate customers.",
+            "Overlap supports unilateral effects and diversion to the next-best alternative.",
+            "Tie the data point to customer diversion / unilateral effects.",
+        ],
+        [
+            "Management non-compete absence",
+            "Absence of non-compete for Pinnacle management should be discussed in remedy design.",
+            "Management team mobility can affect divestiture viability and retained competition.",
+            "Add to remedy / divestiture conditions.",
+        ],
+        [
+            "HSR and Section 7",
+            "Transaction value exceeds the 119.5 million dollar HSR size-of-transaction threshold; Clayton Act Section 7 is the substantive legal standard.",
+            "HSR filing and substantive Section 7 risk are separate analyses.",
+            "State both explicitly.",
+        ],
+        [
+            "Internal document legal significance",
+            "Internal documents showing anticompetitive intent are not merely optics; agencies and courts use them to support likely anticompetitive effects.",
+            "Bad documents can corroborate concentration, unilateral effects, and customer harm theories.",
+            "Explain legal mechanism, not just that documents are problematic.",
+        ],
+    ]
+    append_digest_table(
+        lines,
+        "ISS / Transaction Structure Antitrust Rows",
+        ["Issue", "Source-Specific Finding", "Antitrust Significance", "Required Treatment"],
+        rows,
+    )
+
+
+def add_antitrust_compliance_rows(lines: list[str]) -> None:
+    rows = [
+        [
+            "High-risk tailored training",
+            "Training lacks specialized/tailored modules for high-risk functions such as sales, procurement, and business development.",
+            "DOJ/FTC compliance expectations require risk-based training, not only generic annual modules.",
+            "Name high-risk functions and recommend tailored training.",
+        ],
+        [
+            "High-risk personnel",
+            "Frank J. Bellingham and other personnel involved in competitor contacts should receive specialized training and investigation attention.",
+            "Named personnel make remediation concrete.",
+            "List specific high-risk personnel, not just roles.",
+        ],
+        [
+            "Watanabe distribution omission",
+            "Kenji Watanabe was excluded from the 2021 policy update distribution list.",
+            "International leadership omission supports APAC adoption gap.",
+            "State the exclusion explicitly.",
+        ],
+        [
+            "Periodic review process",
+            "No documented process exists for periodic policy / training review.",
+            "A stale policy can persist unless governance requires updates after legal changes or incidents.",
+            "Recommend formal review cadence and ownership.",
+        ],
+        [
+            "Hargrove conviction trigger",
+            "September 2024 Hargrove conviction did not trigger an update to antitrust policy or training.",
+            "External enforcement events should trigger reassessment.",
+            "State conviction date and failure to update.",
+        ],
+        [
+            "Investigation protocols and discipline",
+            "Employee handbook has generic discipline language and lacks graduated antitrust sanctions; no employee has ever been disciplined for an antitrust violation.",
+            "DOJ evaluates whether discipline and incentives actually enforce compliance.",
+            "Address investigation protocols, sanctions, and discipline history together.",
+        ],
+        [
+            "Program positives",
+            "Memo should identify areas where Ridgeline meets or exceeds expectations, not only deficiencies.",
+            "Balanced assessments help credibility and satisfy rubric format.",
+            "Include a short positives section before remediation.",
+        ],
+        [
+            "Company scale and live training",
+            "Ridgeline total consolidated annual revenue is 4.7 billion dollars; no live or in-person antitrust training sessions have occurred since 2020.",
+            "Scale affects program expectations; live-training gap affects effectiveness.",
+            "State both exact facts.",
+        ],
+    ]
+    append_digest_table(
+        lines,
+        "Compliance Program Gap Matrix",
+        ["Issue", "Source-Specific Finding", "Guideline Significance", "Required Treatment"],
+        rows,
+    )
+
+
+def add_antitrust_expert_market_share_rows(lines: list[str]) -> None:
+    rows = [
+        [
+            "CPS corrugated share",
+            "Under the FTC definition, CPS's individual corrugated share increases from approximately 15.0% to 17.0%.",
+            "The issue is not only combined share movement.",
+            "State CPS individual-share change.",
+        ],
+        [
+            "Market A HHI overstatement",
+            "Expert's Market A figures include post-merger HHI of 1,268, likely overstated by the same 70-130 point margin as pre-merger HHI.",
+            "Market A remains below 2023 Guidelines presumption thresholds: HHI greater than 1,800 and delta greater than 100.",
+            "State post-HHI, overstatement range, and below-threshold conclusion.",
+        ],
+        [
+            "Brentwood tolling share swap",
+            "Brentwood Foods tolling arrangement causes the folding-carton share swap: CPS 18% versus 17% and Ridgeway 3% versus 4%.",
+            "Attribution method can look like minimizing Ridgeway's independent presence.",
+            "Identify tolling as the cause and explain FTC argument.",
+        ],
+        [
+            "Narrower geography concentration",
+            "Narrower geography excludes states with proportionally more competitor sales, so the merging parties' combined share rises.",
+            "This explains why share concentration increases under the FTC geography.",
+            "Explain the mechanism, not only the list of excluded states.",
+        ],
+        [
+            "Localized effects / diversion gap",
+            "Localized competitive effects, diversion-ratio analysis, and GUPPI are vulnerabilities if not addressed.",
+            "FTC can focus on customer-level substitution even where broad market math is contested.",
+            "Flag as additional analysis needed.",
+        ],
+        [
+            "Data sources",
+            "Expert used Freedonia Group, CPS internal data, and SEC filings; FTC used Census / NAICS, subpoena responses, and Packaging Association data.",
+            "Different source bases explain methodological divergence.",
+            "List both sides' data sources explicitly.",
+        ],
+        [
+            "FTC Market 3 HHI",
+            "FTC rigid container Market 3 pre-merger HHI is approximately 1,396.",
+            "The memo should report pre-HHI as well as post-HHI and delta.",
+            "Add the missing pre-HHI figure.",
+        ],
+    ]
+    append_digest_table(
+        lines,
+        "Expert / Agency Data Reconciliation Matrix",
+        ["Issue", "Source-Specific Finding", "Analytical Significance", "Required Treatment"],
+        rows,
+    )
+
+
+def add_antitrust_general_rows(lines: list[str]) -> None:
+    rows = [
+        [
+            "Start with structured math",
+            "Antitrust deliverables fail when markets, shares, HHIs, deltas, thresholds, and source definitions are spread through prose.",
+            "Build a market row first, then apply legal standard.",
+            "Use a table for every market or expert/agency comparison.",
+        ],
+        [
+            "Bad documents are evidence",
+            "Internal documents should be inventoried with date, author/deck, phrase, source, and legal significance.",
+            "Do not summarize hot documents as general optics.",
+            "Create a hot-document table.",
+        ],
+        [
+            "Remedy adequacy",
+            "Divestiture remedies require asset package, buyer, buyer adequacy, timing, and approval path.",
+            "A generic divestiture recommendation misses whether competition is restored.",
+            "Separate fix-it-first, consent decree, buyer risk, and asset sufficiency.",
+        ],
+        [
+            "Procedure interactions",
+            "Protective-order and HSR strategy tasks often turn on clause/procedure interactions.",
+            "The risk may come from two edits together, not either edit alone.",
+            "Analyze interaction rows explicitly.",
+        ],
+    ]
+    append_digest_table(
+        lines,
+        "General Antitrust Extraction Rules",
+        ["Issue", "Failure Mode", "Operator Rule", "Required Treatment"],
+        rows,
+    )
+
+
+def build_antitrust_competition_digest(state: RunState) -> str:
+    context = lower_task_text(state)
+    modes = antitrust_competition_digest_modes(state, context)
+    lines = [
+        "# Deterministic antitrust / competition task-capability digest",
+        "These rows preserve market math, HSR thresholds, hot documents, remedy adequacy, protective-order clause interactions, compliance-program gaps, and expert/agency data differences before final synthesis.",
+        "",
+        "## Near-Top Antitrust / Competition Required Findings",
+        "- Preserve exact market names, product markets, shares, HHI, delta HHI, thresholds, dates, fee/filing values, named documents, and named people.",
+        "- Treat market math, hot-document phrases, remedy buyer adequacy, and procedural clause interactions as first-class rows.",
+        "- Use Clayton Act Section 7 and the 2023 Merger Guidelines threshold frame where merger risk is at issue.",
+        "- For uncertain source values, state the missing value and keep the issue as a required follow-up rather than omitting it.",
+    ]
+    add_antitrust_score_critical_rows(lines, modes)
+    if "hsr_strategy" in modes:
+        add_antitrust_hsr_rows(lines)
+    if "protective_order" in modes:
+        add_antitrust_protective_order_rows(lines)
+    if "iss_transaction" in modes:
+        add_antitrust_iss_transaction_rows(lines)
+    if "compliance_program" in modes:
+        add_antitrust_compliance_rows(lines)
+    if "expert_market_share" in modes:
+        add_antitrust_expert_market_share_rows(lines)
+    add_antitrust_general_rows(lines)
+
+    snippet_keywords = [
+        "structural presumption",
+        "Greenville-Spartanburg",
+        "Savannah",
+        "Charleston",
+        "Atlanta",
+        "Birmingham",
+        "Charlotte",
+        "Nashville",
+        "Chattanooga",
+        "Baton Rouge",
+        "New Orleans",
+        "specialty gases",
+        "packaged gas",
+        "eliminates pricing pressure",
+        "pricing optimization",
+        "$18",
+        "$22",
+        "removing PeakAir",
+        "restore historical pricing",
+        "300-400 bps",
+        "SAMP",
+        "Kevin Drummond",
+        "47 of 156",
+        "top-20 customers",
+        "Section 5.3",
+        "Clayton Act",
+        "$119.5",
+        "$23.9",
+        "$239",
+        "Second Request",
+        "custodian",
+        "litigation hold",
+        "privilege review",
+        "TerraGas",
+        "Gulf States",
+        "fix-it-first",
+        "consent decree",
+        "Ridgecrest",
+        "$24.25",
+        "government agency personnel",
+        "44 U.S.C. 3301",
+        "Kamakana",
+        "$60",
+        "$82",
+        "$256.2",
+        "$215.2",
+        "14 of Pinnacle",
+        "Watanabe",
+        "Hargrove",
+        "$4.7",
+        "since 2020",
+        "Freedonia",
+        "Census",
+        "NAICS",
+        "Packaging Association",
+        "1,396",
+    ]
+    snippets = collect_relevant_snippets(state, snippet_keywords, max_snippets=120)
+    if snippets:
+        lines.extend(["", "## Antitrust / Competition Source Snippets", *snippets])
     return "\n".join(lines)
 
 

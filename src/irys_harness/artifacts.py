@@ -53,6 +53,12 @@ def render_docx(path: Path, *, title: str, deliverable: str, packet: dict[str, A
         for block in str(draft_answer).split("\n\n"):
             if block.strip():
                 doc.add_paragraph(block.strip())
+    appendix = packet.get("artifact_appendix")
+    if appendix:
+        doc.add_heading("Structured Findings Appendix", level=2)
+        for block in str(appendix).split("\n\n"):
+            if block.strip():
+                doc.add_paragraph(block.strip())
     doc.add_heading("Candidate Evidence Packet", level=2)
     for item in packet.get("verified_evidence", []):
         claim = item.get("claim", "")

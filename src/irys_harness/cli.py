@@ -364,15 +364,13 @@ def cmd_score_harvey(args: argparse.Namespace) -> int:
 def cmd_harvey_smoke(args: argparse.Namespace) -> int:
     load_dotenv_if_present()
     config = load_config(args.config)
-    task_ids = list(args.task_id or [])
-    if args.task_file:
-        task_ids.extend(read_task_file(args.task_file))
-    if args.split:
-        adapter = HarveyLabAdapter(root=args.harvey_root or default_harvey_root())
-        refs = adapter.list_tasks(args.split)
-        limit = args.limit if args.limit is not None else len(refs)
-        task_ids.extend(ref.task_id for ref in refs[:limit])
-    task_ids = dedupe(task_ids)
+    task_ids = resolve_harvey_smoke_task_ids(
+        task_ids=list(args.task_id or []),
+        task_file=args.task_file,
+        split=args.split,
+        limit=args.limit,
+        harvey_root=args.harvey_root,
+    )
     results = run_harvey_batch(
         task_ids=task_ids,
         config=config,
@@ -399,6 +397,27 @@ def cmd_harvey_smoke(args: argparse.Namespace) -> int:
     report["tracking_paths"] = tracking_paths
     print_json(report)
     return 0 if all(item.error is None for item in results) else 1
+
+
+def resolve_harvey_smoke_task_ids(
+    *,
+    task_ids: list[str],
+    task_file: str | Path | None,
+    split: str | None,
+    limit: int | None,
+    harvey_root: str | Path | None,
+) -> list[str]:
+    explicit_ids = list(task_ids or [])
+    if task_file:
+        explicit_ids.extend(read_task_file(task_file))
+    if explicit_ids:
+        return dedupe(explicit_ids)
+    if split:
+        adapter = HarveyLabAdapter(root=harvey_root or default_harvey_root())
+        refs = adapter.list_tasks(split)
+        selected_limit = limit if limit is not None else len(refs)
+        return dedupe([ref.task_id for ref in refs[:selected_limit]])
+    return []
 
 
 def cmd_agent_bench_smoke(args: argparse.Namespace) -> int:
