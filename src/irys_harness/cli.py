@@ -129,7 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent_bench.add_argument("--results-dir", default="scratch/agent_bench_irys")
     agent_bench.add_argument("--trace-dir", default=None)
     agent_bench.add_argument("--config", default=None)
-    agent_bench.add_argument("--backend-mode", choices=["direct", "three-tier"], default="three-tier")
+    agent_bench.add_argument("--backend-mode", choices=["adaptive", "direct", "three-tier"], default="three-tier")
     agent_bench.add_argument("--resume", action="store_true")
     agent_bench.add_argument("--dry-run", action="store_true")
     agent_bench.set_defaults(func=cmd_agent_bench_smoke)

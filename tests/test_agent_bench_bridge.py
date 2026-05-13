@@ -7,8 +7,12 @@ from pathlib import Path
 from irys_harness.agent_bench_bridge import (
     IrysAgentBenchBackend,
     build_citation_judge_context,
+    evidence_prompt_for_benchmark,
+    extract_answer_candidate,
+    extract_function_names,
     parse_benchmark_specs,
     render_benchmark_answer,
+    score_repoqa_symbol_or_body,
     stable_task_hash,
 )
 from irys_harness.config import ModelConfig, ModelTier, parse_config
@@ -103,6 +107,55 @@ class AgentBenchBridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(rendered, "Sir William Pooley died first. Erich Haenisch died later. [doc2] [doc1]")
 
+    def test_l_citeeval_renderer_replaces_bad_synthesis_citations_from_evidence(self) -> None:
+        context = "[doc17] Puka Punchu is in Peru.\n\n[doc56] Yaritani is in Peru."
+        rendered = render_benchmark_answer(
+            benchmark="l_citeeval",
+            answer="Yes. [doc16] [doc32]",
+            context=context,
+            evidence_packet="ANSWER_CANDIDATE: Yes.\nEVIDENCE:\n* [doc17] Puka Punchu is in Peru.\n* [doc56] Yaritani is in Peru.",
+        )
+        self.assertEqual(rendered, "Yes. [doc17] [doc56]")
+
+    def test_repoqa_renderer_prefers_exact_answer_candidate_symbol(self) -> None:
+        rendered = render_benchmark_answer(
+            benchmark="repoqa",
+            answer="`dequantize`",
+            context="",
+            evidence_packet="ANSWER_CANDIDATE: `get_dequantize_func`\nEVIDENCE: signature supports it",
+        )
+        self.assertEqual(rendered, "get_dequantize_func")
+
+    def test_repoqa_scorer_accepts_function_name_when_expected_is_body(self) -> None:
+        expected = "    def _dequantize(self, param):\n        return param\n"
+        score, detail = score_repoqa_symbol_or_body("_dequantize", expected)
+        self.assertEqual(score, 1.0)
+        self.assertEqual(detail, "name_match:_dequantize")
+
+    def test_extract_function_names_from_expected_body(self) -> None:
+        names = extract_function_names("def first():\n    pass\n\n    async def second(self):\n        pass")
+        self.assertEqual(names, ["first", "second"])
+
+    def test_mrcr_renderer_uses_candidate_when_synthesis_returns_insufficient(self) -> None:
+        rendered = render_benchmark_answer(
+            benchmark="mrcr",
+            answer="INSUFFICIENT",
+            context="",
+            evidence_packet="ANSWER_CANDIDATE: abcExact prior answer\nFORMAT_REQUIREMENT: exact response",
+        )
+        self.assertEqual(rendered, "abcExact prior answer")
+
+    def test_extract_answer_candidate_stops_before_structured_sections(self) -> None:
+        candidate = extract_answer_candidate(
+            "ANSWER_CANDIDATE: target answer\nFORMAT_REQUIREMENT: exact\nEVIDENCE: source"
+        )
+        self.assertEqual(candidate, "target answer")
+
+    def test_mrcr_worker_prompt_demands_exact_candidate(self) -> None:
+        prompt = evidence_prompt_for_benchmark("mrcr", "Prepend X to the 2nd poem.", "transcript")
+        self.assertIn("exact full benchmark response", prompt)
+        self.assertIn("copy the requested response", prompt)
+
     def test_citation_judge_context_selects_cited_doc_not_prefix_window(self) -> None:
         context = "[doc1] irrelevant\n\n[doc49] William Pooley died in 1629."
         packet = build_citation_judge_context(
@@ -153,6 +206,43 @@ class AgentBenchBridgeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('"cheap_worker"', trace_text)
             self.assertIn('"mid_orchestrator"', trace_text)
             self.assertIn('"strong_synthesizer"', trace_text)
+
+    async def test_adaptive_backend_uses_full_context_direct_route_when_better(self) -> None:
+        config = bridge_test_config()
+        router = FakeRouter(config)
+        with tempfile.TemporaryDirectory() as temp:
+            backend = IrysAgentBenchBackend(
+                config=config,
+                benchmark="mrcr",
+                split="2needle",
+                mode="adaptive",
+                trace_dir=temp,
+                router=router,  # type: ignore[arg-type]
+            )
+            result = await backend.run(query="Repeat the second answer.", context="large transcript")
+            self.assertIn("ANSWER_CANDIDATE", result.answer)
+            self.assertEqual(router.calls, ["extraction"])
+            trace_text = next(Path(temp).rglob("*.json")).read_text(encoding="utf-8")
+            self.assertIn('"selected_pipeline": "direct"', trace_text)
+            self.assertIn('"route_decision"', trace_text)
+
+    async def test_adaptive_backend_keeps_three_tier_route_for_structured_extraction(self) -> None:
+        config = bridge_test_config()
+        router = FakeRouter(config)
+        with tempfile.TemporaryDirectory() as temp:
+            backend = IrysAgentBenchBackend(
+                config=config,
+                benchmark="cuad",
+                split="train",
+                mode="adaptive",
+                trace_dir=temp,
+                router=router,  # type: ignore[arg-type]
+            )
+            result = await backend.run(query="Extract the clause.", context="contract text")
+            self.assertEqual(result.answer, "B")
+            self.assertEqual(router.calls, ["extraction", "critic", "synthesis"])
+            trace_text = next(Path(temp).rglob("*.json")).read_text(encoding="utf-8")
+            self.assertIn('"selected_pipeline": "three-tier"', trace_text)
 
 
 if __name__ == "__main__":

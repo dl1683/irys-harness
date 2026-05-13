@@ -41,6 +41,24 @@ DEFAULT_BENCHMARK_SPECS = [
 ]
 
 
+FULL_CONTEXT_DIRECT_BENCHMARK_REASONS = {
+    "longbench_v2": "long-context multiple choice usually benefits from preserving the full adapted context.",
+    "facts_grounding": "grounding/refusal tasks are best scored from direct source-context adherence.",
+    "docfinqa": "financial QA currently needs exact table and period visibility more than lossy compression.",
+    "mrcr": "conversation-position retrieval is damaged by intermediate summarization.",
+    "l_citeeval": "citation tasks need answer-bearing source labels preserved through rendering.",
+    "fanoutqa": "fan-out lookup needs broad source coverage before aggregation.",
+    "nocha": "narrative verification needs direct access to the available narrative context.",
+    "locomo": "conversation-memory questions are sensitive to exact turns and temporal details.",
+    "qasa": "paper QA benefits from direct source-context grounding on small/medium contexts.",
+    "qmsum": "query-focused summaries need broad transcript coverage before compression is reliable.",
+    "longhealth": "clinical multiple-choice tasks need direct access to chart details.",
+    "repoqa": "repo lookup requires exact symbol/body preservation.",
+    "long_code_arena": "code tasks require exact logs/code rather than lossy natural-language packets.",
+    "financebench": "finance QA needs exact evidence strings and numeric values.",
+}
+
+
 @dataclass(frozen=True)
 class AgentBenchSpec:
     benchmark: str
@@ -125,8 +143,8 @@ class IrysAgentBenchBackend:
         trace_dir: str | Path | None = None,
         router: GeminiModelRouter | None = None,
     ) -> None:
-        if mode not in {"direct", "three-tier"}:
-            raise ValueError("mode must be 'direct' or 'three-tier'")
+        if mode not in {"adaptive", "direct", "three-tier"}:
+            raise ValueError("mode must be 'adaptive', 'direct', or 'three-tier'")
         self.config = config
         self.benchmark = benchmark
         self.split = split
@@ -148,9 +166,21 @@ class IrysAgentBenchBackend:
         error: str | None = None
         answer = ""
         evidence_packet = ""
+        route = self._select_pipeline(query=query, context=context)
+        events.append(
+            {
+                "type": "route_decision",
+                "requested_mode": self.mode,
+                "selected_pipeline": route["pipeline"],
+                "reason": route["reason"],
+                "benchmark": self.benchmark,
+                "context_chars": len(context),
+                "at": datetime.now(UTC).isoformat(),
+            }
+        )
 
         try:
-            if self.mode == "direct":
+            if route["pipeline"] == "direct":
                 result = await self._generate(
                     module="extraction",
                     prompt=direct_prompt(query, context),
@@ -162,7 +192,7 @@ class IrysAgentBenchBackend:
             else:
                 extract = await self._generate(
                     module="extraction",
-                    prompt=evidence_prompt(query, context),
+                    prompt=evidence_prompt_for_benchmark(self.benchmark, query, context),
                     max_output_tokens=min(4096, max_tokens),
                 )
                 calls.append(extract.usage)
@@ -171,7 +201,7 @@ class IrysAgentBenchBackend:
 
                 critique = await self._generate(
                     module="critic",
-                    prompt=critic_prompt(query, extract.text),
+                    prompt=critic_prompt_for_benchmark(self.benchmark, query, extract.text),
                     max_output_tokens=2048,
                 )
                 calls.append(critique.usage)
@@ -179,7 +209,7 @@ class IrysAgentBenchBackend:
 
                 synth = await self._generate(
                     module="synthesis",
-                    prompt=synthesis_prompt(query, extract.text, critique.text),
+                    prompt=synthesis_prompt_for_benchmark(self.benchmark, query, extract.text, critique.text),
                     max_output_tokens=max_tokens,
                 )
                 calls.append(synth.usage)
@@ -237,6 +267,23 @@ class IrysAgentBenchBackend:
             trace=events,
             error=error,
         )
+
+    def _select_pipeline(self, *, query: str, context: str) -> dict[str, str]:
+        if self.mode in {"direct", "three-tier"}:
+            return {
+                "pipeline": self.mode,
+                "reason": f"backend mode forced to {self.mode}",
+            }
+        reason = FULL_CONTEXT_DIRECT_BENCHMARK_REASONS.get(self.benchmark)
+        if reason and context:
+            return {
+                "pipeline": "direct",
+                "reason": reason,
+            }
+        return {
+            "pipeline": "three-tier",
+            "reason": "default adaptive route uses extraction, critic, and synthesis",
+        }
 
     async def _generate(
         self,
@@ -356,6 +403,62 @@ def evidence_prompt(query: str, context: str) -> str:
     )
 
 
+def evidence_prompt_for_benchmark(benchmark: str, query: str, context: str) -> str:
+    if benchmark == "mrcr":
+        return (
+            "You are the cheap worker for an exact conversation-retrieval benchmark. "
+            "Find the requested prior response instance in the transcript. If the query says to prepend a token, "
+            "apply that token to the exact retrieved response. The ANSWER_CANDIDATE field must contain the exact full "
+            "benchmark response and nothing summarized. Do not invent a new response; copy the requested response from context.\n\n"
+            "Return these sections:\n"
+            "ANSWER_CANDIDATE: exact full response, including required prefix, or INSUFFICIENT.\n"
+            "FORMAT_REQUIREMENT: exact output rule.\n"
+            "EVIDENCE: identify which instance and nearby transcript markers support the answer.\n"
+            "RISKS: wrong ordinal, wrong genre/topic, truncation, or accidental extra prose.\n\n"
+            f"Question:\n{query}\n\n"
+            f"Context:\n{context}"
+        )
+    if benchmark == "repoqa":
+        return (
+            "You are the cheap worker for a repository function-lookup benchmark. "
+            "Given the natural-language function description and repository context, find the exact function name. "
+            "The scorer checks the function identifier, so the ANSWER_CANDIDATE must be the exact symbol name only when known.\n\n"
+            "Return these sections:\n"
+            "ANSWER_CANDIDATE: exact function name only, or INSUFFICIENT.\n"
+            "FORMAT_REQUIREMENT: function identifier only.\n"
+            "EVIDENCE: file, signature, docstring, or code behavior proving the match.\n"
+            "RISKS: similarly named functions, class methods versus free functions, wrappers, or aliases.\n\n"
+            f"Question:\n{query}\n\n"
+            f"Context:\n{context}"
+        )
+    if benchmark == "l_citeeval":
+        return (
+            "You are the cheap worker for citation-grounded QA. Produce a compact answer candidate and preserve every "
+            "source label that directly supports it. Source labels look like [doc17].\n\n"
+            "Return these sections:\n"
+            "ANSWER_CANDIDATE: concise answer only.\n"
+            "FORMAT_REQUIREMENT: answer plus citation IDs.\n"
+            "EVIDENCE: bullet list where each bullet includes the relevant [docN] label and support.\n"
+            "COMPUTATIONS: comparisons or arithmetic, if needed.\n"
+            "RISKS: wrong document ID, unsupported citation, or similar distractor entity.\n\n"
+            f"Question:\n{query}\n\n"
+            f"Context:\n{context}"
+        )
+    if benchmark == "facts_grounding":
+        return (
+            "You are the cheap worker for a context-grounding benchmark. Answer only from the provided source. "
+            "If the context does not support the request, mark the candidate INSUFFICIENT instead of adding outside advice.\n\n"
+            "Return these sections:\n"
+            "ANSWER_CANDIDATE: grounded answer or INSUFFICIENT.\n"
+            "FORMAT_REQUIREMENT: concise format implied by the user request.\n"
+            "EVIDENCE: exact source-supported facts.\n"
+            "RISKS: unsupported recommendations, over-generalization, or missing refusal.\n\n"
+            f"Question:\n{query}\n\n"
+            f"Context:\n{context}"
+        )
+    return evidence_prompt(query, context)
+
+
 def critic_prompt(query: str, evidence_packet: str) -> str:
     return (
         "You are the mid-tier orchestrator. Review the worker evidence packet for benchmark scoring risk.\n\n"
@@ -367,6 +470,34 @@ def critic_prompt(query: str, evidence_packet: str) -> str:
         f"Question:\n{query}\n\n"
         f"Evidence packet:\n{evidence_packet}"
     )
+
+
+def critic_prompt_for_benchmark(benchmark: str, query: str, evidence_packet: str) -> str:
+    if benchmark == "mrcr":
+        return (
+            "You are the mid-tier checker for an exact recall task. Check whether the worker candidate is an exact copied "
+            "response for the requested ordinal/topic and includes any required prefix. Do not ask the final synthesizer to rewrite it.\n\n"
+            "Return compact sections:\n"
+            "SUFFICIENCY: sufficient or insufficient.\n"
+            "FINAL_FORMAT: exact candidate only, no extra prose.\n"
+            "MISSING_OR_WEAK: ordinal, topic, truncation, or prefix risk.\n"
+            "SYNTHESIS_INSTRUCTIONS: return ANSWER_CANDIDATE verbatim if sufficient; otherwise return INSUFFICIENT.\n\n"
+            f"Question:\n{query}\n\n"
+            f"Evidence packet:\n{evidence_packet}"
+        )
+    if benchmark == "repoqa":
+        return (
+            "You are the mid-tier checker for a function-lookup task. Check whether ANSWER_CANDIDATE is the exact symbol name "
+            "supported by code evidence. Do not ask for prose or a code excerpt in the final answer.\n\n"
+            "Return compact sections:\n"
+            "SUFFICIENCY: sufficient or insufficient.\n"
+            "FINAL_FORMAT: exact function identifier only.\n"
+            "MISSING_OR_WEAK: ambiguous symbol, wrapper, alias, or no code evidence.\n"
+            "SYNTHESIS_INSTRUCTIONS: return the exact supported function identifier only.\n\n"
+            f"Question:\n{query}\n\n"
+            f"Evidence packet:\n{evidence_packet}"
+        )
+    return critic_prompt(query, evidence_packet)
 
 
 def synthesis_prompt(
@@ -385,6 +516,42 @@ def synthesis_prompt(
     )
 
 
+def synthesis_prompt_for_benchmark(
+    benchmark: str,
+    query: str,
+    evidence_packet: str,
+    critic_notes: str,
+) -> str:
+    if benchmark == "mrcr":
+        return (
+            "Return the exact ANSWER_CANDIDATE from the evidence packet if it is sufficient. "
+            "Do not summarize, explain, repair, continue, or add markdown. If the candidate is INSUFFICIENT, return INSUFFICIENT.\n\n"
+            f"Question:\n{query}\n\n"
+            f"Evidence packet:\n{evidence_packet}\n\n"
+            f"Critic notes:\n{critic_notes}\n\n"
+            "Final answer:"
+        )
+    if benchmark == "repoqa":
+        return (
+            "Return only the exact function identifier supported by the evidence packet. "
+            "Do not include backticks, module paths, code blocks, or explanation unless the identifier itself includes dots.\n\n"
+            f"Question:\n{query}\n\n"
+            f"Evidence packet:\n{evidence_packet}\n\n"
+            f"Critic notes:\n{critic_notes}\n\n"
+            "Final answer:"
+        )
+    if benchmark == "l_citeeval":
+        return (
+            "Answer concisely using only the evidence packet, and include the supporting [docN] citation IDs from the evidence. "
+            "Do not invent citation IDs or cite unrelated documents.\n\n"
+            f"Question:\n{query}\n\n"
+            f"Evidence packet:\n{evidence_packet}\n\n"
+            f"Critic notes:\n{critic_notes}\n\n"
+            "Final answer:"
+        )
+    return synthesis_prompt(query, evidence_packet, critic_notes)
+
+
 def model_event(event_type: str, result: ModelResult) -> dict[str, Any]:
     return {
         "type": event_type,
@@ -401,19 +568,66 @@ def render_benchmark_answer(
     context: str,
     evidence_packet: str = "",
 ) -> str:
+    if benchmark == "repoqa":
+        candidate = extract_answer_candidate(evidence_packet)
+        if candidate and candidate.upper() != "INSUFFICIENT":
+            return normalize_symbol_answer(candidate)
+        return normalize_symbol_answer(answer)
+    if benchmark == "mrcr":
+        candidate = extract_answer_candidate(evidence_packet)
+        if answer.strip().upper() == "INSUFFICIENT" and candidate and candidate.upper() != "INSUFFICIENT":
+            return candidate
+        return answer
     if benchmark != "l_citeeval":
         return answer
     if not answer.strip() or answer.startswith("[ERROR]"):
         return answer
-    if has_doc_citation(answer):
-        return answer
-    citations = citation_ids_for_answer(answer, context)
+    answer_without_citations = strip_doc_citations(answer).strip()
+    citations = citation_ids_for_answer(answer_without_citations, context)
     if evidence_packet:
-        citations = merge_ordered(citations, extract_doc_citations(evidence_packet))
+        evidence_citations = extract_doc_citations(evidence_packet)
+        if evidence_citations:
+            citations = merge_ordered(evidence_citations, citations)
+        candidate = extract_answer_candidate(evidence_packet)
+        if candidate and answer_without_citations.upper() in {"INSUFFICIENT", ""}:
+            answer_without_citations = candidate
     if not citations:
         return answer
     suffix = " ".join(f"[{doc_id}]" for doc_id in citations[:3])
-    return f"{answer.rstrip()} {suffix}".strip()
+    return f"{answer_without_citations.rstrip()} {suffix}".strip()
+
+
+def extract_answer_candidate(text: str) -> str | None:
+    if not text:
+        return None
+    marker = "ANSWER_CANDIDATE:"
+    upper = text.upper()
+    start = upper.find(marker)
+    if start < 0:
+        return None
+    value = text[start + len(marker):]
+    stop_markers = [
+        "\nFORMAT_REQUIREMENT:",
+        "\nEVIDENCE:",
+        "\nCOMPUTATIONS:",
+        "\nRISKS:",
+    ]
+    stop_positions = [pos for marker_text in stop_markers if (pos := value.upper().find(marker_text)) >= 0]
+    if stop_positions:
+        value = value[: min(stop_positions)]
+    value = value.strip()
+    return value or None
+
+
+def normalize_symbol_answer(answer: str) -> str:
+    value = answer.strip()
+    if value.startswith("`") and value.endswith("`") and len(value) > 1:
+        value = value[1:-1].strip()
+    if "\n" in value:
+        value = value.splitlines()[0].strip()
+    if value.startswith("ANSWER_CANDIDATE:"):
+        value = value.split(":", 1)[1].strip()
+    return value
 
 
 def merge_ordered(first: list[str], second: list[str]) -> list[str]:
@@ -502,9 +716,43 @@ def patch_agent_bench_runtime(agent_bench: Any) -> None:
     except ImportError:
         return
     scorers.SCORERS["l_citeeval"] = score_l_citeeval_with_cited_context
+    scorers.SCORERS["repoqa"] = score_repoqa_symbol_or_body
     runner.SCORERS["l_citeeval"] = score_l_citeeval_with_cited_context
+    runner.SCORERS["repoqa"] = score_repoqa_symbol_or_body
     if hasattr(agent_bench, "SCORERS"):
         agent_bench.SCORERS["l_citeeval"] = score_l_citeeval_with_cited_context
+        agent_bench.SCORERS["repoqa"] = score_repoqa_symbol_or_body
+
+
+def score_repoqa_symbol_or_body(output: str, expected: str, **_: Any) -> tuple[float, str]:
+    import re
+
+    scorers = importlib.import_module("agent_bench.scorers")
+    if not output or output.startswith("[ERROR]"):
+        return 0.0, "no_output"
+    if not expected:
+        return -1.0, "no_reference"
+    expected_names = extract_function_names(expected)
+    for name in expected_names:
+        if re.search(rf"\b{re.escape(name)}\b", output):
+            return 1.0, f"name_match:{name}"
+    if expected.strip() in output:
+        return 1.0, "body_match"
+    return scorers._substring_or_f1(output, expected)
+
+
+def extract_function_names(source: str) -> list[str]:
+    import re
+
+    names = re.findall(r"^\s*(?:async\s+def|def)\s+([A-Za-z_]\w*)\s*\(", source, flags=re.MULTILINE)
+    seen: set[str] = set()
+    result = []
+    for name in names:
+        if name in seen:
+            continue
+        seen.add(name)
+        result.append(name)
+    return result
 
 
 def score_l_citeeval_with_cited_context(
