@@ -2160,6 +2160,84 @@ class HarveyQueryTests(unittest.TestCase):
         self.assertIn("$500K life insurance or $347,200 IRA", estate_digest)
         self.assertIn("Natalie 40%, Daniel 35%, and Foundation 15%", estate_digest)
 
+    def test_healthcare_digest_routes_compliance_and_cta_tasks(self) -> None:
+        compliance_task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="healthcare-life-sciences/analyze-compliance-program-gaps",
+            question="Review HIPAA compliance program materials and prepare a gap analysis memo.",
+            answer_schema={"deliverables": ["compliance-gap-memorandum.docx"]},
+            metadata={"practice_area": "healthcare-life-sciences"},
+        )
+        compliance_state = RunState(task=compliance_task, config=load_config(), documents=[])
+        compliance_contract = build_deliverable_contract(compliance_state)
+        compliance_digest = build_task_family_digest(compliance_state)
+        self.assertEqual(compliance_contract["task_family"], "healthcare_life_sciences_review")
+        self.assertIn(
+            "Near-top healthcare / life-sciences required findings",
+            compliance_contract["deliverables"][0]["required_sections"],
+        )
+        self.assertIn("About 9 of 47 vendors", compliance_digest)
+        self.assertIn("45 CFR 164.406", compliance_digest)
+        self.assertIn("312 employees", compliance_digest)
+        self.assertIn("164.522(a)(1)(vi)", compliance_digest)
+
+        cta_task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="healthcare-life-sciences/analyze-counterparty-markup-of-clinical-trial-agreement",
+            question="Analyze counterparty markup of clinical trial agreement.",
+            answer_schema={"deliverables": ["redline-analysis-memo.docx"]},
+            metadata={"practice_area": "healthcare-life-sciences"},
+        )
+        cta_digest = build_task_family_digest(RunState(task=cta_task, config=load_config(), documents=[]))
+        self.assertIn("Lakeshore nonprofit status", cta_digest)
+        self.assertIn("7 years to 3 years", cta_digest)
+        self.assertIn("12-month wind-down payment", cta_digest)
+        self.assertIn("21 CFR 312.62(c)", cta_digest)
+
+    def test_healthcare_digest_routes_merger_protocol_and_certificate_tasks(self) -> None:
+        merger_task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="healthcare-life-sciences/analyze-counterparty-markup-of-merger-agreement",
+            question="Analyze counterparty markup of healthcare merger agreement.",
+            answer_schema={"deliverables": ["redline-analysis-memorandum.docx"]},
+            metadata={"practice_area": "healthcare-life-sciences"},
+        )
+        merger_digest = build_task_family_digest(RunState(task=merger_task, config=load_config(), documents=[]))
+        self.assertIn("$156 floor, $201 cap", merger_digest)
+        self.assertIn("$72.00 to $78.00", merger_digest)
+        self.assertIn("will to should", merger_digest)
+
+        protocol_task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="healthcare-life-sciences/compare-clinical-trial-protocol-against-fda-regulatory-requirements",
+            question="Compare clinical trial protocol against FDA regulatory requirements.",
+            answer_schema={"deliverables": ["gap-analysis-memorandum.docx"]},
+            metadata={"practice_area": "healthcare-life-sciences"},
+        )
+        protocol_digest = build_task_family_digest(RunState(task=protocol_task, config=load_config(), documents=[]))
+        self.assertIn("21 CFR 50.25(a)(5)", protocol_digest)
+        self.assertIn("two independent hepatopathologists", protocol_digest)
+        self.assertIn("variceal bleeding", protocol_digest)
+
+        certificate_task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="healthcare-life-sciences/compare-closing-certificate-against-agreement-covenants",
+            question="Compare closing certificate against merger agreement covenants.",
+            answer_schema={"deliverables": ["compliance-gap-analysis-memo.docx"]},
+            metadata={"practice_area": "healthcare-life-sciences"},
+        )
+        certificate_digest = build_task_family_digest(RunState(task=certificate_task, config=load_config(), documents=[]))
+        self.assertIn("$1,475,000 exceeds the $1,250,000", certificate_digest)
+        self.assertIn("Section 4(f) reports $1,800,000", certificate_digest)
+        self.assertIn("Dr. Helen Vargas's salary increase from $285,000 to $310,000", certificate_digest)
+        self.assertIn("$24,380,000 on March 31, 2025", certificate_digest)
+        self.assertIn("Section 4(m) reports only the April 25, 2025 cash balance", certificate_digest)
+        self.assertIn("338(h)(10)", certificate_digest)
+        self.assertIn("$2,300,000, above the $750,000", certificate_digest)
+        self.assertIn("Explicitly call the Apex CRO MSA a Material Contract", certificate_digest)
+        self.assertIn("11-day delay", certificate_digest)
+        self.assertIn("Section 6.2(l) for unauthorized hiring", certificate_digest)
+
     def test_corporate_ma_digest_preserves_change_of_control_contract_rows(self) -> None:
         task = BenchmarkTask(
             benchmark="harvey_lab_sample",

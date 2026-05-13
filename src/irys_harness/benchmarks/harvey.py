@@ -686,6 +686,30 @@ def has_trusts_estates_terms(text: str) -> bool:
     )
 
 
+def has_healthcare_life_sciences_terms(text: str) -> bool:
+    lower = text.lower()
+    if "healthcare-life-sciences" in lower:
+        return True
+    return any(
+        term in lower
+        for term in [
+            "hipaa",
+            "clinical trial agreement",
+            "clinical-trial-agreement",
+            "clinical trial protocol",
+            "fda regulatory",
+            "pre-ind",
+            "closing certificate against agreement covenants",
+            "healthcare merger",
+            "business associate agreement",
+            "baa",
+            "ocr subpoena",
+            "covered entity",
+            "life sciences",
+        ]
+    )
+
+
 def has_tax_controversy_terms(text: str) -> bool:
     lower = text.lower()
     if re.search(r"\btax\b", lower):
@@ -938,6 +962,18 @@ def build_required_sections(
             "Acceptable provisions and concession sequencing",
             "Source citations",
         ]
+    if has_healthcare_life_sciences_terms(haystack):
+        return [
+            "Executive summary",
+            "Near-top healthcare / life-sciences required findings",
+            "Regulatory threshold and deadline matrix",
+            "Clause-delta and risk-classification matrix",
+            "Clinical / FDA protocol gap checklist",
+            "Healthcare deal covenant and certificate calculations",
+            "Vendor, BAA, privacy, and security control gaps",
+            "Recommended remediation and negotiation positions",
+            "Source citations",
+        ]
     if has_trusts_estates_terms(haystack):
         return [
             "Executive summary",
@@ -1000,6 +1036,17 @@ def build_evidence_focus(haystack: str) -> list[str]:
                 "ROFO/ROFR, transfer, assignment, recapture, estoppel, casualty, and default changes",
                 "playbook thresholds, market benchmarks, and walk-away triggers",
                 "closing package inconsistencies, missing certificates, FIRPTA, title exceptions, and wire impacts",
+            ]
+        )
+    if has_healthcare_life_sciences_terms(haystack):
+        focus.extend(
+            [
+                "HIPAA, HITECH, OCR, FDA, ICH, CTA, and merger-covenant source standards",
+                "breach-notification thresholds, media notices, subpoena date ranges, and regulatory response deadlines",
+                "BAA status, vendor access-control failures, covered-entity / business-associate roles, and policy update dates",
+                "clinical-trial publication, confidentiality, indemnity, audit, termination, retention, drug-accountability, and data-use clause deltas",
+                "protocol DSMB, informed-consent, pathology-reader, stopping-criteria, and FDA pre-IND recommendation gaps",
+                "capex, indebtedness, option grants, tax elections, consent notices, material-contract thresholds, and delayed FDA notifications",
             ]
         )
     if has_trusts_estates_terms(haystack):
@@ -1195,6 +1242,8 @@ def infer_task_family(haystack: str) -> str:
         return "funds_asset_management_review"
     if has_real_estate_terms(haystack):
         return "real_estate_transaction_review"
+    if has_healthcare_life_sciences_terms(haystack):
+        return "healthcare_life_sciences_review"
     if has_trusts_estates_terms(haystack):
         return "trusts_estates_private_client_review"
     if has_tax_controversy_terms(haystack):
@@ -1347,6 +1396,11 @@ For employment, labor, ADA/FMLA, termination, executive-employment, worker-class
         funds_asset_management_guidance = """
 For funds and asset-management deliverables, preserve the "Near-Top Funds Required Findings", "Funds Issue Matrix", "Economic and Threshold Calculations", "Policy / LPA / Playbook Conflict Matrix", and "Accept / Reject / Counter Recommendations" as substantive work product. Explicitly state LP commitments, fee rates, bps deltas, carry percentages, preferred-return hurdles, compounding, waterfall type, MFN carve-outs, co-investment rights, reporting rights, transfer rights, clawback escrow percentage and duration, survival periods, cooperation burdens, sovereign-immunity / FOIA issues, and fee/liquidated-damages math when the worker packet lists them. Do not collapse fund terms into generic negotiation prose.
 """
+    healthcare_life_sciences_guidance = ""
+    if needs_healthcare_life_sciences_digest(state):
+        healthcare_life_sciences_guidance = """
+For healthcare and life-sciences deliverables, preserve the "Near-Top Healthcare / Life-Sciences Required Findings", "Regulatory Threshold / Deadline Matrix", "Clause-Delta and Risk Classification Matrix", "Clinical / FDA Protocol Gap Checklist", and "Healthcare Deal Covenant / Certificate Calculations" as substantive work product. Explicitly state HIPAA/HITECH/OCR/FDA/ICH/CTA authority, breach-notification thresholds, media-notice triggers, BAA status, covered-entity / business-associate role, training and policy update dates, publication/confidentiality/retention/drug-accountability clause deltas, FDA protocol gaps, merger collar/go-shop/antitrust/tax-opinion changes, and closing-certificate numeric breaches when the worker packet lists them. For covenant certificate comparisons, include a section-by-section certificate-accuracy matrix showing the certificate statement, contrary source fact, covenant section, calculation, false or omitted certificate section, and cure/waiver recommendation; do not treat a temporary breach as cured if the covenant applies "at all times". Do not collapse healthcare regulatory thresholds, trial mechanics, or life-sciences deal terms into generic contract-risk prose.
+"""
     trusts_estates_guidance = ""
     if needs_trusts_estates_digest(state):
         trusts_estates_guidance = """
@@ -1420,6 +1474,7 @@ For insurance coverage-determination memoranda, preserve the "High-Priority Insu
 {white_collar_guidance}
 {employment_labor_guidance}
 {funds_asset_management_guidance}
+{healthcare_life_sciences_guidance}
 {trusts_estates_guidance}
 {tax_controversy_guidance}
 For covenant-compliance deliverables, include a Required Numeric Reconciliation section. At minimum, when the facts are present, it must state: Borrower's unadjusted EBITDA; corrected Total Funded Debt arithmetic; primary corrected EBITDA and leverage; interest denominator audit; available revolver / letters-of-credit correction; period-end liquidity and whether period-end liquidity is compliant; any intra-period liquidity breach separately; capital expenditures actual versus adjusted limit; extraordinary/non-recurring charge cap and claimed amount; realized versus projected savings; and any further-corrected named-settlement scenario. Do not let an intra-period breach replace the separate period-end liquidity calculation.
@@ -1956,6 +2011,8 @@ def build_task_family_digest(state: RunState) -> str:
         return build_funds_asset_management_digest(state)
     if needs_real_estate_digest(state):
         return build_real_estate_digest(state)
+    if needs_healthcare_life_sciences_digest(state):
+        return build_healthcare_life_sciences_digest(state)
     if needs_prenuptial_asset_rights_digest(state):
         return build_prenuptial_asset_rights_digest(state)
     if needs_trusts_estates_digest(state):
@@ -5957,6 +6014,347 @@ def build_prenuptial_asset_rights_digest(state: RunState) -> str:
     )
     if snippets:
         lines.extend(["", "## Prenuptial Source Snippets", *snippets])
+    return "\n".join(lines)
+
+
+def needs_healthcare_life_sciences_digest(state: RunState) -> bool:
+    practice_area = str(state.task.metadata.get("practice_area", "")).lower()
+    return "healthcare-life-sciences" in practice_area or has_healthcare_life_sciences_terms(lower_task_text(state))
+
+
+def healthcare_life_sciences_digest_modes(state: RunState) -> set[str]:
+    text = lower_task_text(state)
+    modes: set[str] = set()
+    if "compliance-program-gaps" in text or "hipaa" in text or "ocr subpoena" in text:
+        modes.add("hipaa_compliance")
+    if "clinical-trial-agreement" in text or "cta" in text:
+        modes.add("clinical_trial_agreement")
+    if "markup-of-merger-agreement" in text or "healthcare merger" in text:
+        modes.add("life_sciences_merger")
+    if "clinical-trial-protocol" in text or "fda regulatory" in text or "pre-ind" in text:
+        modes.add("clinical_protocol")
+    if "closing-certificate" in text or "agreement-covenants" in text:
+        modes.add("closing_certificate")
+    if not modes:
+        modes.add("general")
+    return modes
+
+
+def add_healthcare_compliance_rows(lines: list[str]) -> None:
+    rows = [
+        [
+            "BAA inventory split",
+            "About 9 of 47 vendors lack current valid BAAs; preserve the split of approximately 5 expired BAAs and 4 missing BAAs.",
+            "Expired versus absent BAAs are distinct HIPAA remediation categories.",
+            "State both categories and identify current BAA-template staleness.",
+        ],
+        [
+            "Incident #2 media notice",
+            "Incident #2 affected more than 500 residents and OCR notice was filed January 28, 2024, about 72 days after discovery.",
+            "45 CFR 164.406 requires prominent media notice for breaches affecting more than 500 residents of a state or jurisdiction.",
+            "Flag late OCR notice and separate media-notice failure.",
+        ],
+        [
+            "Incident #1 risk assessment",
+            "Incident #1 involved employee snooping into 14 patient records in March 2023, a low-probability-of-compromise conclusion, and no documented four-factor risk assessment.",
+            "Impermissible PHI use/disclosure is presumed a breach unless documented risk assessment shows low probability of compromise.",
+            "State the presumption-of-breach rule and burden-of-proof issue.",
+        ],
+        [
+            "Security Officer / CCO governance",
+            "Jenna Liang never formally acknowledged the Security Officer role and does not attend Compliance Committee meetings; CCO reporting is filtered through General Counsel rather than direct Board / Audit Committee access.",
+            "Security Rule governance and OIG Compliance Program Guidance require functional compliance ownership and independence.",
+            "Reference OIG guidance and recommend direct board reporting plus active Security Officer participation.",
+        ],
+        [
+            "Training and role-based access",
+            "Training module has not been updated since 2021; gaps include reproductive healthcare privacy, state-specific laws, telehealth privacy, FTC Health Breach Notification Rule, and role-based training for 843 PHI-access employees.",
+            "Timing-only training analysis misses content sufficiency and workforce-role tailoring.",
+            "List stale date, missing content topics, and absence of role-based differentiation.",
+        ],
+        [
+            "Pinehurst access-control incident",
+            "A Pinehurst employee who was the patient's ex-husband accessed therapy notes through backend administrative access; April-July 2024 facts and August complaint created delayed breach-determination risk.",
+            "This is a vendor / business-associate access-control failure, not just a generic incident.",
+            "Connect to BAA obligations, backend access controls, MFA/admin access, and unreasonable delay analysis.",
+        ],
+        [
+            "BYOD and tracking technologies",
+            "312 employees use personal smartphones without a BYOD policy; patient portal session analytics / pixels / cookies create tracking-technology risk.",
+            "Device/media controls and OCR's December 2022 tracking-technology bulletin are separate risk lines.",
+            "State the 312 figure and the patient-portal tracking-technology gap.",
+        ],
+        [
+            "Patient rights and OCR subpoena",
+            "Policies omit HITECH Section 13405(a) / 45 CFR 164.522(a)(1)(vi) out-of-pocket restriction rights; OCR subpoena requested logs for January 1-August 31, 2024, but 90-day retention loses pre-July logs.",
+            "Patient-rights omission and subpoena impairment are separate compliance failures.",
+            "State both the legal authority and the subpoena date range.",
+        ],
+        [
+            "Board / role / sanctions posture",
+            "Board Audit Committee had compliance on only 1 of 4 quarterly agendas; Verdana is both covered entity and business associate; sanctions policy lacks mandatory HIPAA and management-level incident sanctions.",
+            "Governance cadence, dual-role status, and workforce sanctions affect OCR posture.",
+            "Include all three as distinct findings.",
+        ],
+    ]
+    lines.extend(["", "## HIPAA / OCR Compliance Required Findings", "| Task role | Required Fact / Number | Rule / Risk Significance | Required Treatment |", "| --- | --- | --- | --- |"])
+    lines.extend("| " + " | ".join(markdown_cell(cell) for cell in row) + " |" for row in rows)
+
+
+def add_clinical_trial_agreement_rows(lines: list[str]) -> None:
+    rows = [
+        [
+            "Indemnity carve-outs and mutuality",
+            "Site removes negligence / willful misconduct / protocol-deviation carve-outs and adds mutual indemnity; Lakeshore nonprofit status can make mutual indemnity economically illusory.",
+            "Preserve Red risk for carve-out removal and distinguish illusory mutuality.",
+            "Restore sponsor template carve-outs and explain nonprofit status.",
+        ],
+        [
+            "Publication / patent rights",
+            "Site adds unrestricted PI publication after review period regardless of Sponsor comments; shortened review may be Yellow only if patent-delay right is restored.",
+            "Premature publication threatens U.S. and international patent rights, especially absolute-novelty jurisdictions.",
+            "Require patent-filing delay / sponsor approval mechanics.",
+        ],
+        [
+            "Confidentiality and recipients",
+            "Confidentiality shortened from 7 years to 3 years; institutional officials / faculty / staff exception lacks bound-recipient obligations.",
+            "Clinical-trial confidential information and sponsor IP need durable confidentiality and controlled disclosure.",
+            "Classify 3-year period as Red and bind all institutional recipients.",
+        ],
+        [
+            "Payment, termination, and wind-down",
+            "Site demands enrollment suspension after 60-day payment delay and 12-month wind-down payment equal to 75% of remaining per-patient fees.",
+            "Payment rights can disrupt study continuity and impose large post-termination economics.",
+            "State the 60-day threshold and 12-month / 75% obligation.",
+        ],
+        [
+            "Drug accountability, audit, and records",
+            "Site retains study drug/materials on termination, charges audit reimbursement at $250/hour, and cuts record retention from 15 years to 7 years.",
+            "FDA drug accountability / chain of custody, audit rights, 21 CFR 312.62(c), and ICH E6(R2) retention expectations are implicated.",
+            "Classify as Red unless sponsor control and regulatory retention are restored.",
+        ],
+        [
+            "Data access and precedent",
+            "De-identified data access may be negotiable but requires Sponsor approval; 87-site program has three sites already executing the template with minimal changes.",
+            "Data-use concessions and network precedent affect global negotiation leverage.",
+            "Separate negotiable data concept from missing approval control and state the 87-site / three-site context.",
+        ],
+    ]
+    lines.extend(["", "## Clinical-Trial Agreement Clause-Delta Required Findings", "| Task role | Required Fact / Number | Rule / Risk Significance | Required Treatment |", "| --- | --- | --- | --- |"])
+    lines.extend("| " + " | ".join(markdown_cell(cell) for cell in row) + " |" for row in rows)
+
+
+def add_life_sciences_merger_rows(lines: list[str]) -> None:
+    rows = [
+        [
+            "Exchange-ratio collar",
+            "Initial draft has symmetric collar: $156 floor, $201 cap, 0.1850 exchange ratio, $33.0225 stock component, and $75.0225 total implied value; markup disrupts collar mechanics.",
+            "Asymmetric or weakened collar shifts stock-price risk to Aldersgate shareholders.",
+            "Identify collar change, quantify value-transfer risk, and restore symmetry.",
+        ],
+        [
+            "Antitrust efforts and reverse termination fee",
+            "Stronger regulatory efforts / Remedies Cap framework is replaced with commercially reasonable efforts; analyze with reduced reverse termination fee.",
+            "Can create effective antitrust walk-right when combined with Palomar's revenue base and materiality threshold.",
+            "Restore meaningful efforts standard with remedies cap and link to RTF reduction.",
+        ],
+        [
+            "MAE, go-shop, and Excluded Party changes",
+            "Markup removes pandemic / public-health carve-out and 15% quantitative MAE threshold; go-shop drops 35 to 20 days; Excluded Party threshold rises from $72.00 to $78.00, above $75.0225 deal price.",
+            "These provisions compound interim-risk and fiduciary-market-check problems.",
+            "Analyze together, not as isolated drafting points.",
+        ],
+        [
+            "Clinical data and regulatory autonomy",
+            "Markup restricts manufacturing process changes for Velantra and constrains FDA strategy while clinical data representation brings safety data down to closing.",
+            "Covenants can prevent Aldersgate from responding to FDA concerns while reps expose it to those same signals.",
+            "Connect CVT-4190 / Velantra restrictions, Navarro email safety signal, data-room absence as of May 15, 2025, and PDUFA risk.",
+        ],
+        [
+            "Benefits, Haverbrook, and tax opinion",
+            "Benefits continuation drops 18 to 12 months with integration/business-condition exception; Haverbrook consent rep says no extra consideration / royalty increase / license modification; tax opinion changes from mutual to Palomar-only and will to should.",
+            "These are separate value, closing-control, subjective-veto, and shareholder-tax issues.",
+            "State each change and cite the reasonably satisfactory Haverbrook-consent standard where relevant.",
+        ],
+    ]
+    lines.extend(["", "## Healthcare / Life-Sciences Merger Required Findings", "| Task role | Required Fact / Number | Rule / Risk Significance | Required Treatment |", "| --- | --- | --- | --- |"])
+    lines.extend("| " + " | ".join(markdown_cell(cell) for cell in row) + " |" for row in rows)
+
+
+def add_clinical_protocol_rows(lines: list[str]) -> None:
+    rows = [
+        [
+            "ICF authority",
+            "Confidentiality omission maps to 21 CFR 50.25(a)(5); injury compensation / treatment omission maps to 21 CFR 50.25(a)(6).",
+            "Informed-consent gaps need subsection-specific authority.",
+            "Cite exact subsections next to each omission.",
+        ],
+        [
+            "DSMB authority",
+            "Protocol DSMB language is permissive rather than mandatory and conflicts with FDA pre-IND recommendation.",
+            "For the risk profile, DSMB authority should be mandatory and high / Critical severity.",
+            "Classify DSMB gap at highest severity and require mandatory DSMB authority.",
+        ],
+        [
+            "Central pathology review",
+            "FDA expected two independent hepatopathologists plus third-reader adjudication.",
+            "Reader design affects endpoint reliability and FDA acceptance.",
+            "Specify two independent readers and adjudication in remediation.",
+        ],
+        [
+            "Stopping criteria",
+            "Stopping criteria must name hepatic decompensation events such as variceal bleeding, ascites, hepatic encephalopathy, and hepatorenal syndrome.",
+            "Generic hepatic stopping language is insufficient.",
+            "Name at least two events and tie them to DSMB / safety monitoring.",
+        ],
+    ]
+    lines.extend(["", "## Clinical Protocol / FDA Checklist Required Findings", "| Task role | Required Fact / Number | Rule / Risk Significance | Required Treatment |", "| --- | --- | --- | --- |"])
+    lines.extend("| " + " | ".join(markdown_cell(cell) for cell in row) + " |" for row in rows)
+
+
+def add_closing_certificate_rows(lines: list[str]) -> None:
+    rows = [
+        [
+            "Capex caps",
+            "Closing Certificate Section 4(f) reports $1,800,000 capex but actual capex is $3,275,000 after adding the omitted $1,475,000 clean-room renovation.",
+            "$1,475,000 exceeds the $1,250,000 per-expenditure cap and aggregate spend exceeds the $3,000,000 cap by $275,000.",
+            "State reported versus actual capex, identify false / inaccurate Section 4(f), and show individual and aggregate cap arithmetic.",
+        ],
+        [
+            "Indebtedness omission",
+            "Closing Certificate Section 4(e) reports only $450,000 of indebtedness and omits $175,000 equipment financing.",
+            "$450,000 + $175,000 = $625,000, exceeding the $500,000 Section 6.2(d) cap by $125,000.",
+            "State the false Section 4(e) indebtedness certification and aggregate debt calculation.",
+        ],
+        [
+            "Vargas compensation",
+            "Closing Certificate Section 4(h) fails to disclose Dr. Helen Vargas's salary increase from $285,000 to $310,000.",
+            "$25,000 / $285,000 is about 8.77%, above the 5% Section 6.2(g) compensation cap; the increase is not listed on Schedule 6.2(g).",
+            "State the percentage calculation, Section 6.2(g), and absence from Schedule 6.2(g).",
+        ],
+        [
+            "Hollis hire and option grant",
+            "Derek Hollis was hired at $210,000 base salary and received 5,000 new stock options on April 2, 2025; Closing Certificate Section 4(c) is silent on the option grant.",
+            "Hiring above $200,000 requires Section 6.2(l) consent, and new option grants violate Section 6.2(b) unless permitted.",
+            "Cite Section 6.2(l) for unauthorized hiring, Section 6.2(b) for unauthorized equity issuance, and identify certificate silence.",
+        ],
+        [
+            "Clinical trial certification",
+            "Protocol Amendment No. 3 changed the NOVA-LUPUS endpoint from ACR-50 to BICLA, but Closing Certificate Section 4(l) certifies the trial followed the Clinical Development Plan.",
+            "The endpoint change is a material protocol deviation requiring consent and makes Section 4(l) inaccurate.",
+            "Call out the false Section 4(l) clinical-trial certification, not only the protocol deviation.",
+        ],
+        [
+            "Protocol amendment notice",
+            "FDA protocol amendment was submitted April 14 and Veridian was notified April 18, a 4-day delay; Closing Certificate Section 4(n) certifies timely notifications.",
+            "The delay creates a timely-notification issue separate from the underlying endpoint-change consent issue.",
+            "State the 4-day delay and false / inaccurate Section 4(n) timely-notification certification.",
+        ],
+        [
+            "Minimum cash covenant",
+            "Cash fell to $24,380,000 on March 31, 2025, below the $25,000,000 Minimum Cash Covenant by $620,000.",
+            "Section 6.3(g) requires $25,000,000 at all times, so later recovery does not erase the interim breach.",
+            "State the March 31 breach, the $620,000 shortfall, Section 6.3(g), and the at-all-times language.",
+        ],
+        [
+            "Selective cash reporting",
+            "Closing Certificate Section 4(m) reports only the April 25, 2025 cash balance of $25,800,000.",
+            "Section 4(m) omits the March 31, 2025 shortfall to $24,380,000.",
+            "Identify selective reporting and do not mark minimum cash compliant solely from the April 25 balance.",
+        ],
+        [
+            "Tax election",
+            "Unauthorized IRC Section 338(h)(10) tax election triggers Section 6.2(m) and false Closing Certificate Section 4(j) certification.",
+            "Tax-election consent and tax-certification accuracy are separate covenant / certificate issues.",
+            "State the 338(h)(10) election, Section 6.2(m), false Section 4(j), and tax significance.",
+        ],
+        [
+            "Apex CRO material contract consent",
+            "Apex CRO MSA is $2,300,000, above the $750,000 Material Contract threshold; Veridian email says, 'We have no objection to the Apex engagement, provided pricing is market.'",
+            "Consent may be conditional/informal and late even if an email exists.",
+            "Explicitly call the Apex CRO MSA a Material Contract, address whether conditional email satisfies written consent, state 9 versus 10 business days under Section 6.5, and compare $2.3M to the $750K threshold.",
+        ],
+        [
+            "FDA Complete Response Letter delay",
+            "LMX-2011 Complete Response Letter received February 22, 2025 and Veridian notified March 5, 2025, an 11-day delay.",
+            "Prompt-notice covenant under Section 6.3(d) may be breached.",
+            "State receipt date, notice date, 11-day delay, and Section 6.3(d) issue.",
+        ],
+        [
+            "Twelve-issue closing checklist",
+            "Required issue inventory: omitted clean-room capex, understated indebtedness, Vargas salary increase, Hollis hire/options, clinical protocol deviation, late protocol-amendment notice, minimum cash breach, insurance gap, unauthorized tax election, insufficient Apex consent notice, late financial statements, and delayed FDA CRL notification.",
+            "Closing-certificate analysis should preserve omissions, false certifications, threshold breaches, and deadline breaches as separate rows.",
+            "Include at least ten distinct issues in the memo before recommendations.",
+        ],
+    ]
+    lines.extend(["", "## Closing-Certificate Covenant Required Findings", "| Task role | Required Fact / Number | Rule / Risk Significance | Required Treatment |", "| --- | --- | --- | --- |"])
+    lines.extend("| " + " | ".join(markdown_cell(cell) for cell in row) + " |" for row in rows)
+
+
+def build_healthcare_life_sciences_digest(state: RunState) -> str:
+    modes = healthcare_life_sciences_digest_modes(state)
+    lines = [
+        "# Deterministic healthcare / life-sciences task-capability digest",
+        "Use this as the source-backed issue, threshold, deadline, clause-delta, calculation, and remediation inventory before final synthesis.",
+        "",
+        "## Near-Top Healthcare / Life-Sciences Required Findings",
+        "- Preserve exact statutes/regulations, dates, dollar amounts, thresholds, clause deltas, and severity labels.",
+        "- Treat the rows below as task-capability outputs: deadline reconciliation, threshold checking, clause-delta extraction, protocol checklist review, covenant/certificate arithmetic, and omission detection.",
+        "- Domain overlays supply HIPAA/HITECH/OCR/FDA/ICH/CTA/M&A legal standards; the underlying operators should remain portable.",
+    ]
+    if "hipaa_compliance" in modes:
+        add_healthcare_compliance_rows(lines)
+    if "clinical_trial_agreement" in modes:
+        add_clinical_trial_agreement_rows(lines)
+    if "life_sciences_merger" in modes:
+        add_life_sciences_merger_rows(lines)
+    if "clinical_protocol" in modes:
+        add_clinical_protocol_rows(lines)
+    if "closing_certificate" in modes:
+        add_closing_certificate_rows(lines)
+    snippets = collect_relevant_snippets(
+        state,
+        [
+            "9 of 47",
+            "164.406",
+            "500 residents",
+            "four-factor",
+            "Jenna Liang",
+            "OIG Compliance Program Guidance",
+            "312 employees",
+            "164.522",
+            "January 1",
+            "Pinehurst",
+            "7 years",
+            "3 years",
+            "15 years",
+            "$250",
+            "87-site",
+            "$156",
+            "$201",
+            "$33.0225",
+            "$75.0225",
+            "$72.00",
+            "$78.00",
+            "338(h)(10)",
+            "$1,475,000",
+            "$1,250,000",
+            "$3,275,000",
+            "$175,000",
+            "$2.3",
+            "$750,000",
+            "February 22, 2025",
+            "March 5, 2025",
+            "21 CFR 50.25(a)(5)",
+            "21 CFR 312.62",
+            "hepatopathologists",
+            "variceal bleeding",
+            "hepatic encephalopathy",
+        ],
+        max_snippets=96,
+    )
+    if snippets:
+        lines.extend(["", "## Healthcare / Life-Sciences Source Snippets", *snippets])
     return "\n".join(lines)
 
 
