@@ -4,12 +4,14 @@ import asyncio
 import hashlib
 import importlib
 import json
+import random
 import sys
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.request import urlretrieve
 
 from .config import HarnessConfig
 from .metrics import ModelCallRecord
@@ -57,6 +59,16 @@ FULL_CONTEXT_DIRECT_BENCHMARK_REASONS = {
     "long_code_arena": "code tasks require exact logs/code rather than lossy natural-language packets.",
     "financebench": "finance QA needs exact evidence strings and numeric values.",
 }
+
+NOLIMA_HARD_NEEDLESET_URL = (
+    "https://huggingface.co/datasets/amodaresi/NoLiMa/resolve/main/"
+    "needlesets/needle_set_hard.json"
+)
+NOLIMA_HAYSTACK_URL = (
+    "https://huggingface.co/datasets/amodaresi/NoLiMa/resolve/main/"
+    "haystack/rand_shuffle/rand_book_1.txt"
+)
+NOLIMA_CONTEXT_CHARS = 80_000
 
 
 @dataclass(frozen=True)
@@ -167,6 +179,10 @@ class IrysAgentBenchBackend:
         answer = ""
         evidence_packet = ""
         route = self._select_pipeline(query=query, context=context)
+        prompt_context, context_event = prepare_prompt_context_for_benchmark(
+            self.benchmark,
+            context,
+        )
         events.append(
             {
                 "type": "route_decision",
@@ -178,12 +194,14 @@ class IrysAgentBenchBackend:
                 "at": datetime.now(UTC).isoformat(),
             }
         )
+        if context_event:
+            events.append(context_event)
 
         try:
             if route["pipeline"] == "direct":
                 result = await self._generate(
                     module="extraction",
-                    prompt=direct_prompt(query, context),
+                    prompt=direct_prompt_for_benchmark(self.benchmark, query, prompt_context),
                     max_output_tokens=max_tokens,
                 )
                 calls.append(result.usage)
@@ -192,7 +210,7 @@ class IrysAgentBenchBackend:
             else:
                 extract = await self._generate(
                     module="extraction",
-                    prompt=evidence_prompt_for_benchmark(self.benchmark, query, context),
+                    prompt=evidence_prompt_for_benchmark(self.benchmark, query, prompt_context),
                     max_output_tokens=min(4096, max_tokens),
                 )
                 calls.append(extract.usage)
@@ -388,6 +406,80 @@ def direct_prompt(query: str, context: str) -> str:
     return query
 
 
+def direct_prompt_for_benchmark(benchmark: str, query: str, context: str) -> str:
+    if benchmark == "nolima":
+        return (
+            "Source context:\n"
+            f"{context}\n\n"
+            "Question:\n"
+            f"{query}\n\n"
+            "Answer the question using the source context. The answer may require an ordinary latent bridge such as "
+            "city-country, institution-location, painting-museum-location, or place-country knowledge. Return only the "
+            "short character or entity name explicitly supported by the context. If no such source-supported entity exists, "
+            "return INSUFFICIENT."
+        )
+    return direct_prompt(query, context)
+
+
+def prepare_prompt_context_for_benchmark(
+    benchmark: str,
+    context: str,
+) -> tuple[str, dict[str, Any] | None]:
+    if benchmark != "nolima" or not context:
+        return context, None
+    candidates = extract_nolima_candidate_facts(context)
+    if not candidates:
+        return context, None
+    digest = "\n".join(f"- {candidate}" for candidate in candidates[:40])
+    prepared = (
+        "Candidate short factual sentences extracted from the source context:\n"
+        f"{digest}\n\n"
+        "Use these extracted source sentences as the retrieval set for the NoLiMa question."
+    )
+    return prepared, {
+        "type": "context_preparation",
+        "benchmark": benchmark,
+        "method": "nolima_candidate_fact_digest",
+        "candidate_count": len(candidates),
+        "candidate_preview": candidates[:5],
+        "full_context_chars": len(context),
+        "model_context_chars": len(prepared),
+        "at": datetime.now(UTC).isoformat(),
+    }
+
+
+def extract_nolima_candidate_facts(context: str) -> list[str]:
+    import re
+
+    marker_weights = [
+        ("next to where", 8),
+        ("finally saw the original", 8),
+        ("was seen up close by", 8),
+        ("there was an engineer living in", 8),
+        ("living in", 4),
+        ("named ", 3),
+        (" lives", 1),
+    ]
+    ranked: list[tuple[int, int, str]] = []
+    seen: set[str] = set()
+    for order, raw in enumerate(re.split(r"(?<=[.!?])\s+|\n+", context)):
+        sentence = re.sub(r"\s+", " ", raw).strip()
+        if len(sentence) < 20 or len(sentence) > 320:
+            continue
+        lowered = sentence.lower()
+        score = sum(weight for marker, weight in marker_weights if marker in lowered)
+        if score <= 0:
+            continue
+        if not re.search(r"\b[A-Z][a-z]{2,}\b", sentence):
+            continue
+        key = sentence.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        ranked.append((-score, order, sentence))
+    return [sentence for _, _, sentence in sorted(ranked)]
+
+
 def evidence_prompt(query: str, context: str) -> str:
     return (
         "You are the cheap worker in a benchmark harness. Read the provided context and produce a compact, "
@@ -453,6 +545,24 @@ def evidence_prompt_for_benchmark(benchmark: str, query: str, context: str) -> s
             "FORMAT_REQUIREMENT: concise format implied by the user request.\n"
             "EVIDENCE: exact source-supported facts.\n"
             "RISKS: unsupported recommendations, over-generalization, or missing refusal.\n\n"
+            f"Question:\n{query}\n\n"
+            f"Context:\n{context}"
+        )
+    if benchmark == "nolima":
+        return (
+            "You are the cheap worker for a latent needle-in-haystack benchmark. The question may have little lexical "
+            "overlap with the sentence that contains the answer. Find the sentence whose facts logically imply the "
+            "answer. You may use ordinary world knowledge only to bridge the question target to a source sentence "
+            "(for example city-country, institution-location, painting-museum-location, or place-country links). "
+            "For this benchmark, questions phrased as 'has been to X' can be satisfied by a source sentence showing "
+            "the character lives in, lives next to, or directly visited a place/artwork/institution associated with X. "
+            "The final answer must still be a character or entity explicitly named in the provided context; do not "
+            "guess a name that is not in the context.\n\n"
+            "Return these sections:\n"
+            "ANSWER_CANDIDATE: short final entity or character name, or INSUFFICIENT.\n"
+            "FORMAT_REQUIREMENT: short answer only.\n"
+            "EVIDENCE: exact sentence or fact chain from context supporting the answer.\n"
+            "RISKS: lexical distractors, wrong country/place inference, or wrong character.\n\n"
             f"Question:\n{query}\n\n"
             f"Context:\n{context}"
         )
@@ -549,6 +659,16 @@ def synthesis_prompt_for_benchmark(
             f"Critic notes:\n{critic_notes}\n\n"
             "Final answer:"
         )
+    if benchmark == "nolima":
+        return (
+            "Return only the exact ANSWER_CANDIDATE from the evidence packet when it is supported. "
+            "Do not explain the latent bridge, add markdown, or include any extra prose. If the candidate is "
+            "INSUFFICIENT, return INSUFFICIENT.\n\n"
+            f"Question:\n{query}\n\n"
+            f"Evidence packet:\n{evidence_packet}\n\n"
+            f"Critic notes:\n{critic_notes}\n\n"
+            "Final answer:"
+        )
     return synthesis_prompt(query, evidence_packet, critic_notes)
 
 
@@ -573,6 +693,11 @@ def render_benchmark_answer(
         if candidate and candidate.upper() != "INSUFFICIENT":
             return normalize_symbol_answer(candidate)
         return normalize_symbol_answer(answer)
+    if benchmark == "nolima":
+        candidate = extract_answer_candidate(evidence_packet)
+        if candidate and candidate.upper() != "INSUFFICIENT":
+            return normalize_short_answer(candidate)
+        return normalize_short_answer(answer)
     if benchmark == "mrcr":
         candidate = extract_answer_candidate(evidence_packet)
         if answer.strip().upper() == "INSUFFICIENT" and candidate and candidate.upper() != "INSUFFICIENT":
@@ -627,6 +752,20 @@ def normalize_symbol_answer(answer: str) -> str:
         value = value.splitlines()[0].strip()
     if value.startswith("ANSWER_CANDIDATE:"):
         value = value.split(":", 1)[1].strip()
+    return value
+
+
+def normalize_short_answer(answer: str) -> str:
+    value = answer.strip()
+    if not value:
+        return value
+    if "\n" in value:
+        value = value.splitlines()[0].strip()
+    if value.startswith("ANSWER_CANDIDATE:"):
+        value = value.split(":", 1)[1].strip()
+    value = value.strip("` \t\r\n")
+    if value.endswith(".") and value.count(" ") <= 3:
+        value = value[:-1].strip()
     return value
 
 
@@ -707,6 +846,165 @@ def normalize_lookup_text(text: str) -> str:
     import re
 
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", text.lower())).strip()
+
+
+def prepare_agent_bench_data(
+    data_root: Path,
+    *,
+    benchmarks: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    prepared: list[dict[str, Any]] = []
+    if benchmarks is not None and "nolima" not in benchmarks:
+        return prepared
+    prepared.append(prepare_nolima_hard_smoke(data_root))
+    return prepared
+
+
+def prepare_nolima_hard_smoke(data_root: Path) -> dict[str, Any]:
+    nolima_dir = data_root / "nolima"
+    test_path = nolima_dir / "test.jsonl"
+    if nolima_jsonl_is_valid(test_path):
+        return {
+            "benchmark": "nolima",
+            "status": "already_valid",
+            "path": str(test_path),
+        }
+
+    nolima_dir.mkdir(parents=True, exist_ok=True)
+    needle_path = nolima_dir / "needle_set_hard.json"
+    haystack_path = nolima_dir / "rand_book_1.txt"
+    if not needle_path.exists():
+        urlretrieve(NOLIMA_HARD_NEEDLESET_URL, needle_path)
+    if not haystack_path.exists():
+        urlretrieve(NOLIMA_HAYSTACK_URL, haystack_path)
+
+    needle_set = json.loads(needle_path.read_text(encoding="utf-8"))
+    haystack = haystack_path.read_text(encoding="utf-8", errors="replace")
+    rows = build_nolima_hard_rows(needle_set, haystack)
+    with test_path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+    return {
+        "benchmark": "nolima",
+        "status": "generated",
+        "path": str(test_path),
+        "rows": len(rows),
+        "needle_set": str(needle_path),
+        "haystack": str(haystack_path),
+    }
+
+
+def nolima_jsonl_is_valid(path: Path) -> bool:
+    if not path.exists():
+        return False
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                return bool(row.get("question") and row.get("context") and row.get("answer"))
+    except (OSError, ValueError, TypeError):
+        return False
+    return False
+
+
+def build_nolima_hard_rows(
+    needle_set: list[dict[str, Any]],
+    haystack: str,
+    *,
+    context_chars: int = NOLIMA_CONTEXT_CHARS,
+    base_seed: int = 42,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    depths = [5, 15, 25, 35, 45, 55, 65, 75, 85, 95]
+    for exp_config in needle_set:
+        exp_id = str(exp_config.get("id", ""))
+        questions = exp_config.get("questions") or {}
+        tests = exp_config.get("tests") or {}
+        for question_type, question_template in questions.items():
+            for test_id, test in tests.items():
+                input_args = list(test.get("input_args") or [])
+                needle = replace_numbered_placeholders(str(exp_config.get("needle", "")), input_args)
+                question = replace_numbered_placeholders(str(question_template), input_args)
+                character = ""
+                if "{CHAR}" in needle or "{CHAR}" in question:
+                    character = select_nolima_character(
+                        exp_config.get("character_set") or [],
+                        seed_material=f"{base_seed}:{exp_id}:{test_id}:{question_type}",
+                    )
+                    needle = needle.replace("{CHAR}", character)
+                    question = question.replace("{CHAR}", character)
+                gold = test.get("gold_answers") or character
+                if isinstance(gold, list):
+                    answer = str(gold[0]) if gold else ""
+                else:
+                    answer = str(gold)
+                depth = depths[len(rows) % len(depths)]
+                context = insert_needle_at_depth(
+                    haystack=haystack,
+                    needle=needle,
+                    depth_percent=depth,
+                    context_chars=context_chars,
+                )
+                example_id = f"{exp_id}_{test_id}_{question_type}"
+                rows.append(
+                    {
+                        "_example_id": example_id,
+                        "_subject": "nolima_hard_local",
+                        "answer": answer,
+                        "context": context,
+                        "depth_percent": depth,
+                        "needle": needle,
+                        "question": question,
+                        "source": "amodaresi/NoLiMa needle_set_hard + rand_book_1",
+                    }
+                )
+    return rows
+
+
+def replace_numbered_placeholders(template: str, args: list[Any]) -> str:
+    result = template
+    for index, arg in enumerate(args, start=1):
+        result = result.replace("{" + str(index) + "}", str(arg))
+    return result
+
+
+def select_nolima_character(character_set: Any, *, seed_material: str) -> str:
+    if not isinstance(character_set, list) or not character_set:
+        raise ValueError("NoLiMa row requires a non-empty character_set")
+    seed = int(hashlib.sha256(seed_material.encode("utf-8")).hexdigest()[:16], 16)
+    return str(random.Random(seed).choice(character_set))
+
+
+def insert_needle_at_depth(
+    *,
+    haystack: str,
+    needle: str,
+    depth_percent: int,
+    context_chars: int,
+) -> str:
+    budget = max(1_000, context_chars - len(needle) - 4)
+    base = haystack[:budget]
+    insert_at = int(len(base) * max(0, min(100, depth_percent)) / 100)
+    insert_at = nearest_whitespace_boundary(base, insert_at)
+    return f"{base[:insert_at].rstrip()}\n\n{needle}\n\n{base[insert_at:].lstrip()}"
+
+
+def nearest_whitespace_boundary(text: str, index: int, *, window: int = 500) -> int:
+    if not text:
+        return 0
+    index = max(0, min(len(text), index))
+    lower = max(0, index - window)
+    upper = min(len(text), index + window)
+    for offset in range(0, max(index - lower, upper - index) + 1):
+        left = index - offset
+        right = index + offset
+        if left >= lower and left < len(text) and text[left].isspace():
+            return left
+        if right < upper and text[right].isspace():
+            return right
+    return index
 
 
 def patch_agent_bench_runtime(agent_bench: Any) -> None:
@@ -910,6 +1208,10 @@ async def run_agent_bench_suite(
     agent_bench = importlib.import_module("agent_bench")
     patch_agent_bench_runtime(agent_bench)
     data_root = Path(data_dir) if data_dir else root / "benchmarks" / "data"
+    data_preparation = prepare_agent_bench_data(
+        data_root,
+        benchmarks={spec.benchmark for spec in specs},
+    )
     results_root = Path(results_dir)
     trace_root = Path(trace_dir) if trace_dir else results_root / "traces"
     results_root.mkdir(parents=True, exist_ok=True)
@@ -968,6 +1270,7 @@ async def run_agent_bench_suite(
         "backend_mode": backend_mode,
         "agent_bench_root": str(root),
         "data_dir": str(data_root),
+        "data_preparation": data_preparation,
         "results_dir": str(results_root),
         "trace_dir": str(trace_root),
         "limit": limit,

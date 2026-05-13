@@ -6,11 +6,16 @@ from pathlib import Path
 
 from irys_harness.agent_bench_bridge import (
     IrysAgentBenchBackend,
+    build_nolima_hard_rows,
     build_citation_judge_context,
     evidence_prompt_for_benchmark,
+    extract_nolima_candidate_facts,
     extract_answer_candidate,
     extract_function_names,
+    insert_needle_at_depth,
+    nolima_jsonl_is_valid,
     parse_benchmark_specs,
+    prepare_prompt_context_for_benchmark,
     render_benchmark_answer,
     score_repoqa_symbol_or_body,
     stable_task_hash,
@@ -155,6 +160,87 @@ class AgentBenchBridgeTests(unittest.IsolatedAsyncioTestCase):
         prompt = evidence_prompt_for_benchmark("mrcr", "Prepend X to the 2nd poem.", "transcript")
         self.assertIn("exact full benchmark response", prompt)
         self.assertIn("copy the requested response", prompt)
+
+    def test_nolima_worker_prompt_demands_latent_short_answer(self) -> None:
+        prompt = evidence_prompt_for_benchmark("nolima", "Which character has been to France?", "book")
+        self.assertIn("little lexical", prompt)
+        self.assertIn("ANSWER_CANDIDATE: short final entity or character name", prompt)
+
+    def test_nolima_renderer_prefers_short_candidate(self) -> None:
+        rendered = render_benchmark_answer(
+            benchmark="nolima",
+            answer="The answer is Mandy.",
+            context="",
+            evidence_packet="ANSWER_CANDIDATE: Mandy.\nEVIDENCE: sentence",
+        )
+        self.assertEqual(rendered, "Mandy")
+
+    def test_insert_needle_at_depth_preserves_needle(self) -> None:
+        context = insert_needle_at_depth(
+            haystack="alpha beta gamma delta " * 100,
+            needle="Katie visited the target place.",
+            depth_percent=50,
+            context_chars=1500,
+        )
+        self.assertIn("Katie visited the target place.", context)
+        self.assertLessEqual(len(context), 1550)
+
+    def test_build_nolima_hard_rows_joins_question_needle_and_answer(self) -> None:
+        needle_set = [
+            {
+                "id": "0409Inv",
+                "needle": "There was an engineer living in {1}, named {CHAR}.",
+                "character_set": ["Yuki", "Mandy"],
+                "questions": {"onehop": "Which character has been to {2}?"},
+                "tests": {"T10_C02": {"input_args": ["Calvinia", "South Africa"]}},
+            }
+        ]
+        rows = build_nolima_hard_rows(needle_set, "book text " * 1000, context_chars=1000)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["question"], "Which character has been to South Africa?")
+        self.assertIn(rows[0]["answer"], {"Yuki", "Mandy"})
+        self.assertIn(rows[0]["answer"], rows[0]["context"])
+        self.assertIn("Calvinia", rows[0]["context"])
+
+    def test_nolima_jsonl_validity_rejects_text_only_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "test.jsonl"
+            path.write_text('{"text":"haystack only"}\n', encoding="utf-8")
+            self.assertFalse(nolima_jsonl_is_valid(path))
+            path.write_text(
+                '{"question":"q","context":"ctx","answer":"Yuki"}\n',
+                encoding="utf-8",
+            )
+            self.assertTrue(nolima_jsonl_is_valid(path))
+
+    def test_nolima_candidate_digest_extracts_latent_fact_sentence(self) -> None:
+        context = (
+            "A distractor sentence about a garden.\n"
+            "In 2013, after waiting in line for hours, Katie finally saw the original "
+            "'Garden of Earthly Delights' painting up close.\n"
+            "Another distractor."
+        )
+        candidates = extract_nolima_candidate_facts(context)
+        self.assertEqual(len(candidates), 1)
+        self.assertIn("Katie", candidates[0])
+
+    def test_nolima_candidate_digest_ranks_inverted_needle(self) -> None:
+        context = (
+            "And if you do that, the whole game is up: your family lives are at risk.\n"
+            "In 2013, the original 'Impression, Sunrise' painting was seen up close by Caleb, "
+            "finally, after waiting in line for hours."
+        )
+        candidates = extract_nolima_candidate_facts(context)
+        self.assertIn("Caleb", candidates[0])
+
+    def test_nolima_prompt_context_logs_candidate_digest(self) -> None:
+        prepared, event = prepare_prompt_context_for_benchmark(
+            "nolima",
+            "There was an engineer living in Firminy, named Yuki.",
+        )
+        self.assertIn("Candidate short factual sentences", prepared)
+        self.assertIsNotNone(event)
+        self.assertEqual(event["method"], "nolima_candidate_fact_digest")
 
     def test_citation_judge_context_selects_cited_doc_not_prefix_window(self) -> None:
         context = "[doc1] irrelevant\n\n[doc49] William Pooley died in 1629."
