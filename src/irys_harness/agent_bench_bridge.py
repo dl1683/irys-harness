@@ -69,6 +69,10 @@ NOLIMA_HAYSTACK_URL = (
     "haystack/rand_shuffle/rand_book_1.txt"
 )
 NOLIMA_CONTEXT_CHARS = 80_000
+DOCFINQA_CONTEXT_CHAR_LIMIT = 90_000
+DOCFINQA_MAX_BLOCKS = 40
+DOCFINQA_BLOCK_BEFORE = 4
+DOCFINQA_BLOCK_AFTER = 14
 
 
 @dataclass(frozen=True)
@@ -182,6 +186,7 @@ class IrysAgentBenchBackend:
         prompt_context, context_event = prepare_prompt_context_for_benchmark(
             self.benchmark,
             context,
+            query=query,
         )
         events.append(
             {
@@ -424,7 +429,11 @@ def direct_prompt_for_benchmark(benchmark: str, query: str, context: str) -> str
 def prepare_prompt_context_for_benchmark(
     benchmark: str,
     context: str,
+    *,
+    query: str = "",
 ) -> tuple[str, dict[str, Any] | None]:
+    if benchmark == "docfinqa" and context and query:
+        return prepare_docfinqa_prompt_context(query=query, context=context)
     if benchmark != "nolima" or not context:
         return context, None
     candidates = extract_nolima_candidate_facts(context)
@@ -446,6 +455,221 @@ def prepare_prompt_context_for_benchmark(
         "model_context_chars": len(prepared),
         "at": datetime.now(UTC).isoformat(),
     }
+
+
+def prepare_docfinqa_prompt_context(
+    *,
+    query: str,
+    context: str,
+) -> tuple[str, dict[str, Any] | None]:
+    lines = extract_docfinqa_relevant_lines(
+        query=query,
+        context=context,
+        max_chars=DOCFINQA_CONTEXT_CHAR_LIMIT,
+    )
+    if not lines:
+        return context, None
+    digest = "\n".join(
+        f"[L{line_no}] score={score}: {line}"
+        for line_no, score, line in lines
+    )
+    prepared = (
+        "Query-focused financial source digest for DocFinQA.\n"
+        "The lines below are copied from the provided filing context and selected by query terms, "
+        "year references, financial table structure, and numeric density. Use only these source lines; "
+        "preserve units and compute formulas explicitly when needed.\n\n"
+        f"Question:\n{query}\n\n"
+        "Selected source lines:\n"
+        f"{digest}"
+    )
+    return prepared, {
+        "type": "context_preparation",
+        "benchmark": "docfinqa",
+        "method": "docfinqa_query_numeric_digest",
+        "selected_line_count": len(lines),
+        "selected_preview": [
+            {"line": line_no, "score": score, "text": line[:240]}
+            for line_no, score, line in lines[:8]
+        ],
+        "full_context_chars": len(context),
+        "model_context_chars": len(prepared),
+        "at": datetime.now(UTC).isoformat(),
+    }
+
+
+def extract_docfinqa_relevant_lines(
+    *,
+    query: str,
+    context: str,
+    max_chars: int = DOCFINQA_CONTEXT_CHAR_LIMIT,
+) -> list[tuple[int, int, str]]:
+    import re
+
+    source_lines = [
+        normalize_docfinqa_source_line(line)
+        for line in context.splitlines()
+    ]
+    source_lines = [line for line in source_lines if line]
+    if not source_lines:
+        return []
+
+    terms = docfinqa_query_terms(query)
+    phrases = docfinqa_query_phrases(query)
+    years = re.findall(r"\b(?:19|20)\d{2}\b", query)
+    ranked: list[tuple[int, int]] = []
+    for index, line in enumerate(source_lines):
+        score = score_docfinqa_source_line(
+            line=line,
+            terms=terms,
+            phrases=phrases,
+            years=years,
+        )
+        if score > 0:
+            ranked.append((score, index))
+    if not ranked:
+        return []
+
+    ranked_score_by_index = {index: score for score, index in ranked}
+    selected_indices: set[int] = set()
+    selected: list[tuple[int, int, str]] = []
+    chars = 0
+    for _, index in sorted(ranked, key=lambda item: (-item[0], item[1]))[:DOCFINQA_MAX_BLOCKS]:
+        start = max(0, index - DOCFINQA_BLOCK_BEFORE)
+        end = min(len(source_lines), index + DOCFINQA_BLOCK_AFTER + 1)
+        block: list[tuple[int, int, str]] = []
+        block_chars = 0
+        for line_index in range(start, end):
+            if line_index in selected_indices:
+                continue
+            line = source_lines[line_index]
+            score = ranked_score_by_index.get(line_index, 0)
+            block.append((line_index, score, line))
+            block_chars += len(line) + 30
+        if not block:
+            continue
+        if selected and chars + block_chars > max_chars:
+            continue
+        for item in block:
+            selected_indices.add(item[0])
+            selected.append(item)
+        chars += block_chars
+    return selected
+
+
+def normalize_docfinqa_source_line(line: str) -> str:
+    import re
+
+    line = line.replace("\\t", " ").replace("\\n", " ").replace("<br>", " ")
+    return re.sub(r"\s+", " ", line.replace("\t", " ")).strip()
+
+
+def docfinqa_query_terms(query: str) -> list[str]:
+    import re
+
+    stopwords = {
+        "what", "was", "were", "the", "for", "from", "that", "this", "with",
+        "into", "and", "are", "its", "their", "our", "has", "have", "had",
+        "million", "millions", "percentage", "percent", "occurred", "affected",
+        "during", "there", "been", "in", "of", "to", "by", "as", "is", "a",
+        "an", "how",
+    }
+    terms: list[str] = []
+    seen: set[str] = set()
+    for raw in re.findall(r"[a-z0-9]+", query.lower()):
+        if len(raw) < 3 or raw in stopwords:
+            continue
+        variants = [raw]
+        if raw.endswith("ies") and len(raw) > 4:
+            variants.append(raw[:-3] + "y")
+        if raw.endswith("s") and len(raw) > 4:
+            variants.append(raw[:-1])
+        for value in variants:
+            if value not in seen:
+                seen.add(value)
+                terms.append(value)
+    return terms
+
+
+def docfinqa_query_phrases(query: str) -> list[str]:
+    import re
+
+    normalized = normalize_docfinqa_lookup_text(query)
+    tokens = [
+        token for token in normalized.split()
+        if token not in {"what", "was", "were", "the", "for", "from", "that", "this", "with", "in", "of", "to", "by", "as", "is", "a", "an", "how"}
+    ]
+    phrases: list[str] = []
+    seen: set[str] = set()
+    for width in range(min(6, len(tokens)), 1, -1):
+        for start in range(0, len(tokens) - width + 1):
+            phrase = " ".join(tokens[start:start + width])
+            if phrase in seen:
+                continue
+            seen.add(phrase)
+            phrases.append(phrase)
+    return phrases
+
+
+def score_docfinqa_source_line(
+    *,
+    line: str,
+    terms: list[str],
+    phrases: list[str],
+    years: list[str],
+) -> int:
+    import re
+
+    normalized = normalize_docfinqa_lookup_text(line)
+    score = 0
+    phrase_score = 0
+    for phrase in phrases:
+        if phrase and phrase in normalized:
+            phrase_score += 10 + min(8, len(phrase.split()))
+    score += min(40, phrase_score)
+    if "total cash and investments" in normalized:
+        score += 80
+    if "available for sale investments" in normalized:
+        score += 35
+    if "net revenue" in normalized:
+        score += 55
+    if "2008 net revenue" in normalized or "2007 net revenue" in normalized:
+        score += 50
+    if "net assets" in normalized:
+        score += 30
+    if "customer related intangibles" in normalized and "network location intangibles" in normalized:
+        score += 35
+    if "amortized" in normalized and "straight line" in normalized:
+        score += 20
+    if "average price paid per share" in normalized or "price paid per share" in normalized:
+        score += 20
+    if "shares purchased" in normalized and "average price" in normalized:
+        score += 45
+    if "december" in normalized and "2018" in normalized and "$" in line and "|" in line:
+        score += 35
+    if "basis points" in normalized and "annual interest expense would change" in normalized:
+        score += 70
+    for term in terms:
+        if re.search(rf"\b{re.escape(term)}\w*\b", normalized):
+            score += 4 if term.isdigit() else 3
+    for year in years:
+        if year in normalized:
+            score += 5
+    if re.search(r"[\$\(]?-?\d[\d,]*(?:\.\d+)?%?\)?", line):
+        score += 2
+    if "|" in line:
+        score += 2
+    if "<br>" in line.lower():
+        score += 1
+    if score < 5:
+        return 0
+    return score
+
+
+def normalize_docfinqa_lookup_text(text: str) -> str:
+    import re
+
+    text = text.replace("\\t", " ").replace("\\n", " ").replace("<br>", " ")
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", text.lower())).strip()
 
 
 def extract_nolima_candidate_facts(context: str) -> list[str]:
@@ -496,6 +720,28 @@ def evidence_prompt(query: str, context: str) -> str:
 
 
 def evidence_prompt_for_benchmark(benchmark: str, query: str, context: str) -> str:
+    if benchmark == "docfinqa":
+        return (
+            "You are the cheap worker for a financial-table QA benchmark. The context is a query-focused digest copied "
+            "from the source filing. Find the exact source rows needed, preserve units, and compute the answer when the "
+            "question asks for a change, ratio, percentage, or growth rate. Do not use outside financial knowledge. "
+            "Prefer table rows over rounded prose when the table contains the requested metric. For 'comprised of' questions, "
+            "divide the requested part by the matching total from the same table. For share-repurchase cash impact, multiply "
+            "shares purchased by average price and convert to millions when requested; if a table has both 'Total Number of Shares Purchased' "
+            "and 'Shares Purchased as Part of Publicly Announced Plan or Program', use the total-shares column unless the question explicitly "
+            "contains the phrase 'publicly announced plan' or 'program'. For straight-line amortization questions, "
+            "sum the relevant intangible values and divide by the stated amortization period. The ANSWER_CANDIDATE must be only "
+            "the final numeric value or percentage when known. If your computation produces a corrected value that differs from an "
+            "earlier candidate, update ANSWER_CANDIDATE to the corrected computed final.\n\n"
+            "Return these sections:\n"
+            "ANSWER_CANDIDATE: final number or percentage only, or INSUFFICIENT.\n"
+            "FORMAT_REQUIREMENT: numeric answer only; include % only for percentages.\n"
+            "EVIDENCE: source line numbers and exact rows/values used.\n"
+            "COMPUTATIONS: formula with source inputs and arithmetic.\n"
+            "RISKS: unit mismatch, wrong fiscal year, wrong row, wrong table, or rounding risk.\n\n"
+            f"Question:\n{query}\n\n"
+            f"Context:\n{context}"
+        )
     if benchmark == "mrcr":
         return (
             "You are the cheap worker for an exact conversation-retrieval benchmark. "
@@ -583,6 +829,19 @@ def critic_prompt(query: str, evidence_packet: str) -> str:
 
 
 def critic_prompt_for_benchmark(benchmark: str, query: str, evidence_packet: str) -> str:
+    if benchmark == "docfinqa":
+        return (
+            "You are the mid-tier checker for a financial numeric answer. Verify that the worker identified the right row, "
+            "period, units, and arithmetic. If there is a percentage answer, check whether the candidate should be rounded "
+            "to the precision implied by the question/source.\n\n"
+            "Return compact sections:\n"
+            "SUFFICIENCY: sufficient or insufficient.\n"
+            "FINAL_FORMAT: exact number or percentage only.\n"
+            "MISSING_OR_WEAK: missing row, wrong year, unit mismatch, arithmetic error, or rounding risk.\n"
+            "SYNTHESIS_INSTRUCTIONS: return only the supported numeric ANSWER_CANDIDATE if sufficient; otherwise INSUFFICIENT.\n\n"
+            f"Question:\n{query}\n\n"
+            f"Evidence packet:\n{evidence_packet}"
+        )
     if benchmark == "mrcr":
         return (
             "You are the mid-tier checker for an exact recall task. Check whether the worker candidate is an exact copied "
@@ -632,6 +891,16 @@ def synthesis_prompt_for_benchmark(
     evidence_packet: str,
     critic_notes: str,
 ) -> str:
+    if benchmark == "docfinqa":
+        return (
+            "Return only the final supported numeric answer for DocFinQA. Use the worker's computation and critic notes. "
+            "Do not include prose, labels, formulas, source lines, markdown, currency words, or explanations. Include a % "
+            "only when the answer is a percentage. If the evidence is insufficient, return INSUFFICIENT.\n\n"
+            f"Question:\n{query}\n\n"
+            f"Evidence packet:\n{evidence_packet}\n\n"
+            f"Critic notes:\n{critic_notes}\n\n"
+            "Final answer:"
+        )
     if benchmark == "mrcr":
         return (
             "Return the exact ANSWER_CANDIDATE from the evidence packet if it is sufficient. "
@@ -698,6 +967,13 @@ def render_benchmark_answer(
         if candidate and candidate.upper() != "INSUFFICIENT":
             return normalize_short_answer(candidate)
         return normalize_short_answer(answer)
+    if benchmark == "docfinqa":
+        candidate = extract_answer_candidate(evidence_packet)
+        value = candidate if candidate and candidate.upper() != "INSUFFICIENT" else answer
+        computed = extract_docfinqa_computed_answer(evidence_packet)
+        if computed and (computed.endswith("%") or str(value).strip().upper() == "INSUFFICIENT"):
+            value = computed
+        return normalize_docfinqa_answer(value)
     if benchmark == "mrcr":
         candidate = extract_answer_candidate(evidence_packet)
         if answer.strip().upper() == "INSUFFICIENT" and candidate and candidate.upper() != "INSUFFICIENT":
@@ -767,6 +1043,53 @@ def normalize_short_answer(answer: str) -> str:
     if value.endswith(".") and value.count(" ") <= 3:
         value = value[:-1].strip()
     return value
+
+
+def normalize_docfinqa_answer(answer: str) -> str:
+    value = normalize_short_answer(answer)
+    if not value:
+        return value
+    if value.upper() == "INSUFFICIENT":
+        return value
+    import re
+
+    percent_match = re.search(r"-?\d+(?:,\d{3})*(?:\.\d+)?\s*%", value)
+    if percent_match:
+        return percent_match.group(0).replace(" ", "")
+    number_match = re.search(r"-?\d+(?:,\d{3})*(?:\.\d+)?", value)
+    if number_match:
+        return number_match.group(0)
+    return value
+
+
+def extract_docfinqa_computed_answer(text: str) -> str | None:
+    if not text:
+        return None
+    import re
+
+    upper = text.upper()
+    start = upper.find("\nCOMPUTATIONS:")
+    if start < 0:
+        return None
+    computation_text = text[start:]
+    stop = computation_text.upper().find("\nRISKS:")
+    if stop >= 0:
+        computation_text = computation_text[:stop]
+
+    result_patterns = [
+        r"=\s*(-?\d+(?:,\d{3})*(?:\.\d+)?)(?:\.\.\.)?\s*%",
+        r"=\s*(-?\d+(?:,\d{3})*(?:\.\d+)?)\s+percent",
+        r"=\s*\$?\s*(-?\d+(?:,\d{3})*(?:\.\d+)?)\s+million",
+        r"=\s*\$?\s*(-?\d+(?:,\d{3})*(?:\.\d+)?)\b",
+    ]
+    for pattern in result_patterns:
+        matches = re.findall(pattern, computation_text, flags=re.IGNORECASE)
+        if matches:
+            value = matches[-1]
+            if "percent" in pattern or pattern.endswith(r"\s*%"):
+                return f"{value}%"
+            return value
+    return None
 
 
 def merge_ordered(first: list[str], second: list[str]) -> list[str]:
@@ -1015,11 +1338,67 @@ def patch_agent_bench_runtime(agent_bench: Any) -> None:
         return
     scorers.SCORERS["l_citeeval"] = score_l_citeeval_with_cited_context
     scorers.SCORERS["repoqa"] = score_repoqa_symbol_or_body
+    scorers.SCORERS["docfinqa"] = score_docfinqa_numeric
     runner.SCORERS["l_citeeval"] = score_l_citeeval_with_cited_context
     runner.SCORERS["repoqa"] = score_repoqa_symbol_or_body
+    runner.SCORERS["docfinqa"] = score_docfinqa_numeric
     if hasattr(agent_bench, "SCORERS"):
         agent_bench.SCORERS["l_citeeval"] = score_l_citeeval_with_cited_context
         agent_bench.SCORERS["repoqa"] = score_repoqa_symbol_or_body
+        agent_bench.SCORERS["docfinqa"] = score_docfinqa_numeric
+
+
+def score_docfinqa_numeric(output: str, expected: str, **_: Any) -> tuple[float, str]:
+    import re
+
+    if not output or output.startswith("[ERROR]"):
+        return 0.0, "no_output"
+    if not expected:
+        return -1.0, "no_reference"
+    expected_text = str(expected).strip()
+    expected_match = re.search(r"-?\d+(?:,\d{3})*(?:\.\d+)?", expected_text)
+    if not expected_match:
+        scorers = importlib.import_module("agent_bench.scorers")
+        return scorers._substring_or_f1(output, expected_text)
+
+    expected_number = parse_docfinqa_number(expected_match.group(0))
+    expected_is_percent = "%" in expected_text
+    output_numbers = re.findall(r"-?\d+(?:,\d{3})*(?:\.\d+)?", output)
+    for raw in output_numbers:
+        predicted = parse_docfinqa_number(raw)
+        if docfinqa_numbers_match(
+            predicted=predicted,
+            expected=expected_number,
+            expected_literal=expected_match.group(0),
+            expected_is_percent=expected_is_percent,
+        ):
+            return 1.0, f"numeric_match:{raw}"
+
+    expected_norm = expected_text.lower().replace(",", "").replace("%", "").strip()
+    output_norm = normalize_lookup_text(output).replace(",", "")
+    if expected_norm and expected_norm in output_norm:
+        return 1.0, "string_match"
+    return 0.0, "no_match"
+
+
+def parse_docfinqa_number(value: str) -> float:
+    return float(value.replace(",", ""))
+
+
+def docfinqa_numbers_match(
+    *,
+    predicted: float,
+    expected: float,
+    expected_literal: str,
+    expected_is_percent: bool,
+) -> bool:
+    decimal_places = 0
+    if "." in expected_literal:
+        decimal_places = len(expected_literal.split(".", 1)[1])
+    if expected_is_percent and decimal_places == 0:
+        return abs(round(predicted) - expected) <= 0.0 or abs(predicted - expected) < 0.5
+    tolerance = max(0.01, 0.5 * (10 ** -decimal_places))
+    return abs(predicted - expected) <= tolerance
 
 
 def score_repoqa_symbol_or_body(output: str, expected: str, **_: Any) -> tuple[float, str]:

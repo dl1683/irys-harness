@@ -9,6 +9,8 @@ from irys_harness.agent_bench_bridge import (
     build_nolima_hard_rows,
     build_citation_judge_context,
     evidence_prompt_for_benchmark,
+    extract_docfinqa_relevant_lines,
+    extract_docfinqa_computed_answer,
     extract_nolima_candidate_facts,
     extract_answer_candidate,
     extract_function_names,
@@ -17,6 +19,7 @@ from irys_harness.agent_bench_bridge import (
     parse_benchmark_specs,
     prepare_prompt_context_for_benchmark,
     render_benchmark_answer,
+    score_docfinqa_numeric,
     score_repoqa_symbol_or_body,
     stable_task_hash,
 )
@@ -241,6 +244,69 @@ class AgentBenchBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Candidate short factual sentences", prepared)
         self.assertIsNotNone(event)
         self.assertEqual(event["method"], "nolima_candidate_fact_digest")
+
+    def test_docfinqa_digest_selects_query_table_rows(self) -> None:
+        context = "\n".join(
+            [
+                "A generic introductory line.",
+                "| Item | 2012 | 2011 |",
+                "| :--- | :--- | :--- |",
+                "| Deferred acquisition payments | $1.2 | $34.8 |",
+                "Another generic line with 2012 but no useful value.",
+            ]
+        )
+        lines = extract_docfinqa_relevant_lines(
+            query="what percentage decrease occurred from 2011-2012 for deferred acquisition payments?",
+            context=context,
+        )
+        joined = "\n".join(line for _, _, line in lines)
+        self.assertIn("Deferred acquisition payments", joined)
+        self.assertIn("$34.8", joined)
+
+    def test_docfinqa_prompt_context_logs_numeric_digest(self) -> None:
+        prepared, event = prepare_prompt_context_for_benchmark(
+            "docfinqa",
+            "| Total operating expenses | 41,932 | 38,391 |\n",
+            query="what was the total operating expenses in 2018 in millions",
+        )
+        self.assertIn("Query-focused financial source digest", prepared)
+        self.assertIsNotNone(event)
+        self.assertEqual(event["method"], "docfinqa_query_numeric_digest")
+
+    def test_docfinqa_renderer_prefers_numeric_candidate(self) -> None:
+        rendered = render_benchmark_answer(
+            benchmark="docfinqa",
+            answer="The answer is approximately 53.2%.",
+            context="",
+            evidence_packet="ANSWER_CANDIDATE: 53.2%\nEVIDENCE: source",
+        )
+        self.assertEqual(rendered, "53.2%")
+
+    def test_docfinqa_scorer_handles_percent_expected(self) -> None:
+        score, detail = score_docfinqa_numeric("53.2%", "53%")
+        self.assertEqual(score, 1.0)
+        self.assertIn("numeric_match", detail)
+
+    def test_docfinqa_renderer_prefers_corrected_computation(self) -> None:
+        rendered = render_benchmark_answer(
+            benchmark="docfinqa",
+            answer="88.5%",
+            context="",
+            evidence_packet=(
+                "ANSWER_CANDIDATE: 88.5%\n"
+                "COMPUTATIONS:\n"
+                "($14,001 / $26,302) * 100 = 53.23%\n"
+                "RISKS: candidate was corrected."
+            ),
+        )
+        self.assertEqual(rendered, "53.23%")
+
+    def test_extract_docfinqa_computed_answer_from_millions(self) -> None:
+        value = extract_docfinqa_computed_answer(
+            "ANSWER_CANDIDATE: 51.28\nCOMPUTATIONS:\n"
+            "1,327,657 * 42.61 / 1,000,000 = $56.57 million\nRISKS: rounding."
+        )
+        self.assertEqual(value, "56.57")
 
     def test_citation_judge_context_selects_cited_doc_not_prefix_window(self) -> None:
         context = "[doc1] irrelevant\n\n[doc49] William Pooley died in 1629."
