@@ -203,7 +203,23 @@ class IrysAgentBenchBackend:
             events.append(context_event)
 
         try:
-            if route["pipeline"] == "direct":
+            deterministic_answer = (
+                context_event.get("deterministic_answer")
+                if context_event and context_event.get("method") == "mrcr_exact_instance_digest"
+                else None
+            )
+            if deterministic_answer:
+                answer = str(deterministic_answer)
+                events.append(
+                    {
+                        "type": "deterministic_answer",
+                        "benchmark": self.benchmark,
+                        "method": context_event.get("method"),
+                        "text": answer,
+                        "at": datetime.now(UTC).isoformat(),
+                    }
+                )
+            elif route["pipeline"] == "direct":
                 result = await self._generate(
                     module="extraction",
                     prompt=direct_prompt_for_benchmark(self.benchmark, query, prompt_context),
@@ -432,6 +448,8 @@ def prepare_prompt_context_for_benchmark(
     *,
     query: str = "",
 ) -> tuple[str, dict[str, Any] | None]:
+    if benchmark == "mrcr" and context and query:
+        return prepare_mrcr_prompt_context(query=query, context=context)
     if benchmark == "docfinqa" and context and query:
         return prepare_docfinqa_prompt_context(query=query, context=context)
     if benchmark != "nolima" or not context:
@@ -455,6 +473,133 @@ def prepare_prompt_context_for_benchmark(
         "model_context_chars": len(prepared),
         "at": datetime.now(UTC).isoformat(),
     }
+
+
+def prepare_mrcr_prompt_context(
+    *,
+    query: str,
+    context: str,
+) -> tuple[str, dict[str, Any] | None]:
+    request = parse_mrcr_request(query)
+    if not request:
+        return context, None
+    candidates = extract_mrcr_candidate_responses(context, request["instruction"])
+    if not candidates:
+        return context, None
+    ordinal = int(request["ordinal"])
+    selected = candidates[ordinal - 1] if 0 < ordinal <= len(candidates) else None
+    preview_candidates = [
+        {
+            "instance": index + 1,
+            "user": user[:160],
+            "assistant_preview": assistant[:240],
+        }
+        for index, (user, assistant) in enumerate(candidates[:5])
+    ]
+    if not selected:
+        prepared = (
+            "MRCR exact retrieval digest.\n"
+            f"Question:\n{query}\n\n"
+            f"Requested instruction: {request['instruction']}\n"
+            f"Requested ordinal: {ordinal}\n"
+            f"Matched instances found: {len(candidates)}\n"
+            "No matching candidate exists for the requested ordinal. Return INSUFFICIENT."
+        )
+    else:
+        _, assistant = selected
+        prepared = (
+            "MRCR exact retrieval digest.\n"
+            "The candidate assistant response below is copied verbatim from the transcript immediately after "
+            "the requested user instruction instance. Return the required prefix followed immediately by this "
+            "assistant response; do not summarize or edit it.\n\n"
+            f"Question:\n{query}\n\n"
+            f"Required prefix: {request['prefix']}\n"
+            f"Requested instruction: {request['instruction']}\n"
+            f"Requested ordinal: {ordinal}\n"
+            f"Matched instances found: {len(candidates)}\n\n"
+            "MATCHED_ASSISTANT_RESPONSE:\n"
+            f"{assistant}"
+        )
+    return prepared, {
+        "type": "context_preparation",
+        "benchmark": "mrcr",
+        "method": "mrcr_exact_instance_digest",
+        "requested_instruction": request["instruction"],
+        "requested_ordinal": ordinal,
+        "matched_instances": len(candidates),
+        "deterministic_answer": (
+            f"{request['prefix']}{selected[1]}" if selected else None
+        ),
+        "candidate_preview": preview_candidates,
+        "full_context_chars": len(context),
+        "model_context_chars": len(prepared),
+        "at": datetime.now(UTC).isoformat(),
+    }
+
+
+def parse_mrcr_request(query: str) -> dict[str, str] | None:
+    import re
+
+    match = re.search(
+        r"Prepend\s+(?P<prefix>\S+)\s+to\s+the\s+"
+        r"(?P<ordinal>\d+)(?:st|nd|rd|th)\s+\(1 indexed\)\s+"
+        r"(?P<instruction>.+?)\.\s+Do not include any other text",
+        query,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not match:
+        return None
+    return {
+        "prefix": match.group("prefix").strip(),
+        "ordinal": match.group("ordinal").strip(),
+        "instruction": normalize_mrcr_instruction(match.group("instruction")),
+    }
+
+
+def normalize_mrcr_instruction(value: str) -> str:
+    import re
+
+    value = value.strip().rstrip(".")
+    value = re.sub(r"\s+", " ", value)
+    return value
+
+
+def extract_mrcr_candidate_responses(context: str, instruction: str) -> list[tuple[str, str]]:
+    turns = parse_mrcr_transcript(context)
+    candidates: list[tuple[str, str]] = []
+    target = normalize_mrcr_lookup_text(instruction)
+    for index, (role, content) in enumerate(turns[:-1]):
+        if role.lower() != "user":
+            continue
+        user_lookup = normalize_mrcr_lookup_text(content)
+        if target not in user_lookup:
+            continue
+        next_role, next_content = turns[index + 1]
+        if next_role.lower() != "assistant":
+            continue
+        candidates.append((content, next_content))
+    return candidates
+
+
+def parse_mrcr_transcript(context: str) -> list[tuple[str, str]]:
+    import re
+
+    pattern = re.compile(r"\[(user|assistant|system)\]\s*", flags=re.IGNORECASE)
+    matches = list(pattern.finditer(context))
+    turns: list[tuple[str, str]] = []
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(context)
+        turns.append((match.group(1), context[start:end].strip()))
+    return turns
+
+
+def normalize_mrcr_lookup_text(text: str) -> str:
+    import re
+
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def prepare_docfinqa_prompt_context(

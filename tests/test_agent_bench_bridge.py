@@ -14,8 +14,10 @@ from irys_harness.agent_bench_bridge import (
     extract_nolima_candidate_facts,
     extract_answer_candidate,
     extract_function_names,
+    extract_mrcr_candidate_responses,
     insert_needle_at_depth,
     nolima_jsonl_is_valid,
+    parse_mrcr_request,
     parse_benchmark_specs,
     prepare_prompt_context_for_benchmark,
     render_benchmark_answer,
@@ -163,6 +165,39 @@ class AgentBenchBridgeTests(unittest.IsolatedAsyncioTestCase):
         prompt = evidence_prompt_for_benchmark("mrcr", "Prepend X to the 2nd poem.", "transcript")
         self.assertIn("exact full benchmark response", prompt)
         self.assertIn("copy the requested response", prompt)
+
+    def test_mrcr_request_parser_extracts_prefix_ordinal_instruction(self) -> None:
+        parsed = parse_mrcr_request(
+            "Prepend ABC123 to the 2nd (1 indexed) song about agreements. "
+            "Do not include any other text in your response."
+        )
+        self.assertEqual(parsed["prefix"], "ABC123")
+        self.assertEqual(parsed["ordinal"], "2")
+        self.assertEqual(parsed["instruction"], "song about agreements")
+
+    def test_mrcr_digest_selects_requested_instance_response(self) -> None:
+        context = (
+            "[user] write a song about agreements\n\n"
+            "[assistant] first song\n\n"
+            "[user] write a poem about apples\n\n"
+            "[assistant] apple poem\n\n"
+            "[user] write a song about agreements\n\n"
+            "[assistant] second song"
+        )
+        candidates = extract_mrcr_candidate_responses(context, "song about agreements")
+        self.assertEqual([assistant for _, assistant in candidates], ["first song", "second song"])
+        prepared, event = prepare_prompt_context_for_benchmark(
+            "mrcr",
+            context,
+            query=(
+                "Prepend XYZ to the 2nd (1 indexed) song about agreements. "
+                "Do not include any other text in your response."
+            ),
+        )
+        self.assertIn("MATCHED_ASSISTANT_RESPONSE:\nsecond song", prepared)
+        self.assertIsNotNone(event)
+        self.assertEqual(event["method"], "mrcr_exact_instance_digest")
+        self.assertEqual(event["deterministic_answer"], "XYZsecond song")
 
     def test_nolima_worker_prompt_demands_latent_short_answer(self) -> None:
         prompt = evidence_prompt_for_benchmark("nolima", "Which character has been to France?", "book")
