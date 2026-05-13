@@ -710,6 +710,35 @@ def has_healthcare_life_sciences_terms(text: str) -> bool:
     )
 
 
+def has_environmental_esg_terms(text: str) -> bool:
+    lower = text.lower()
+    if "environmental-esg" in lower:
+        return True
+    return any(
+        term in lower
+        for term in [
+            "administrative settlement agreement",
+            "asaoc",
+            "cercla",
+            "epa consent",
+            "natural resource damages",
+            "product safety issue",
+            "recall and reporting",
+            "cpsa",
+            "cpsc",
+            "section 15(b)",
+            "esg disclosure",
+            "climate disclosure",
+            "ghg emissions",
+            "sb 253",
+            "sb 261",
+            "csrd",
+            "esrs",
+            "double materiality",
+        ]
+    )
+
+
 def has_tax_controversy_terms(text: str) -> bool:
     lower = text.lower()
     if re.search(r"\btax\b", lower):
@@ -974,6 +1003,18 @@ def build_required_sections(
             "Recommended remediation and negotiation positions",
             "Source citations",
         ]
+    if has_environmental_esg_terms(haystack):
+        return [
+            "Executive summary",
+            "Near-top environmental / ESG required findings",
+            "Regulatory authority and threshold matrix",
+            "Provision-delta and settlement-risk matrix",
+            "Financial assurance, penalty, and exposure calculations",
+            "Reporting, recall, and deadline action plan",
+            "ESG disclosure framework gap analysis",
+            "Recommended remediation and negotiation positions",
+            "Source citations",
+        ]
     if has_trusts_estates_terms(haystack):
         return [
             "Executive summary",
@@ -1047,6 +1088,16 @@ def build_evidence_focus(haystack: str) -> list[str]:
                 "clinical-trial publication, confidentiality, indemnity, audit, termination, retention, drug-accountability, and data-use clause deltas",
                 "protocol DSMB, informed-consent, pathology-reader, stopping-criteria, and FDA pre-IND recommendation gaps",
                 "capex, indebtedness, option grants, tax elections, consent notices, material-contract thresholds, and delayed FDA notifications",
+            ]
+        )
+    if has_environmental_esg_terms(haystack):
+        focus.extend(
+            [
+                "CERCLA, EPA, CPSC/CPSA, SEC, California climate, EU CSRD/ESRS, and ESG source standards",
+                "financial assurance, LOC, penalty, reimbursement, cap, installment, and exposure calculations",
+                "covenant-not-to-sue, reopener, force-majeure, dispute-resolution, and assignment clause deltas",
+                "recall/reporting triggers, incident timelines, constructive notice facts, insurance notices, and distributor/supplier indemnity",
+                "Scope 1/2/3 emissions totals, target years, assurance status, governance linkage, and double-materiality gaps",
             ]
         )
     if has_trusts_estates_terms(haystack):
@@ -1244,6 +1295,8 @@ def infer_task_family(haystack: str) -> str:
         return "real_estate_transaction_review"
     if has_healthcare_life_sciences_terms(haystack):
         return "healthcare_life_sciences_review"
+    if has_environmental_esg_terms(haystack):
+        return "environmental_esg_review"
     if has_trusts_estates_terms(haystack):
         return "trusts_estates_private_client_review"
     if has_tax_controversy_terms(haystack):
@@ -1339,6 +1392,11 @@ For prenuptial, premarital, family-wealth, or estate-planning redline memoranda,
     if needs_environmental_indemnity_digest(state):
         environmental_indemnity_guidance = """
 For environmental indemnity redline memoranda, preserve the "High-Priority Environmental Indemnity Matrix", "Financial Assurance and Cost Exposure Schedule", and "Closing-Failure / Must-Have List" as substantive memo findings. Tie every seller markup issue to the controlling source requirement: buyer draft, PSA, lender term sheet, Phase II ESA, remediation cost estimate, and seller cover email. Do not collapse remediation standards, covered-condition scope, financial assurance, lender rights, survival, transferability, self-help, exclusions, and dispute provisions into generic negotiation prose.
+"""
+    environmental_esg_guidance = ""
+    if needs_environmental_esg_digest(state) and not needs_environmental_indemnity_digest(state):
+        environmental_esg_guidance = """
+For environmental, ESG, product-safety, and regulatory-settlement deliverables, preserve the "Near-Top Environmental / ESG Required Findings", "Regulatory Authority and Threshold Matrix", "Provision-Delta and Settlement-Risk Matrix", "Financial Assurance / Penalty / Exposure Calculations", "Product Safety Reporting and Recall Timeline", and "ESG Disclosure Framework Gap Matrix" as substantive work product when the worker packet lists them. Explicitly state CERCLA/EPA/CPSC/CPSA/SEC/California/EU authority, reporting deadlines, financial assurance mechanics, penalty caps, reopener and covenant-not-to-sue limits, force-majeure and dispute-resolution changes, supplier/distributor indemnity, Scope 3 totals, target years, governance-compensation linkage, and double-materiality distinctions. Do not collapse environmental settlement, product-safety, and ESG disclosure threshold work into generic redline prose.
 """
     ip_contract_guidance = ""
     if needs_ip_contract_amendment_digest(state):
@@ -1475,6 +1533,7 @@ For insurance coverage-determination memoranda, preserve the "High-Priority Insu
 {employment_labor_guidance}
 {funds_asset_management_guidance}
 {healthcare_life_sciences_guidance}
+{environmental_esg_guidance}
 {trusts_estates_guidance}
 {tax_controversy_guidance}
 For covenant-compliance deliverables, include a Required Numeric Reconciliation section. At minimum, when the facts are present, it must state: Borrower's unadjusted EBITDA; corrected Total Funded Debt arithmetic; primary corrected EBITDA and leverage; interest denominator audit; available revolver / letters-of-credit correction; period-end liquidity and whether period-end liquidity is compliant; any intra-period liquidity breach separately; capital expenditures actual versus adjusted limit; extraordinary/non-recurring charge cap and claimed amount; realized versus projected savings; and any further-corrected named-settlement scenario. Do not let an intra-period breach replace the separate period-end liquidity calculation.
@@ -2039,6 +2098,8 @@ def build_task_family_digest(state: RunState) -> str:
         return build_insurance_coverage_digest(state)
     if needs_environmental_indemnity_digest(state):
         return build_environmental_indemnity_digest(state)
+    if needs_environmental_esg_digest(state):
+        return build_environmental_esg_digest(state)
     if needs_ip_contract_amendment_digest(state):
         return build_ip_contract_amendment_digest(state)
     if needs_technology_data_agreement_digest(state):
@@ -5021,6 +5082,532 @@ def build_environmental_indemnity_digest(state: RunState) -> str:
     )
     if snippets:
         lines.extend(["", "## Environmental Indemnity Source Snippets", *snippets])
+    return "\n".join(lines)
+
+
+def needs_environmental_esg_digest(state: RunState) -> bool:
+    practice_area = str(state.task.metadata.get("practice_area", "")).lower()
+    text = lower_task_text(state)
+    return "environmental-esg" in practice_area or has_environmental_esg_terms(text)
+
+
+def environmental_esg_digest_modes(state: RunState, context: str) -> set[str]:
+    modes: set[str] = set()
+    if any(term in context for term in ["administrative-settlement", "administrative settlement", "asaoc"]):
+        modes.add("asaoc")
+    if any(
+        term in context
+        for term in [
+            "counterparty-markup-of-settlement-agreement",
+            "original-settlement",
+            "redline-settlement",
+            "settlement agreement",
+        ]
+    ):
+        modes.add("settlement")
+    if any(term in context for term in ["product-safety", "product safety", "recall", "cpsa", "cpsc", "pressure cooker"]):
+        modes.add("product_safety")
+    if any(term in context for term in ["esg-disclosure", "esg disclosure", "ghg", "climate disclosure", "csrd", "esrs", "sb 253"]):
+        modes.add("esg_disclosure")
+    if not modes:
+        modes.add("general")
+    return modes
+
+
+def add_environmental_asaoc_rows(lines: list[str]) -> None:
+    rows = [
+        [
+            "Financial assurance test",
+            "Lakeview appears to replace stronger assurance mechanics with parent/self-assurance concepts.",
+            "Analyze 40 C.F.R. 264.143(f)-style financial-test conditions: net working capital, tangible net worth, U.S. asset percentage, and investment-grade bond rating.",
+            "Treat unsupported self-assurance as a critical collectability issue, not a business preference.",
+        ],
+        [
+            "covenant not to sue timing and scope",
+            "Counterparty language accelerates covenant protection at execution and broadens it beyond the specific work.",
+            "EPA covenants should attach only after completion/performance and should remain tied to the relevant operable unit and payment obligations.",
+            "Flag any move from OU-1/task-specific protection to all operable units or all PRPs as overbroad.",
+        ],
+        [
+            "EPA reservations and NRD",
+            "Deletion or narrowing of EPA reservations can impair later natural-resource-damage and unknown-condition claims.",
+            "Preserve reservation of rights for natural resource damages, unknown conditions, criminal liability, and non-settling PRP claims.",
+            "State why reservation deletion can create premature immunity.",
+        ],
+        [
+            "Independent remedial activity offset",
+            "Offset rights can let Lakeview reduce settlement payments for work that is independently required or internally approved elsewhere.",
+            "Check MRG Governance Agreement consent/supermajority requirements and whether offset work is genuinely incremental.",
+            "Reject offsets without approval, documentation, EPA signoff, and no double-counting.",
+        ],
+        [
+            "Stipulated penalty reductions and cap",
+            "Baseline penalties should be treated as 1,500 / 3,000 / 7,500 dollars per day unless source materials require otherwise.",
+            "Markup reducing penalties to 500 / 1,000 / 2,500 dollars and adding a 250,000 dollar annual cap can exhaust deterrence quickly.",
+            "Show the cap arithmetic and separately flag any deletion of late-payment penalties.",
+        ],
+        [
+            "Force majeure expansion",
+            "Financial hardship, market conditions, and regulatory changes are not ordinary force-majeure excuses for CERCLA cleanup obligations.",
+            "Preserve strict notice, deadline, mitigation, and no-financial-hardship carveouts.",
+            "Reject tolling language that lets economic conditions suspend compliance.",
+        ],
+        [
+            "Dispute-resolution standard",
+            "Markup may replace EPA decision authority and administrative-record review with de novo federal-court review.",
+            "Preserve EPA primacy and deferential administrative-record review for technical cleanup disputes.",
+            "Classify de novo review as delay/leverage risk.",
+        ],
+        [
+            "Overbroad covenant / self-certification interaction",
+            "Lakeview expands the covenant from OU-1 to all operable units at the Site, including future operable units, and pairs it with self-certification of completion plus a 30-day deemed-acceptance provision.",
+            "This can let PRPs self-certify inadequate work, then invoke covenant protections for contamination not yet investigated.",
+            "Explain the compounding immunization risk; require EPA affirmative written certification before any covenant protection attaches.",
+        ],
+        [
+            "Prevailing-party attorneys' fees",
+            "Dispute-resolution language can require EPA to pay Respondents' attorneys' fees if a Respondent prevails.",
+            "Fee shifting against EPA lacks ordinary CERCLA settlement basis and conflicts with American Rule, sovereign-immunity, statutory-authority, and Antideficiency Act concerns.",
+            "Identify the fee-shifting provision and reject it as legally impermissible or unavailable absent clear statutory authority.",
+        ],
+        [
+            "Institutional-controls downgrade",
+            "Lakeview replaces mandatory deed restrictions/use limitations with a reasonable-satisfaction or unrestricted-use self-assessment standard.",
+            "Site facts make unrestricted use inappropriate: TCE at 960x MCL, hexavalent chromium at 12x MCL, and PCBs at 340 mg/kg.",
+            "Restore mandatory deed restrictions, groundwater-use limits, and EPA-controlled institutional controls.",
+        ],
+        [
+            "Access agreement obligation shift",
+            "Lakeview shifts responsibility for securing access agreements from the Respondents to EPA.",
+            "PRPs performing the work should secure access; shifting access to EPA creates delay, enforceability, and implementation risk.",
+            "Reject the access-shift provision and keep access/site-control obligations on Respondents.",
+        ],
+        [
+            "Schedule extensions and plume risk",
+            "Remedial Design deadline changes from 18 to 30 months; Remedial Action changes from 36 to 48 months; Lakeview also adds a unilateral 12-month extension on 30 days' notice without EPA approval.",
+            "The combined schedule can move from 54 months to 78 months, or 90 months with the unilateral extension, while the groundwater plume is migrating toward Lake Michigan.",
+            "Quantify the total timeline extension and tie delay to plume-migration and receptor risk.",
+        ],
+        [
+            "Hartwell financial assurance / initial payment math",
+            "Cost basis changes from 52,800,000 dollars to 47,300,000 dollars; the 10% initial payment changes from 5,280,000 dollars to 4,730,000 dollars, a 550,000 dollar reduction.",
+            "Hartwell's 34.2% share of the 5,500,000 dollar cost-basis reduction is 1,881,000 dollars; Hartwell's share of the initial-payment reduction is 188,100 dollars.",
+            "Show both total and Hartwell-specific financial-assurance/payment impact.",
+        ],
+        [
+            "Cover-letter omissions and change count",
+            "Lakeview's cover letter does not disclose several substantive changes, including EPA indemnification, Section XIV waiver/additional-work limits, fee shifting, timeline extensions, force-majeure tolling, and reservation-of-rights changes.",
+            "The review should distinguish 47 total changes from substantive legal/economic changes versus non-substantive drafting/format changes.",
+            "Include a cover-letter omission table so hidden changes are not lost in the redline narrative.",
+        ],
+        [
+            "Section XIV additional-work waiver",
+            "Lakeview adds language that EPA waives all rights to require additional work beyond the SOW under any circumstance.",
+            "This exceeds normal reservation/covenant limits and can block response to unknown conditions, new information, or remedy failure.",
+            "Reject the Section XIV waiver and preserve EPA reopeners/reservations for additional work.",
+        ],
+        [
+            "Force-majeure notice and tolling",
+            "Lakeview changes force-majeure notice from 15 to 45 days and tolls all deadlines during the force-majeure review period.",
+            "Longer notice plus review-period tolling can convert weak economic excuses into open-ended schedule relief.",
+            "Restore the 15-day notice period, no financial-hardship/market-condition excuse, and no automatic deadline tolling.",
+        ],
+    ]
+    append_digest_table(
+        lines,
+        "ASAOC / Administrative Settlement Review Rows",
+        ["Issue", "Source-Specific Finding", "Controlling Standard", "Required Treatment"],
+        rows,
+    )
+
+
+def add_environmental_settlement_rows(lines: list[str]) -> None:
+    rows = [
+        [
+            "Installment payment structure",
+            "Lump-sum settlement is changed to four equal annual installments of 3,562,500 dollars over three years.",
+            "Treat delayed payment as credit and enforcement risk, not merely payment timing.",
+            "Show total payment schedule and security gap.",
+        ],
+        [
+            "Standby LOC gap",
+            "Standby LOC is 10,687,500 dollars from Columbia River Commercial Bank; first installment is not secured by the LOC.",
+            "LOC should secure all unpaid settlement amounts or be paired with parent guarantee/other credit support.",
+            "Flag issuer, expiry, draw conditions, and first-installment exposure.",
+        ],
+        [
+            "Asset-stripping / portfolio-company risk",
+            "Saxonbrook is a Ridgecrest PE portfolio company, creating dividend-recapitalization and asset-transfer concerns.",
+            "Payment deferral plus thin capitalization can impair recoverability.",
+            "Recommend guarantee, covenants, financial reporting, anti-transfer protections, and acceleration on default.",
+        ],
+        [
+            "Past-cost reimbursement reduction",
+            "Past-cost reimbursement is reduced by 689,000 dollars.",
+            "Separately quantify past-cost reduction from NRD and future-response-cost changes.",
+            "Do not bury the amount in generic settlement economics.",
+        ],
+        [
+            "NRD offset",
+            "NRD payment is reduced from 1,216,000 dollars to 840,000 dollars, a 376,000 dollar reduction.",
+            "Natural-resource-damage offsets require trustee/legal basis; check CERCLA Section 107(a)(4)(C) and 43 C.F.R. Part 11 concepts.",
+            "Reject unsupported offset or make it conditioned on trustee approval.",
+        ],
+        [
+            "Reopener deletion",
+            "Deletion or narrowing of reopener rights conflicts with CERCLA Section 122(f)(6)-style reservation practice and DOJ policy.",
+            "Preserve reopeners for unknown conditions, new information, failure to perform, and fraud/misrepresentation.",
+            "Treat this as critical because it can cap future response-cost recovery.",
+        ],
+        [
+            "Indemnity cap",
+            "A 5,000,000 dollar indemnity cap is materially below a 29,450,000 dollar exposure frame.",
+            "Compare cap to total exposure, response costs, NRD, penalties, and enforcement costs.",
+            "Recommend uncapped CERCLA/environmental indemnity or a materially higher secured cap.",
+        ],
+        [
+            "Assignment and dispute resolution",
+            "One-sided anti-assignment can move obligations to a thin shell; court dispute resolution may be replaced with AAA Commercial Rules before a single arbitrator.",
+            "Assignment should require consent, credit support, and no release; federal/CERCLA forum and remedies should be preserved.",
+            "Flag arbitration and consequential/punitive/exemplary damages limits if they block excess cost recovery.",
+        ],
+        [
+            "Pre-2003 contamination carve-out",
+            "Indemnification carve-out excludes or narrows responsibility for pre-2003 contamination.",
+            "A temporal carve-out can eliminate the very legacy contamination risk the settlement is supposed to resolve.",
+            "Identify the carve-out expressly and recommend deleting it or carving back all Site/CERCLA legacy contamination.",
+        ],
+        [
+            "LOC issuer/expiry without guarantee",
+            "LOC support creates residual risk if the issuer fails, the LOC expires, or no Ridgecrest/parent guarantee backs the deferred payment stream.",
+            "Security must survive issuer failure, expiry, assignment, and installment default.",
+            "Require replacement LOC, evergreen/auto-extension, draw rights before expiry, and parent guarantee backstop.",
+        ],
+        [
+            "Force majeure expansion and financial inability deletion",
+            "Force majeure expands to supply chain disruptions, labor shortages, regulatory delays, and inability to obtain necessary permits, while deleting the financial-inability exclusion.",
+            "This can let Saxonbrook excuse payment/performance for economic difficulty or ordinary business disruption.",
+            "Restore financial-inability exclusion and narrow force majeure to truly unforeseeable events outside party control.",
+        ],
+        [
+            "Governing law changed to Oregon",
+            "Governing law changes from federal/CERCLA law to Oregon state law.",
+            "A CERCLA consent decree should preserve federal law, federal jurisdiction, and federal enforcement remedies.",
+            "Reject Oregon-law substitution or add federal/CERCLA supremacy and federal-court carveouts.",
+        ],
+        [
+            "Public consent decree confidentiality",
+            "Confidentiality restrictions are largely illusory or inappropriate for a consent decree/public court filing.",
+            "Settlement terms filed with or enforced by a court/regulator will not remain private in the same way as a private contract.",
+            "Do not trade away enforcement or disclosure accuracy for overbroad confidentiality.",
+        ],
+        [
+            "Liquidated damages / penalty risk",
+            "A 250,000 dollar liquidated-damages provision may operate as an unenforceable penalty if not tied to reasonable anticipated harm.",
+            "Environmental consent decree remedies should preserve statutory penalties, stipulated penalties, and actual/excess cost recovery.",
+            "Flag enforceability risk and avoid substituting liquidated damages for statutory remedies.",
+        ],
+        [
+            "Stipulated penalty tier reduction",
+            "Penalty tiers are reduced from 1,500 / 3,000 / 5,000 dollars to 750 / 1,500 / 2,500 dollars.",
+            "Reduced tiers weaken compliance incentives and compound with installment/security risks.",
+            "State each original and reduced tier and recommend restoring the original penalty schedule.",
+        ],
+    ]
+    append_digest_table(
+        lines,
+        "Environmental Settlement Agreement Rows",
+        ["Issue", "Source-Specific Finding", "Risk", "Required Treatment"],
+        rows,
+    )
+
+
+def add_product_safety_recall_rows(lines: list[str]) -> None:
+    rows = [
+        [
+            "CPSA Section 15(b) deadline",
+            "A report to CPSC is generally due immediately, commonly treated as within 24 hours after reportable information is obtained.",
+            "Use the 24-hour trigger and identify who knew what and when.",
+            "State whether current facts support immediate reporting and preserve legal uncertainty if evidence is incomplete.",
+        ],
+        [
+            "Constructive knowledge",
+            "May 2023 Shenzhou notice can establish early warning/constructive knowledge before later incident escalation.",
+            "Connect supplier warning, complaint log, incident reports, and failure to inspect or escalate.",
+            "Do not start the reporting timeline only at the latest injury event if earlier notice is in the packet.",
+        ],
+        [
+            "Mandatory recall authority",
+            "CPSC can seek corrective action/mandatory recall under CPSA Sections 15(c) and 15(d).",
+            "Assess stop-sale, consumer notice, repair/replacement/refund, retailer notice, and CPSC corrective-action-plan mechanics.",
+            "Distinguish voluntary corrective action from mandatory recall exposure.",
+        ],
+        [
+            "Civil penalty exposure",
+            "CPSA Section 20 / 15 U.S.C. 2069 civil penalties can be approximately 120,000 dollars per violation with an aggregate cap around 17.15 million dollars.",
+            "Use packet-specific current penalty values when present; otherwise state these as the governing exposure frame.",
+            "Tie penalty risk to delayed reporting, number of units, knowledge, and severity.",
+        ],
+        [
+            "Supplier / distributor indemnity",
+            "Shenzhou may blame sub-supplier Ruida; OptaRetail Section 7.6 and supplier agreements may allocate recall, defect, and indemnity costs.",
+            "Analyze direct supplier indemnity, sub-supplier gaps, distributor notice obligations, and preservation of claims.",
+            "Recommend notice to all indemnitors and evidence-preservation steps.",
+        ],
+        [
+            "Liquidity and insurance",
+            "Revolving credit facility is 40,000,000 dollars with 12,000,000 dollars drawn and 28,000,000 dollars available.",
+            "Recall liquidity and insurance notice should be quantified before recommending customer/remediation program size.",
+            "Notify insurer Pinnacle Casualty and preserve coverage for product-liability and recall expense where available.",
+        ],
+        [
+            "Incident action plan",
+            "Specific incidents such as Helman and Chen should be mapped to dates, injuries, product batches, retailer channels, and regulator communications.",
+            "Build an action-plan table with 24-hour, 48-hour, 5-day, and 30-day workstreams where supported.",
+            "Include state-level consumer-protection/reporting checks rather than federal-only analysis.",
+        ],
+        [
+            "Shenzhou / Ruida responsibility dispute",
+            "Shenzhou may disclaim responsibility by arguing that the defect originated with sub-supplier Ruida's material change rather than Shenzhou's own manufacturing process.",
+            "Preserve claims against Shenzhou while also demanding Ruida records, certificates, and batch traceability.",
+            "Send notices to both supplier levels and do not assume the primary supplier will accept indemnity responsibility.",
+        ],
+        [
+            "State-level reporting and consumer protection",
+            "Federal CPSC reporting is not the only reporting surface; state product-safety, consumer-protection, attorney-general, and retailer notification duties should be checked.",
+            "State-level review is required because injuries occurred in multiple states and retail distribution may trigger state notice obligations.",
+            "Include a state-reporting workstream instead of a federal-only action plan.",
+        ],
+        [
+            "Testing sample size and unit universe",
+            "Only 15 units were destructively tested, with 4 failures; that sample is too small to bound defect prevalence across the product universe.",
+            "Total units sold are 742,000; potentially affected post-change units are about 485,000, leaving about 257,000 pre-change units that should be distinguished in recall-scope analysis.",
+            "Recommend expanded statistically meaningful testing and state both total-sold and affected-window counts.",
+        ],
+        [
+            "Injury and litigation posture",
+            "There are zero fatalities, 6 burn complaints, 3 emergency-room visits, and key Helman and Chen incidents with current or imminent individual litigation risk.",
+            "Helman has counsel and a preservation demand; Chen has hospital treatment and lost work days.",
+            "Discuss individual claims, class-action exposure, litigation hold, and outside litigation counsel.",
+        ],
+        [
+            "Outside counsel",
+            "QA recommended outside counsel with product-safety/product-liability experience, including Thomas Aldrich at Harmon Whitfield LLP.",
+            "Regulatory reporting, recall strategy, litigation preservation, and supplier indemnity should be coordinated through outside counsel.",
+            "Include engagement of outside litigation/regulatory counsel as an immediate action item.",
+        ],
+    ]
+    append_digest_table(
+        lines,
+        "Product Safety Reporting and Recall Timeline",
+        ["Issue", "Source-Specific Finding", "Required Analysis", "Required Treatment"],
+        rows,
+    )
+
+
+def add_esg_disclosure_rows(lines: list[str]) -> None:
+    rows = [
+        [
+            "Net-zero target year",
+            "Source materials show a 2045 target while draft disclosure may state 2040.",
+            "Correct target year to 2045 unless the packet expressly supersedes it.",
+            "Treat the 2040/2045 discrepancy as high priority because it affects investor-facing commitments.",
+        ],
+        [
+            "Scope 3 total discrepancy",
+            "GHG workbook category breakdown supports 3,840,000 mtCO2e while report summary may state 3,640,000 mtCO2e.",
+            "Reconcile page/section totals and identify the 200,000 mtCO2e discrepancy.",
+            "Classify as Critical/High if the draft report materially understates emissions.",
+        ],
+        [
+            "Scope 2 dual reporting",
+            "The workbook contains both Scope 2 location-based emissions of 289,000 mtCO2e and market-based emissions of 214,000 mtCO2e.",
+            "GHG Protocol Scope 2 guidance and the regulatory checklist require both location-based and market-based Scope 2 figures.",
+            "Recommend adding location-based Scope 2 disclosure rather than reporting only market-based Scope 2.",
+        ],
+        [
+            "Scope 3 category exclusions",
+            "Only 5 of 15 Scope 3 categories are disclosed: Category 1 Purchased Goods & Services, Category 4 Upstream Transportation & Distribution, Category 5 Waste Generated in Operations, Category 11 Use of Sold Products, and Category 12 End-of-Life Treatment of Sold Products.",
+            "The remaining 10 categories lack documented materiality/relevance justification.",
+            "Require a formal Scope 3 screening/relevance assessment and category-by-category exclusion rationale.",
+        ],
+        [
+            "Internal report inconsistency",
+            "The draft report summary page/section reports 3,640,000 mtCO2e, while the report's own Scope 3 category breakdown table and GHG workbook support 3,840,000 mtCO2e.",
+            "This is both a source-data discrepancy and an internal inconsistency within the draft report.",
+            "Identify the specific summary-versus-breakdown inconsistency and correct the report total.",
+        ],
+        [
+            "Incomplete facility coverage",
+            "Four facilities are incomplete/unassessed: three Southeast Asia facilities and the Poland / Gdansk facility.",
+            "Facility omissions affect emissions completeness, climate-risk assessment, and potentially CSRD/ESRS value-chain analysis.",
+            "List all four incomplete facilities and require remediation before publication.",
+        ],
+        [
+            "Scenario-analysis pathway",
+            "Scenario analysis must specify temperature pathways such as 1.5C, 2C, and greater than 3C where scenario analysis is used.",
+            "Purely qualitative scenario discussion is inadequate when material climate risks are identified.",
+            "Add pathway-specific assumptions and quantitative financial impact estimates where material.",
+        ],
+        [
+            "California climate rules",
+            "Greenfield West LLC revenue above 1,000,000,000 dollars can trigger SB 253/SB 261 analysis.",
+            "Identify reporting entity, revenue threshold, Scope 1/2/3 timing, assurance, and climate-risk disclosure obligations.",
+            "Separate California requirements from SEC and EU frameworks.",
+        ],
+        [
+            "SEC climate rule posture",
+            "Greenfield is a large accelerated filer, but SEC climate rules may be stayed pending litigation.",
+            "Explain applicability and litigation posture without treating stayed rules as fully operative.",
+            "Preserve current-rule caveat and note voluntary/investor disclosure implications.",
+        ],
+        [
+            "EU CSRD / ESRS",
+            "EU supply-chain and sustainability disclosures should be checked under CSRD/ESRS, including ESRS S2 where workforce/supply-chain topics appear.",
+            "Apply double materiality instead of only U.S.-style financial materiality.",
+            "Flag missing double-materiality process, value-chain coverage, and policy/action/target metrics.",
+        ],
+        [
+            "EU supply-chain due diligence",
+            "EU operations and suppliers require supply-chain due-diligence analysis under CSDDD/CS3D concepts and ESRS S2 Workers in the Value Chain where applicable.",
+            "The report should not rely only on generic supplier-code statements.",
+            "Identify missing EU supply-chain due-diligence disclosure and value-chain worker analysis.",
+        ],
+        [
+            "ESRS 2 GOV-3 / compensation linkage",
+            "ESG-linked executive compensation should be checked against governance-disclosure requirements and SEC proxy norms.",
+            "Identify whether climate/ESG targets are incorporated into incentive compensation and whether methodology is disclosed.",
+            "Recommend governance and compensation-disclosure remediation.",
+        ],
+        [
+            "Double materiality explanation",
+            "Double materiality requires both financial materiality and impact materiality; single/financial materiality covers only effects on enterprise value.",
+            "CSRD/ESRS analysis must address the company's impacts on people/environment and sustainability matters' financial effects on the company.",
+            "Explain the distinction, not merely name double materiality.",
+        ],
+        [
+            "Physical asset exposure",
+            "Facility vulnerability materials show approximately 1.2 billion dollars of physical asset exposure in high-risk zones.",
+            "Connect physical-risk exposure to climate-risk narrative, controls, and board oversight.",
+            "Do not let emissions math replace physical-risk disclosure analysis.",
+        ],
+    ]
+    append_digest_table(
+        lines,
+        "ESG Disclosure Framework Gap Matrix",
+        ["Issue", "Source-Specific Finding", "Required Analysis", "Required Treatment"],
+        rows,
+    )
+
+
+def add_environmental_general_rows(lines: list[str]) -> None:
+    rows = [
+        [
+            "Authority matrix first",
+            "Environmental tasks often turn on the regulator/statute more than the contract heading.",
+            "Build an authority matrix before narrative synthesis.",
+            "Separate CERCLA/EPA settlement authority, CPSC product-safety authority, SEC/California/EU climate authority, and contractual remedies.",
+        ],
+        [
+            "Numbers are legal facts",
+            "Settlement payments, LOC amounts, penalty rates, emissions totals, revenue thresholds, and caps are usually decisive.",
+            "Preserve row-level arithmetic and show deltas.",
+            "Do not summarize away exact figures to protect prose quality.",
+        ],
+        [
+            "Reservation and reopener discipline",
+            "Environmental resolutions often fail when covenants, releases, reopeners, and reservations are collapsed.",
+            "Analyze each release/covenant/reopener/reservation separately.",
+            "State whether the language is premature, overbroad, undersecured, or unsupported.",
+        ],
+        [
+            "Timeline discipline",
+            "Reporting, cure, notice, review, draw, recall, and regulatory response deadlines drive outcome.",
+            "Build an explicit timeline when the packet contains dates or incident sequence.",
+            "Avoid generic urgency language without actual trigger dates.",
+        ],
+    ]
+    append_digest_table(
+        lines,
+        "General Environmental / ESG Extraction Rules",
+        ["Issue", "Why It Matters", "Operator Rule", "Required Treatment"],
+        rows,
+    )
+
+
+def build_environmental_esg_digest(state: RunState) -> str:
+    context = lower_task_text(state)
+    modes = environmental_esg_digest_modes(state, context)
+    lines = [
+        "# Deterministic environmental / ESG task-capability digest",
+        "These rows preserve regulatory thresholds, provision deltas, financial assurance mechanics, reporting timelines, and disclosure-framework gaps before final synthesis.",
+        "",
+        "## Near-Top Environmental / ESG Required Findings",
+        "- Start with the controlling authority and exact threshold/deadline/amount that drives each conclusion.",
+        "- Separate contractual redline risk from statutory/regulatory reporting risk.",
+        "- Preserve calculations and tables as work product, not as hidden scratchpad.",
+        "- For uncertain facts, state the missing source fact and the conservative action required.",
+    ]
+    if "asaoc" in modes:
+        add_environmental_asaoc_rows(lines)
+    if "settlement" in modes:
+        add_environmental_settlement_rows(lines)
+    if "product_safety" in modes:
+        add_product_safety_recall_rows(lines)
+    if "esg_disclosure" in modes:
+        add_esg_disclosure_rows(lines)
+    add_environmental_general_rows(lines)
+
+    snippet_keywords = [
+        "40 C.F.R. 264.143",
+        "net working capital",
+        "tangible net worth",
+        "covenant not to sue",
+        "natural resource damages",
+        "stipulated penalties",
+        "$250,000",
+        "force majeure",
+        "de novo",
+        "$3,562,500",
+        "$10,687,500",
+        "Columbia River Commercial Bank",
+        "Saxonbrook",
+        "$689,000",
+        "$1,216,000",
+        "$840,000",
+        "$376,000",
+        "122(f)(6)",
+        "$5,000,000",
+        "$29,450,000",
+        "AAA Commercial Rules",
+        "Section 15(b)",
+        "24 hours",
+        "May 2023",
+        "15(c)",
+        "15(d)",
+        "2069",
+        "$17.15",
+        "$28,000,000",
+        "Pinnacle Casualty",
+        "OptaRetail",
+        "Section 7.6",
+        "2040",
+        "2045",
+        "3,640,000",
+        "3,840,000",
+        "200,000",
+        "SB 253",
+        "SB 261",
+        "large accelerated filer",
+        "CSRD",
+        "ESRS",
+        "GOV-3",
+        "double materiality",
+        "$1.2",
+    ]
+    snippets = collect_relevant_snippets(state, snippet_keywords, max_snippets=96)
+    if snippets:
+        lines.extend(["", "## Environmental / ESG Source Snippets", *snippets])
     return "\n".join(lines)
 
 

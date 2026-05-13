@@ -1674,6 +1674,93 @@ class HarveyQueryTests(unittest.TestCase):
         self.assertIn("For environmental indemnity redline memoranda", prompt)
         self.assertIn("High-Priority Environmental Indemnity Matrix", prompt)
 
+    def test_environmental_esg_digest_routes_asaoc_and_settlement_tasks(self) -> None:
+        asaoc_task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="environmental-esg/analyze-counterparty-markup-of-administrative-settlement-agreement",
+            question="Analyze Lakeview redline of the administrative settlement agreement.",
+            answer_schema={"deliverables": ["redline-analysis-memorandum.docx"]},
+            metadata={"practice_area": "environmental-esg"},
+        )
+        asaoc_state = RunState(task=asaoc_task, config=load_config(), documents=[])
+        asaoc_contract = build_deliverable_contract(asaoc_state)
+        asaoc_digest = build_task_family_digest(asaoc_state)
+        self.assertEqual(asaoc_contract["task_family"], "environmental_esg_review")
+        self.assertIn(
+            "Near-top environmental / ESG required findings",
+            asaoc_contract["deliverables"][0]["required_sections"],
+        )
+        self.assertIn("ASAOC / Administrative Settlement Review Rows", asaoc_digest)
+        self.assertIn("40 C.F.R. 264.143(f)", asaoc_digest)
+        self.assertIn("covenant not to sue", asaoc_digest)
+        self.assertIn("250,000", asaoc_digest)
+        self.assertIn("de novo", asaoc_digest)
+        self.assertIn("30-day deemed-acceptance", asaoc_digest)
+        self.assertIn("54 months to 78 months", asaoc_digest)
+        self.assertIn("5,280,000 dollars to 4,730,000 dollars", asaoc_digest)
+
+        settlement_task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="environmental-esg/analyze-counterparty-markup-of-settlement-agreement",
+            question="Analyze Saxonbrook redline of the environmental settlement agreement.",
+            answer_schema={"deliverables": ["redline-review-memo.docx"]},
+            metadata={"practice_area": "environmental-esg"},
+        )
+        settlement_state = RunState(task=settlement_task, config=load_config(), documents=[])
+        settlement_digest = build_task_family_digest(settlement_state)
+        self.assertIn("Environmental Settlement Agreement Rows", settlement_digest)
+        self.assertIn("3,562,500", settlement_digest)
+        self.assertIn("10,687,500", settlement_digest)
+        self.assertIn("CERCLA Section 122(f)(6)", settlement_digest)
+        self.assertIn("29,450,000", settlement_digest)
+        self.assertIn("pre-2003 contamination", settlement_digest)
+        self.assertIn("Oregon state law", settlement_digest)
+        self.assertIn("1,500 / 3,000 / 5,000", settlement_digest)
+
+    def test_environmental_esg_digest_routes_recall_and_esg_tasks(self) -> None:
+        recall_task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="environmental-esg/assess-recall-and-reporting-obligations-for-product-safety-issue",
+            question="Draft an incident response memorandum for a product safety issue.",
+            answer_schema={"deliverables": ["incident-response-memorandum.docx"]},
+            metadata={"practice_area": "environmental-esg"},
+        )
+        recall_state = RunState(task=recall_task, config=load_config(), documents=[])
+        recall_digest = build_task_family_digest(recall_state)
+        self.assertIn("Product Safety Reporting and Recall Timeline", recall_digest)
+        self.assertIn("CPSA Section 15(b)", recall_digest)
+        self.assertIn("24 hours", recall_digest)
+        self.assertIn("17.15 million", recall_digest)
+        self.assertIn("28,000,000", recall_digest)
+        self.assertIn("742,000", recall_digest)
+        self.assertIn("257,000 pre-change", recall_digest)
+        self.assertIn("zero fatalities", recall_digest)
+
+        esg_task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="environmental-esg/compare-esg-disclosure-against-regulatory-requirements",
+            question="Review draft ESG report against regulatory requirements.",
+            answer_schema={"deliverables": ["esg-gap-analysis-memo.docx"]},
+            metadata={"practice_area": "environmental-esg"},
+        )
+        esg_state = RunState(task=esg_task, config=load_config(), documents=[])
+        esg_contract = build_deliverable_contract(esg_state)
+        esg_digest = build_task_family_digest(esg_state)
+        self.assertEqual(esg_contract["task_family"], "environmental_esg_review")
+        self.assertIn("ESG Disclosure Framework Gap Matrix", esg_digest)
+        self.assertIn("2045", esg_digest)
+        self.assertIn("3,840,000", esg_digest)
+        self.assertIn("SB 253", esg_digest)
+        self.assertIn("ESRS 2 GOV-3", esg_digest)
+        self.assertIn("double materiality", esg_digest)
+        self.assertIn("289,000 mtCO2e", esg_digest)
+        self.assertIn("5 of 15 Scope 3 categories", esg_digest)
+        self.assertIn("Poland / Gdansk", esg_digest)
+        self.assertIn("1.5C, 2C", esg_digest)
+        prompt = build_synthesis_prompt(esg_state)
+        self.assertIn("For environmental, ESG, product-safety", prompt)
+        self.assertIn("ESG Disclosure Framework Gap Matrix", prompt)
+
     def test_ip_contract_amendment_digest_preserves_provision_deltas_and_cover_omissions(self) -> None:
         task = BenchmarkTask(
             benchmark="harvey_lab_sample",
