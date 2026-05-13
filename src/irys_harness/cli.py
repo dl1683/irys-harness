@@ -1,0 +1,681 @@
+from __future__ import annotations
+
+import argparse
+import asyncio
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
+import json
+from pathlib import Path
+from typing import Any
+
+from .agent_bench_bridge import (
+    DEFAULT_BENCHMARK_SPECS,
+    parse_benchmark_specs,
+    read_benchmark_spec_file,
+    run_agent_bench_suite,
+)
+from .benchmarks import FixtureAdapter, HarveyLabAdapter
+from .benchmarks.harvey import default_harvey_root
+from .benchmarks.harvey_eval import evaluate_prepared_harvey_run, prepare_harvey_eval_package
+from .config import load_config
+from .diagnosis import diagnose_harvey_scores_file
+from .doctor import run_doctor
+from .env import load_dotenv_if_present
+from .experiments import close_experiment, open_experiment, read_experiment
+from .harvey_pipeline import HarveyPipelineResult, run_harvey_batch
+from .state import RunState
+from .trace import TraceWriter, attach_harvey_scores, diagnose_trace, load_trace, save_trace, trace_summary
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return args.func(args)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="harness")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    run = sub.add_parser("run", help="Run a benchmark task")
+    run.add_argument("--benchmark", default="fixture")
+    run.add_argument("--task-id", default="smoke")
+    run.add_argument("--config", default=None)
+    run.add_argument("--trace-dir", default="traces")
+    run.add_argument("--output-dir", default="outputs")
+    run.add_argument("--live-synthesis", action="store_true")
+    run.set_defaults(func=cmd_run)
+
+    list_tasks = sub.add_parser("list-tasks", help="List benchmark tasks")
+    list_tasks.add_argument("--benchmark", default="fixture")
+    list_tasks.add_argument("--split", default="sample")
+    list_tasks.add_argument("--limit", type=int, default=20)
+    list_tasks.set_defaults(func=cmd_list_tasks)
+
+    inspect = sub.add_parser("inspect", help="Summarize one trace")
+    inspect.add_argument("--trace", required=True)
+    inspect.set_defaults(func=cmd_inspect)
+
+    diagnose = sub.add_parser("diagnose", help="Diagnose one trace")
+    diagnose.add_argument("--trace", required=True)
+    diagnose.set_defaults(func=cmd_diagnose)
+
+    diagnose_scores = sub.add_parser("diagnose-scores", help="Diagnose a benchmark scores.json file")
+    diagnose_scores.add_argument("--scores", required=True)
+    diagnose_scores.set_defaults(func=cmd_diagnose_scores)
+
+    attach_scores = sub.add_parser("attach-scores", help="Attach a benchmark scores.json file to a trace")
+    attach_scores.add_argument("--trace", required=True)
+    attach_scores.add_argument("--scores", required=True)
+    attach_scores.set_defaults(func=cmd_attach_scores)
+
+    summarize = sub.add_parser("summarize", help="Summarize all traces under a run directory")
+    summarize.add_argument("--run", required=True)
+    summarize.set_defaults(func=cmd_summarize)
+
+    compare = sub.add_parser("compare", help="Compare two trace directories")
+    compare.add_argument("--run-a", required=True)
+    compare.add_argument("--run-b", required=True)
+    compare.set_defaults(func=cmd_compare)
+
+    doctor = sub.add_parser("doctor", help="Check local harness environment")
+    doctor.set_defaults(func=cmd_doctor)
+
+    harvey_eval = sub.add_parser("prepare-harvey-eval", help="Package a Harvey trace for Harvey LAB evaluator")
+    harvey_eval.add_argument("--trace", required=True)
+    harvey_eval.add_argument("--harvey-root", default=None)
+    harvey_eval.add_argument("--run-id", default=None)
+    harvey_eval.set_defaults(func=cmd_prepare_harvey_eval)
+
+    harvey_score = sub.add_parser("score-harvey", help="Score a prepared Harvey LAB run")
+    harvey_score.add_argument("--run-id", required=True)
+    harvey_score.add_argument("--task-id", required=True)
+    harvey_score.add_argument("--harvey-root", default=None)
+    harvey_score.add_argument("--judge-model", default=None)
+    harvey_score.add_argument("--parallel", type=int, default=24)
+    harvey_score.add_argument("--execute", action="store_true")
+    harvey_score.set_defaults(func=cmd_score_harvey)
+
+    harvey_smoke = sub.add_parser("harvey-smoke", help="Run multiple Harvey tasks with optional concurrent scoring")
+    harvey_smoke.add_argument("--task-id", action="append", default=[])
+    harvey_smoke.add_argument("--task-file", default=None)
+    harvey_smoke.add_argument("--split", default=None)
+    harvey_smoke.add_argument("--limit", type=int, default=None)
+    harvey_smoke.add_argument("--trace-dir", default="traces")
+    harvey_smoke.add_argument("--output-dir", default="outputs")
+    harvey_smoke.add_argument("--harvey-root", default=None)
+    harvey_smoke.add_argument("--run-prefix", default="irys-smoke")
+    harvey_smoke.add_argument("--config", default=None)
+    harvey_smoke.add_argument("--workers", type=int, default=24)
+    harvey_smoke.add_argument("--score-parallel", type=int, default=24)
+    harvey_smoke.add_argument("--resume", action="store_true")
+    harvey_smoke.add_argument("--summary-path", default=None)
+    harvey_smoke.add_argument("--execute-score", action="store_true")
+    harvey_smoke.add_argument("--no-live-synthesis", action="store_true")
+    harvey_smoke.set_defaults(func=cmd_harvey_smoke)
+
+    agent_bench = sub.add_parser(
+        "agent-bench-smoke",
+        help="Run Irys through the sibling agent-bench benchmark harness",
+    )
+    agent_bench.add_argument("--agent-bench-root", default=None)
+    agent_bench.add_argument("--data-dir", default=None)
+    agent_bench.add_argument("--benchmark", action="append", default=[])
+    agent_bench.add_argument("--benchmark-file", default=None)
+    agent_bench.add_argument("--limit", type=int, default=10)
+    agent_bench.add_argument("--concurrency", type=int, default=18)
+    agent_bench.add_argument("--benchmark-workers", type=int, default=4)
+    agent_bench.add_argument("--checkpoint-every", type=int, default=5)
+    agent_bench.add_argument("--results-dir", default="scratch/agent_bench_irys")
+    agent_bench.add_argument("--trace-dir", default=None)
+    agent_bench.add_argument("--config", default=None)
+    agent_bench.add_argument("--backend-mode", choices=["direct", "three-tier"], default="three-tier")
+    agent_bench.add_argument("--resume", action="store_true")
+    agent_bench.add_argument("--dry-run", action="store_true")
+    agent_bench.set_defaults(func=cmd_agent_bench_smoke)
+
+    experiment = sub.add_parser("experiment", help="Open or close improvement experiments")
+    experiment_sub = experiment.add_subparsers(dest="experiment_command", required=True)
+    experiment_open = experiment_sub.add_parser("open", help="Open an improvement experiment")
+    experiment_open.add_argument("--baseline", required=True)
+    experiment_open.add_argument("--hypothesis", required=True)
+    experiment_open.add_argument(
+        "--target",
+        choices=["quality", "cost", "latency", "routing", "generalization"],
+        required=True,
+    )
+    experiment_open.add_argument("--experiments-dir", default="experiments")
+    experiment_open.set_defaults(func=cmd_experiment_open)
+
+    experiment_close = experiment_sub.add_parser("close", help="Close an improvement experiment")
+    experiment_close.add_argument("--experiment", required=True)
+    experiment_close.add_argument("--run", required=True)
+    decision = experiment_close.add_mutually_exclusive_group(required=True)
+    decision.add_argument("--accept", action="store_true")
+    decision.add_argument("--reject", action="store_true")
+    experiment_close.add_argument("--decision-reason", required=True)
+    experiment_close.set_defaults(func=cmd_experiment_close)
+
+    return parser
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    load_dotenv_if_present()
+    config = load_config(args.config)
+    adapter = get_adapter(args.benchmark)
+    if hasattr(adapter, "live_synthesis"):
+        adapter.live_synthesis = bool(args.live_synthesis)
+    task = adapter.load_task(args.task_id)
+    output_dir = Path(args.output_dir) / task.benchmark / task.task_id
+    state = RunState(task=task, config=config, output_dir=str(output_dir))
+    state = adapter.run(state)
+    path = TraceWriter(args.trace_dir).write(state)
+    print(f"[SAVE] trace={path}")
+    if state.scoring_result and state.scoring_result.passed is False:
+        return 1
+    return 0
+
+
+def cmd_inspect(args: argparse.Namespace) -> int:
+    print_json(trace_summary(load_trace(args.trace)))
+    return 0
+
+
+def cmd_list_tasks(args: argparse.Namespace) -> int:
+    adapter = get_adapter(args.benchmark)
+    if not hasattr(adapter, "list_tasks"):
+        print_json({"benchmark": args.benchmark, "tasks": []})
+        return 0
+    refs = adapter.list_tasks(args.split)  # type: ignore[attr-defined]
+    print_json(
+        {
+            "benchmark": args.benchmark,
+            "split": args.split,
+            "count": len(refs),
+            "tasks": [
+                {
+                    "task_id": ref.task_id,
+                    "practice_area": ref.practice_area,
+                    "slug": ref.slug,
+                }
+                for ref in refs[: args.limit]
+            ],
+        }
+    )
+    return 0
+
+
+def cmd_diagnose(args: argparse.Namespace) -> int:
+    print_json(diagnose_trace(load_trace(args.trace)))
+    return 0
+
+
+def cmd_diagnose_scores(args: argparse.Namespace) -> int:
+    print_json(diagnose_harvey_scores_file(args.scores))
+    return 0
+
+
+def cmd_attach_scores(args: argparse.Namespace) -> int:
+    trace = load_trace(args.trace)
+    with Path(args.scores).open("r", encoding="utf-8") as handle:
+        scores = json.load(handle)
+    updated = attach_harvey_scores(trace, scores)
+    save_trace(args.trace, updated)
+    print_json(trace_summary(updated))
+    return 0
+
+
+def cmd_summarize(args: argparse.Namespace) -> int:
+    traces = load_trace_dir(args.run)
+    summaries = [trace_summary(trace) for trace in traces]
+    total = len(summaries)
+    passed = sum(1 for item in summaries if item.get("passed") is True)
+    total_tokens = sum(int(item.get("total_tokens") or 0) for item in summaries)
+    total_cost = sum(float(item.get("estimated_cost") or 0.0) for item in summaries)
+    tokens_by_tier = aggregate_tokens_by_tier(traces)
+    print_json(
+        {
+            "tasks": total,
+            "passed": passed,
+            "score_rate": passed / total if total else 0.0,
+            "total_tokens": total_tokens,
+            "estimated_cost": total_cost,
+            "tokens_by_tier": tokens_by_tier,
+            "token_share_by_tier": token_share(tokens_by_tier),
+            "traces": summaries,
+        }
+    )
+    return 0
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    print_json(compare_run_dirs(args.run_a, args.run_b))
+    return 0
+
+
+def compare_run_dirs(run_a: str | Path, run_b: str | Path) -> dict[str, Any]:
+    a = {trace_key(trace): trace_summary(trace) for trace in load_trace_dir(run_a)}
+    b = {trace_key(trace): trace_summary(trace) for trace in load_trace_dir(run_b)}
+    keys = sorted(set(a) | set(b))
+    rows = []
+    for key in keys:
+        before = a.get(key)
+        after = b.get(key)
+        rows.append(
+            {
+                "task": key,
+                "before_passed": before.get("passed") if before else None,
+                "after_passed": after.get("passed") if after else None,
+                "before_cost": before.get("estimated_cost") if before else None,
+                "after_cost": after.get("estimated_cost") if after else None,
+                "before_tokens": before.get("total_tokens") if before else None,
+                "after_tokens": after.get("total_tokens") if after else None,
+            }
+        )
+    before_passed = sum(1 for item in a.values() if item.get("passed") is True)
+    after_passed = sum(1 for item in b.values() if item.get("passed") is True)
+    before_cost = sum(float(item.get("estimated_cost") or 0.0) for item in a.values())
+    after_cost = sum(float(item.get("estimated_cost") or 0.0) for item in b.values())
+    before_tokens = sum(int(item.get("total_tokens") or 0) for item in a.values())
+    after_tokens = sum(int(item.get("total_tokens") or 0) for item in b.values())
+    return {
+        "summary": {
+            "before_tasks": len(a),
+            "after_tasks": len(b),
+            "passed_delta": after_passed - before_passed,
+            "cost_delta": after_cost - before_cost,
+            "token_delta": after_tokens - before_tokens,
+        },
+        "tasks": rows,
+    }
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    load_dotenv_if_present()
+    checks = run_doctor()
+    print_json({"checks": [check.to_dict() for check in checks]})
+    return 0 if all(check.passed for check in checks) else 1
+
+
+def cmd_experiment_open(args: argparse.Namespace) -> int:
+    path = open_experiment(
+        baseline_run=args.baseline,
+        hypothesis=args.hypothesis,
+        target=args.target,
+        experiments_dir=args.experiments_dir,
+    )
+    print_json({"experiment": str(path)})
+    return 0
+
+
+def cmd_experiment_close(args: argparse.Namespace) -> int:
+    baseline = read_experiment(args.experiment).baseline_run
+    record = close_experiment(
+        args.experiment,
+        experiment_run=args.run,
+        accepted=bool(args.accept),
+        decision_reason=args.decision_reason,
+        comparison=compare_run_dirs(baseline, args.run),
+    )
+    print_json(record.to_dict())
+    return 0
+
+
+def cmd_prepare_harvey_eval(args: argparse.Namespace) -> int:
+    trace = load_trace(args.trace)
+    package = prepare_harvey_eval_package(
+        trace,
+        harvey_root=args.harvey_root or default_harvey_root(),
+        run_id=args.run_id,
+    )
+    print_json(package.to_dict())
+    return 0 if package.copied_files else 1
+
+
+def cmd_score_harvey(args: argparse.Namespace) -> int:
+    load_dotenv_if_present()
+    config = load_config()
+    judge_model = args.judge_model or config.judge_model
+    harvey_root = args.harvey_root or default_harvey_root()
+    if not args.execute:
+        print_json(
+            {
+                "dry_run": True,
+                "run_id": args.run_id,
+                "task_id": args.task_id,
+                "harvey_root": str(harvey_root),
+                "judge_model": judge_model,
+                "parallel": args.parallel,
+                "execute_with": "--execute",
+            }
+        )
+        return 0
+    scores = evaluate_prepared_harvey_run(
+        harvey_root=harvey_root,
+        run_id=args.run_id,
+        task_id=args.task_id,
+        judge_model=judge_model,
+        parallel=args.parallel,
+    )
+    print_json(scores)
+    return 0
+
+
+def cmd_harvey_smoke(args: argparse.Namespace) -> int:
+    load_dotenv_if_present()
+    config = load_config(args.config)
+    task_ids = list(args.task_id or [])
+    if args.task_file:
+        task_ids.extend(read_task_file(args.task_file))
+    if args.split:
+        adapter = HarveyLabAdapter(root=args.harvey_root or default_harvey_root())
+        refs = adapter.list_tasks(args.split)
+        limit = args.limit if args.limit is not None else len(refs)
+        task_ids.extend(ref.task_id for ref in refs[:limit])
+    task_ids = dedupe(task_ids)
+    results = run_harvey_batch(
+        task_ids=task_ids,
+        config=config,
+        trace_dir=args.trace_dir,
+        output_dir=args.output_dir,
+        harvey_root=args.harvey_root,
+        run_prefix=args.run_prefix,
+        live_synthesis=not args.no_live_synthesis,
+        execute_score=bool(args.execute_score),
+        judge_model=config.judge_model,
+        score_parallel=args.score_parallel,
+        workers=args.workers,
+        resume=bool(args.resume),
+    )
+    report = build_harvey_batch_report(
+        results,
+        requested_task_ids=task_ids,
+        trace_dir=args.trace_dir,
+        run_prefix=args.run_prefix,
+        split=args.split,
+        limit=args.limit,
+    )
+    tracking_paths = write_harvey_batch_tracking(report, summary_path=args.summary_path)
+    report["tracking_paths"] = tracking_paths
+    print_json(report)
+    return 0 if all(item.error is None for item in results) else 1
+
+
+def cmd_agent_bench_smoke(args: argparse.Namespace) -> int:
+    load_dotenv_if_present()
+    config = load_config(args.config)
+    raw_specs = list(args.benchmark or [])
+    if args.benchmark_file:
+        raw_specs.extend(read_benchmark_spec_file(args.benchmark_file))
+    specs = parse_benchmark_specs(raw_specs or DEFAULT_BENCHMARK_SPECS)
+    if args.dry_run:
+        print_json(
+            {
+                "dry_run": True,
+                "backend_mode": args.backend_mode,
+                "agent_bench_root": args.agent_bench_root,
+                "data_dir": args.data_dir,
+                "results_dir": args.results_dir,
+                "trace_dir": args.trace_dir,
+                "limit": args.limit,
+                "concurrency": args.concurrency,
+                "benchmark_workers": args.benchmark_workers,
+                "benchmarks": [spec.__dict__ for spec in specs],
+            }
+        )
+        return 0
+    report = asyncio.run(
+        run_agent_bench_suite(
+            config=config,
+            specs=specs,
+            agent_bench_root=args.agent_bench_root,
+            data_dir=args.data_dir,
+            results_dir=args.results_dir,
+            trace_dir=args.trace_dir,
+            backend_mode=args.backend_mode,
+            limit=args.limit,
+            concurrency=args.concurrency,
+            benchmark_workers=args.benchmark_workers,
+            checkpoint_every=args.checkpoint_every,
+            resume=bool(args.resume),
+        )
+    )
+    print_json(report)
+    return 0 if not report.get("error_benchmarks") else 1
+
+
+def build_harvey_batch_report(
+    results: list[HarveyPipelineResult],
+    *,
+    requested_task_ids: list[str],
+    trace_dir: str | Path,
+    run_prefix: str,
+    split: str | None,
+    limit: int | None,
+) -> dict[str, Any]:
+    passed = sum(1 for item in results if item.passed is True)
+    evaluated = [item for item in results if item.rubric_pass_rate is not None]
+    average_rubric_pass_rate = (
+        sum(float(item.rubric_pass_rate or 0.0) for item in evaluated) / len(evaluated)
+        if evaluated
+        else None
+    )
+    tokens_by_tier: dict[str, float] = {}
+    for item in results:
+        for tier, share in item.token_share_by_tier.items():
+            tokens_by_tier[tier] = tokens_by_tier.get(tier, 0.0) + float(share or 0.0)
+    average_token_share_by_tier = {
+        tier: value / len(results) for tier, value in sorted(tokens_by_tier.items())
+    } if results else {}
+
+    status_counts = Counter(item.status for item in results)
+    failed_tasks = [
+        item.task_id
+        for item in results
+        if item.error is None and item.rubric_pass_rate is not None and item.passed is not True
+    ]
+    error_tasks = [item.task_id for item in results if item.error is not None]
+    incomplete_tasks = [
+        item.task_id
+        for item in results
+        if item.error is None and item.rubric_pass_rate is None
+    ]
+    non_pass_tasks = dedupe(failed_tasks + error_tasks + incomplete_tasks)
+
+    by_practice_area: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {
+            "tasks": 0,
+            "passed": 0,
+            "evaluated": 0,
+            "errors": 0,
+            "rubric_passed": 0,
+            "rubric_total": 0,
+            "average_rubric_pass_rate": None,
+            "failure_tag_counts": {},
+            "suspected_module_counts": {},
+            "suspected_actor_counts": {},
+        }
+    )
+    failure_tag_counts: Counter[str] = Counter()
+    suspected_module_counts: Counter[str] = Counter()
+    suspected_actor_counts: Counter[str] = Counter()
+    task_diagnostics: dict[str, dict[str, Any]] = {}
+    for item in results:
+        area = item.task_id.split("/", 1)[0]
+        row = by_practice_area[area]
+        row["tasks"] += 1
+        if item.passed is True:
+            row["passed"] += 1
+        if item.error is not None:
+            row["errors"] += 1
+        if item.rubric_passed is not None and item.rubric_total is not None:
+            row["evaluated"] += 1
+            row["rubric_passed"] += int(item.rubric_passed)
+            row["rubric_total"] += int(item.rubric_total)
+        diagnosis = load_result_diagnosis(item)
+        if diagnosis and (
+            diagnosis.get("failure_tags")
+            or diagnosis.get("suspected_module")
+            or diagnosis.get("suspected_actor")
+            or diagnosis.get("recommended_experiment")
+        ):
+            task_diagnostics[item.task_id] = diagnosis
+        area_failure_tags: Counter[str] = Counter(row["failure_tag_counts"])
+        area_modules: Counter[str] = Counter(row["suspected_module_counts"])
+        area_actors: Counter[str] = Counter(row["suspected_actor_counts"])
+        for tag in diagnosis.get("failure_tags", []):
+            failure_tag_counts[str(tag)] += 1
+            area_failure_tags[str(tag)] += 1
+        module = diagnosis.get("suspected_module")
+        if module:
+            suspected_module_counts[str(module)] += 1
+            area_modules[str(module)] += 1
+        actor = diagnosis.get("suspected_actor")
+        if actor:
+            suspected_actor_counts[str(actor)] += 1
+            area_actors[str(actor)] += 1
+        row["failure_tag_counts"] = dict(sorted(area_failure_tags.items()))
+        row["suspected_module_counts"] = dict(sorted(area_modules.items()))
+        row["suspected_actor_counts"] = dict(sorted(area_actors.items()))
+    for row in by_practice_area.values():
+        row["average_rubric_pass_rate"] = (
+            row["rubric_passed"] / row["rubric_total"] if row["rubric_total"] else None
+        )
+
+    return {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "run_prefix": run_prefix,
+        "trace_dir": str(trace_dir),
+        "split": split,
+        "limit": limit,
+        "requested_tasks": len(requested_task_ids),
+        "tasks": len(results),
+        "passed": passed,
+        "evaluated": len(evaluated),
+        "errors": len(error_tasks),
+        "incomplete": len(incomplete_tasks),
+        "failed": len(failed_tasks),
+        "average_rubric_pass_rate": average_rubric_pass_rate,
+        "average_token_share_by_tier": average_token_share_by_tier,
+        "status_counts": dict(sorted(status_counts.items())),
+        "failure_tag_counts": dict(sorted(failure_tag_counts.items())),
+        "suspected_module_counts": dict(sorted(suspected_module_counts.items())),
+        "suspected_actor_counts": dict(sorted(suspected_actor_counts.items())),
+        "by_practice_area": dict(sorted(by_practice_area.items())),
+        "task_diagnostics": task_diagnostics,
+        "failed_tasks": failed_tasks,
+        "error_tasks": error_tasks,
+        "incomplete_tasks": incomplete_tasks,
+        "non_pass_tasks": non_pass_tasks,
+        "results": [item.to_dict() for item in results],
+    }
+
+
+def load_result_diagnosis(item: HarveyPipelineResult) -> dict[str, Any]:
+    if not item.trace_path:
+        return {}
+    path = Path(item.trace_path)
+    if not path.exists():
+        return {}
+    try:
+        trace = load_trace(path)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    diagnosis = trace.get("diagnosis") or {}
+    return {
+        "failure_tags": trace.get("failure_tags", []),
+        "suspected_module": diagnosis.get("suspected_module"),
+        "suspected_actor": diagnosis.get("suspected_actor"),
+        "recommended_experiment": diagnosis.get("recommended_experiment"),
+    }
+
+
+def write_harvey_batch_tracking(
+    report: dict[str, Any],
+    *,
+    summary_path: str | Path | None = None,
+) -> dict[str, str]:
+    base = Path(summary_path) if summary_path else Path(str(report["trace_dir"])) / "harvey_batch_summary.json"
+    base.parent.mkdir(parents=True, exist_ok=True)
+    with base.open("w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+
+    paths = {"summary": str(base)}
+    task_files = {
+        "failed_task_file": report.get("failed_tasks", []),
+        "error_task_file": report.get("error_tasks", []),
+        "incomplete_task_file": report.get("incomplete_tasks", []),
+        "non_pass_task_file": report.get("non_pass_tasks", []),
+    }
+    for label, tasks in task_files.items():
+        path = base.parent / f"{label.replace('_file', 's')}.txt"
+        write_task_lines(path, list(tasks))
+        paths[label] = str(path)
+    return paths
+
+
+def write_task_lines(path: str | Path, tasks: list[str]) -> None:
+    with Path(path).open("w", encoding="utf-8") as handle:
+        for task in tasks:
+            handle.write(f"{task}\n")
+
+
+def get_adapter(name: str) -> FixtureAdapter | HarveyLabAdapter:
+    if name == "fixture":
+        return FixtureAdapter()
+    if name in {"harvey_lab_sample", "harvey_lab"}:
+        return HarveyLabAdapter()
+    raise SystemExit(f"Unknown benchmark: {name}")
+
+
+def load_trace_dir(path: str | Path) -> list[dict[str, Any]]:
+    root = Path(path)
+    files = sorted(root.rglob("*.json")) if root.exists() else []
+    return [load_trace(file) for file in files]
+
+
+def trace_key(trace: dict[str, Any]) -> str:
+    return f"{trace.get('benchmark')}::{trace.get('task_id')}"
+
+
+def aggregate_tokens_by_tier(traces: list[dict[str, Any]]) -> dict[str, int]:
+    totals: dict[str, int] = {}
+    for trace in traces:
+        for tier, tokens in (trace.get("metrics", {}).get("tokens_by_tier", {}) or {}).items():
+            totals[tier] = totals.get(tier, 0) + int(tokens or 0)
+    return totals
+
+
+def token_share(tokens_by_tier: dict[str, int]) -> dict[str, float]:
+    total = sum(tokens_by_tier.values())
+    if total == 0:
+        return {tier: 0.0 for tier in sorted(tokens_by_tier)}
+    return {tier: tokens / total for tier, tokens in sorted(tokens_by_tier.items())}
+
+
+def read_task_file(path: str | Path) -> list[str]:
+    tasks = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        value = line.strip()
+        if value and not value.startswith("#"):
+            tasks.append(value)
+    return tasks
+
+
+def dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
+def print_json(payload: dict[str, Any]) -> None:
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

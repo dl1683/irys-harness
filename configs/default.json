@@ -1,0 +1,35 @@
+{
+  "run": {
+    "max_iterations": 3,
+    "memory_enabled": false,
+    "web_enabled": false
+  },
+  "judge_model": "gemini-3.1-flash-lite-preview",
+  "models": {
+    "cheap_worker": {
+      "model": "gemini-3.1-flash-lite-preview",
+      "input_cost_per_million": 0.25,
+      "output_cost_per_million": 1.5
+    },
+    "mid_orchestrator": {
+      "model": "gemini-3-flash-preview",
+      "input_cost_per_million": 0.5,
+      "output_cost_per_million": 3.0
+    },
+    "strong_synthesizer": {
+      "model": "gemini-3.1-pro-preview",
+      "input_cost_per_million": 2.0,
+      "output_cost_per_million": 12.0
+    }
+  },
+  "module_tiers": {
+    "contract": "mid_orchestrator",
+    "retrieval": "cheap_worker",
+    "extraction": "cheap_worker",
+    "critic": "mid_orchestrator",
+    "verification": "mid_orchestrator",
+    "synthesis": "strong_synthesizer",
+    "rendering": "cheap_worker",
+    "scoring": "cheap_worker"
+  }
+}
