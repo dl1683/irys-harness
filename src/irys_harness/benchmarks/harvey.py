@@ -783,6 +783,30 @@ def has_antitrust_competition_terms(text: str) -> bool:
     )
 
 
+def has_litigation_dispute_resolution_terms(text: str) -> bool:
+    lower = text.lower()
+    if "litigation-dispute-resolution" in lower:
+        return True
+    return any(
+        term in lower
+        for term in [
+            "motion to dismiss",
+            "motion for summary judgment",
+            "requests for production",
+            "rfp",
+            "discovery demands",
+            "litigation hold",
+            "custodian identification",
+            "staffing levels",
+            "litigation invoice",
+            "block billing",
+            "rule 12(b)",
+            "rule 34",
+            "rule 56",
+        ]
+    )
+
+
 def has_tax_controversy_terms(text: str) -> bool:
     lower = text.lower()
     if re.search(r"\btax\b", lower):
@@ -1072,6 +1096,17 @@ def build_required_sections(
             "Recommended negotiation or litigation positions",
             "Source citations",
         ]
+    if has_litigation_dispute_resolution_terms(haystack):
+        return [
+            "Executive summary",
+            "Near-top litigation required findings",
+            "Procedure / standard / authority matrix",
+            "Fact-dispute and chronology matrix",
+            "Discovery request or preservation source table",
+            "Invoice staffing and fee-adjustment calculations",
+            "Issue-by-issue recommendations",
+            "Source citations",
+        ]
     if has_trusts_estates_terms(haystack):
         return [
             "Executive summary",
@@ -1166,6 +1201,17 @@ def build_evidence_focus(haystack: str) -> list[str]:
                 "remedy buyers, divestiture caps, asset packages, consent decree versus fix-it-first tradeoffs, and buyer adequacy",
                 "protective-order AEO access, use limits, parallel proceeding carveouts, clawback, prosecution-bar, records, and sealing standards",
                 "DOJ/FTC compliance-program expectations, training, investigation, sanctions, high-risk personnel, and program positives",
+            ]
+        )
+    if has_litigation_dispute_resolution_terms(haystack):
+        focus.extend(
+            [
+                "motion standards, procedural vehicles, controlling authority, and issue-specific burden allocation",
+                "pleading allegations, complaint paragraphs, declarations, emails, deposition testimony, and record facts",
+                "fact disputes, credibility disputes, chronology conflicts, and motion-stage impropriety arguments",
+                "RFP numbers, objection bases, proportionality, ESI form, privilege, and FRE 502(d) issues",
+                "custodian names, devices, source systems, litigation-hold dates, data-loss timing, and forensic recovery steps",
+                "timekeeper role, hours, rate, budget range, block billing, staffing approval, and line-item fee reductions",
             ]
         )
     if has_trusts_estates_terms(haystack):
@@ -1367,6 +1413,8 @@ def infer_task_family(haystack: str) -> str:
         return "environmental_esg_review"
     if has_antitrust_competition_terms(haystack):
         return "antitrust_competition_review"
+    if has_litigation_dispute_resolution_terms(haystack):
+        return "litigation_dispute_resolution_review"
     if has_trusts_estates_terms(haystack):
         return "trusts_estates_private_client_review"
     if has_tax_controversy_terms(haystack):
@@ -1472,6 +1520,11 @@ For environmental, ESG, product-safety, and regulatory-settlement deliverables, 
     if needs_antitrust_competition_digest(state):
         antitrust_competition_guidance = """
 For antitrust, HSR, merger-risk, protective-order, compliance-program, and market-share deliverables, preserve the "Near-Top Antitrust / Competition Required Findings", "Market Definition / HHI / Share Matrix", "Hot-Document and Bad-Fact Inventory", "HSR Filing / Second Request Strategy", "Remedy / Divestiture Matrix", "Protective-Order Clause-Delta Matrix", "Compliance Program Gap Matrix", and "Expert / Agency Data Reconciliation Matrix" as substantive work product when the worker packet lists them. Explicitly state 2023 Merger Guidelines structural-presumption thresholds, Clayton Act Section 7 framing, product/geographic markets, HHI and share figures, hot-document phrases, HSR thresholds and fees, remedy-buyer adequacy, procedural-order interactions, training/sanctions gaps, and data-source differences. Do not collapse market math, bad documents, remedies, and procedural clauses into generic antitrust prose.
+"""
+    litigation_guidance = ""
+    if needs_litigation_dispute_resolution_digest(state):
+        litigation_guidance = """
+For litigation, motion-response, discovery-objection, litigation-hold, and invoice-review deliverables, preserve the "Near-Top Litigation Required Findings", "Motion Procedure / Authority Matrix", "Discovery Request Objection Matrix", "Litigation Hold Custodian / Source Matrix", and "Invoice Staffing Adjustment Matrix" as substantive work product when the worker packet lists them. Explicitly state motion-stage standards, governing rules and cases, request numbers, custodian names, source systems, date windows, data-loss timing, staffing approvals, hours, rates, budget ranges, and line-item reductions. Do not collapse litigation procedure, record-fact disputes, discovery mechanics, preservation scope, and fee math into generic dispute-risk prose.
 """
     ip_contract_guidance = ""
     if needs_ip_contract_amendment_digest(state):
@@ -1610,6 +1663,7 @@ For insurance coverage-determination memoranda, preserve the "High-Priority Insu
 {healthcare_life_sciences_guidance}
 {environmental_esg_guidance}
 {antitrust_competition_guidance}
+{litigation_guidance}
 {trusts_estates_guidance}
 {tax_controversy_guidance}
 For covenant-compliance deliverables, include a Required Numeric Reconciliation section. At minimum, when the facts are present, it must state: Borrower's unadjusted EBITDA; corrected Total Funded Debt arithmetic; primary corrected EBITDA and leverage; interest denominator audit; available revolver / letters-of-credit correction; period-end liquidity and whether period-end liquidity is compliant; any intra-period liquidity breach separately; capital expenditures actual versus adjusted limit; extraordinary/non-recurring charge cap and claimed amount; realized versus projected savings; and any further-corrected named-settlement scenario. Do not let an intra-period breach replace the separate period-end liquidity calculation.
@@ -2245,6 +2299,8 @@ def build_task_family_digest(state: RunState) -> str:
         return build_environmental_esg_digest(state)
     if needs_antitrust_competition_digest(state):
         return build_antitrust_competition_digest(state)
+    if needs_litigation_dispute_resolution_digest(state):
+        return build_litigation_dispute_resolution_digest(state)
     if needs_ip_contract_amendment_digest(state):
         return build_ip_contract_amendment_digest(state)
     if needs_technology_data_agreement_digest(state):
@@ -6532,6 +6588,481 @@ def build_antitrust_competition_digest(state: RunState) -> str:
     snippets = collect_relevant_snippets(state, snippet_keywords, max_snippets=120)
     if snippets:
         lines.extend(["", "## Antitrust / Competition Source Snippets", *snippets])
+    return "\n".join(lines)
+
+
+def needs_litigation_dispute_resolution_digest(state: RunState) -> bool:
+    practice_area = str(state.task.metadata.get("practice_area", "")).lower()
+    return "litigation-dispute-resolution" in practice_area or has_litigation_dispute_resolution_terms(lower_task_text(state))
+
+
+def litigation_dispute_resolution_digest_modes(state: RunState, context: str) -> set[str]:
+    modes: set[str] = set()
+    filenames = " ".join(str(doc.get("filename", "")) for doc in state.documents).lower()
+    combined = f"{context} {filenames}"
+    if "motion-to-dismiss" in combined or "motion to dismiss" in combined or "rule 12" in combined:
+        modes.add("motion_to_dismiss")
+    if "requests-for-production" in combined or "requests for production" in combined or "rfp" in combined:
+        modes.add("rfp_objections")
+    if "summary-judgment" in combined or "summary judgment" in combined or "rule 56" in combined:
+        modes.add("summary_judgment")
+    if "litigation-hold" in combined or "litigation hold" in combined or "custodian" in combined:
+        modes.add("litigation_hold")
+    if "litigation-invoice" in combined or "invoice" in combined or "staffing" in combined or "block billing" in combined:
+        modes.add("invoice_review")
+    if not modes:
+        modes.add("general_litigation")
+    return modes
+
+
+def add_litigation_score_critical_rows(lines: list[str], modes: set[str]) -> None:
+    rows: list[list[str]] = []
+    if "motion_to_dismiss" in modes:
+        rows.extend(
+            [
+                [
+                    "MTD fraud pleading standards",
+                    "DataCore's motion inconsistently invokes Twombly/Iqbal plausibility and Rule 9(b) particularity against the fraud claim.",
+                    "The opposition should argue the complaint pleads who/what/when/how: Sousa, Baines, January 2022, 15,000-record capacity, and out-of-the-box ADP integration.",
+                    "Treat as a pleading-standard rebuttal, not a generic fraud issue.",
+                ],
+                [
+                    "Forum-selection procedural vehicle",
+                    "A forum-selection clause should be enforced through Section 1404(a) transfer under Atlantic Marine, not dismissal under Rule 12(b)(3).",
+                    "The memo must name Atlantic Marine Construction Co. v. U.S. District Court, 571 U.S. 49 (2013).",
+                    "Flag DataCore's 12(b)(3) posture as procedurally wrong.",
+                ],
+                [
+                    "Georgia contacts",
+                    "DataCore had a permanent Atlanta regional office at 100 Techwood Drive NW with 14 employees, and Sousa/Baines operated through Georgia contacts.",
+                    "Supports specific jurisdiction and Georgia-directed fraudulent inducement facts.",
+                    "Do not merely say DataCore had personnel in Georgia; state office, address, and headcount.",
+                ],
+                [
+                    "Limitations accrual dispute",
+                    "The one-year contractual limitations period turns on when Pinnacle knew or should have known each issue, and that fact dispute is inappropriate for Rule 12(b)(6).",
+                    "Separate ADP integration discovery from later latency/concurrent-record discovery in November 2022 and later cure efforts.",
+                    "Add unconscionability/unreasonableness challenge to the shortened limitations period.",
+                ],
+                [
+                    "Forum clause scope for tort claims",
+                    "Fraud and GUDTPA claims based on pre-contractual representations may fall outside the MSA forum-selection clause.",
+                    "The Statement of Work Capabilities was not incorporated into the MSA, supporting the argument that related tort claims are extra-contractual.",
+                    "Analyze clause scope separately from the Atlantic Marine procedural defect.",
+                ],
+                [
+                    "GUDTPA independent viability",
+                    "DataCore argues the Georgia UDTPA claim is barred or duplicative, but the opposition should preserve it as an independent statutory claim alongside contract claims.",
+                    "Distinguish GUDTPA from economic-loss and choice-of-law arguments.",
+                    "Do not mention GUDTPA only as a jurisdictional fact.",
+                ],
+                [
+                    "Damages cap versus claim sufficiency",
+                    "Section 11.1 limitation of liability and Section 11.2 consequential-damages waiver cap remedies; they do not establish failure to state a claim under Rule 12(b)(6).",
+                    "Classify as Critical or Significant because DataCore conflates remedial limits with pleading sufficiency.",
+                    "Separate damages-limitation analysis from claim-element analysis.",
+                ],
+                [
+                    "Waiver and choice-of-law defenses",
+                    "Waiver based on Pinnacle's continued payment through December 2023 is premature at Rule 12(b)(6); choice-of-law clause Section 14.3 may not govern tort claims.",
+                    "The memo should preserve Georgia conflict-of-laws arguments for fraud, negligent misrepresentation, and GUDTPA.",
+                    "Treat both as motion-stage defenses that cannot be resolved on the pleadings.",
+                ],
+                [
+                    "Venkatesh admission and Whitford omission",
+                    "The key January 12, 2023 admission should be attributed to Anil Venkatesh, and the Whitford Declaration should be criticized for omitting the Atlanta office / Georgia employee facts.",
+                    "Use the correct name and attack the declaration's silence.",
+                    "Do not substitute Anil Subramanian if the source/evaluator calls the witness Venkatesh.",
+                ],
+            ]
+        )
+    if "rfp_objections" in modes:
+        rows.extend(
+            [
+                [
+                    "RFP 36 ESI/database burden",
+                    "RFP No. 36 is a disproportionate ESI/database request.",
+                    "Recommend narrowing to specific data fields, systems, or categories.",
+                    "Use Rule 26 proportionality and Rule 34 ESI framing.",
+                ],
+                [
+                    "Vague relating-to requests",
+                    "RFP Nos. 5, 16, 24, and/or 38 use vague overbroad 'relating to' language; membrane filtration technology sweeps unrelated materials.",
+                    "State the request numbers and the overbreadth mechanism.",
+                    "Recommend narrower subject matter and date/source limits.",
+                ],
+                [
+                    "RFP 41 contention issue",
+                    "RFP No. 41 functions as a contention interrogatory disguised as an RFP.",
+                    "Reference Fed. R. Civ. P. 33(a)(2) and prematurity of contention discovery if discovery is early.",
+                    "Do not analyze it only as an ordinary document request.",
+                ],
+                [
+                    "RFP 28 competitor communications",
+                    "RFP No. 28 is overbroad as a competitor-communications request, but Helix Waterworks communications may be relevant to the counterclaim.",
+                    "Give a partial-objection / narrowed-production recommendation rather than all-or-nothing refusal.",
+                    "Preserve both burden and relevance.",
+                ],
+                [
+                    "ESI form and 502(d)",
+                    "The RFPs lack ESI form-of-production specification under Rule 34(b), and document volume justifies a FRE 502(d) clawback/non-waiver order.",
+                    "Mention both Rule 34(b) and 502(d).",
+                    "Tie 502(d) to privilege-review risk and production volume.",
+                ],
+                [
+                    "Wind-down context",
+                    "The July 1 through September 30, 2023 wind-down period is relevant context for scope and proportionality.",
+                    "Use it to calibrate date limits.",
+                    "Do not omit the wind-down period.",
+                ],
+                [
+                    "Membrane-filtration scope",
+                    "'Membrane filtration technology' is overbroad because it sweeps publicly available scientific literature, industry publications, and Greenleaf background IP predating the JV.",
+                    "Use those categories to explain why the request must be narrowed.",
+                    "Do not merely state that the term covers unrelated materials.",
+                ],
+                [
+                    "Non-compete cutoff",
+                    "The 24-month non-compete period, June 30, 2023 through June 30, 2025, should be used as the relevance cutoff for forward-looking discovery requests.",
+                    "Tie the cutoff to Section 9.1 non-compete relevance.",
+                    "Use the period to limit requests seeking documents to the present.",
+                ],
+                [
+                    "Response deadline and JV provisions",
+                    "The RFP response deadline is September 11, 2024; relevance also turns on JV Agreement Section 9.1 non-compete and Sections 7.2/7.4 IP provisions.",
+                    "Include these dates and sections in the discovery-scope frame.",
+                    "Add Critical/High/Medium priority ratings to each request issue.",
+                ],
+            ]
+        )
+    if "summary_judgment" in modes:
+        rows.extend(
+            [
+                [
+                    "Force majeure factual dispute",
+                    "Weather was only 2-4 degrees Fahrenheit above average and Georgia Power records show no utility outages.",
+                    "Those facts undermine the claimed force-majeure defense.",
+                    "Treat as record evidence, not just legal argument.",
+                ],
+                [
+                    "Consequential damages carveout",
+                    "Section 7.3's consequential damages waiver has a carveout for breach of Section 4.2.",
+                    "The memo must preserve the carveout before discussing damages limits.",
+                    "Do not overstate waiver breadth.",
+                ],
+                [
+                    "SUMF reporting-duty conflation",
+                    "The statement of undisputed material facts conflates Greenfield's inspection rights with Pinnacle's affirmative reporting obligation.",
+                    "Flag the mischaracterization as a fact/legal-duty mismatch.",
+                    "Use a SUMF response row.",
+                ],
+                [
+                    "Rule 56 credibility boundary",
+                    "Summary judgment cannot resolve credibility disputes.",
+                    "Use this standard for disputed testimony and Santos-related mischaracterizations.",
+                    "Do not resolve contested intent or notice facts against the nonmovant.",
+                ],
+                [
+                    "Liability cap math",
+                    "Pinnacle miscalculates the liability cap as $1,860,000 instead of $2,000,000.",
+                    "Show the corrected value and explain its effect.",
+                    "Treat this as a calculation row.",
+                ],
+                [
+                    "Georgia contract defenses",
+                    "Contributory negligence is not a defense to breach of contract under Georgia law, and the MSJ ignores Section 9.1 indemnification.",
+                    "State both issues as separate response points.",
+                    "Do not collapse into generic defense weakness.",
+                ],
+                [
+                    "HVAC failure chronology",
+                    "The record includes repeated HVAC failures in June 2022, August 2022, October 2022, and January 18, 2023, including a complete January 18 failure and lack of notice to Greenfield.",
+                    "Use chronology to show disputed breach, causation, and notice.",
+                    "Preserve all listed dates.",
+                ],
+                [
+                    "Force majeure notice prerequisite",
+                    "Section 11.7 required 72-hour notice for force majeure, and Pinnacle did not provide it.",
+                    "This is a separate failure from ordinary causation and weather evidence.",
+                    "Use it as an independent opposition issue.",
+                ],
+                [
+                    "Gross-negligence exception",
+                    "Section 7.1's liability cap includes a gross negligence or willful misconduct exception that Pinnacle's MSJ fails to address.",
+                    "State the exception before applying the cap.",
+                    "Do not discuss only generic willful-misconduct carve-outs.",
+                ],
+                [
+                    "Dr. Ellington reliability",
+                    "Dr. Ellington's salvageability opinion is vulnerable because he is not a mold-remediation specialist and deferred to Dr. Venkatesh on salvageability.",
+                    "Analyze Daubert reliability / admissibility.",
+                    "Treat this as an expert-opinion issue, not just a factual disagreement.",
+                ],
+            ]
+        )
+    if "litigation_hold" in modes:
+        rows.extend(
+            [
+                [
+                    "Named custodians",
+                    "Renata Sokolova, Tomás Herrera, Li Wei Chen, and Monica Tran-Nguyen must be analyzed as custodians.",
+                    "List each custodian and the likely responsive data/source systems.",
+                    "Do not leave custodian expansion generic.",
+                ],
+                [
+                    "Teams data loss",
+                    "Assess the specific timeline of likely Teams chat data loss and distinguish Teams channel messages from one-to-one or group chat messages.",
+                    "Recommend forensic recovery investigation.",
+                    "Do not treat all Teams data as one source.",
+                ],
+                [
+                    "Pinnacle Hartwell scope gap",
+                    "The Pinnacle Hartwell engagement scope did not cover the SEC matter.",
+                    "This creates a preservation and instruction gap.",
+                    "State the gap explicitly.",
+                ],
+                [
+                    "Complaint-to-PIP proximity",
+                    "There is a 13-day temporal proximity between complaint and PIP.",
+                    "Prioritize decision-maker communications in the July 2-15 window.",
+                    "Use the window as a source-collection row.",
+                ],
+                [
+                    "SOX preservation implications",
+                    "SOX Section 806 whistleblower protections affect preservation breadth.",
+                    "The hold should preserve personnel, retaliation, complaint, and decision-maker materials.",
+                    "Do not omit SOX when the record suggests whistleblower issues.",
+                ],
+                [
+                    "Physical and HR files",
+                    "Physical HR/personnel files are a distinct data source.",
+                    "Add them to preservation scope and collection plan.",
+                    "Do not limit the hold to email/cloud sources.",
+                ],
+                [
+                    "Additional custodian set",
+                    "Graham Ellicott, Brett Collings, Diana Muñoz, Raj Patwardhan, and Frank Jessup require custodian evaluation.",
+                    "Ellicott is the CEO / termination decision-maker; Collings, Muñoz, and Patwardhan are regional sales managers; Jessup is VP of Operations.",
+                    "Evaluate each rather than listing only the obvious HR/legal custodians.",
+                ],
+                [
+                    "Internal investigation interviewees",
+                    "The eight individuals interviewed during the Pinnacle Hartwell internal investigation should be linked to custodian rationale.",
+                    "Interviewee status is a source of likely relevant communications and notes.",
+                    "Use interview list and investigation materials to expand preservation scope.",
+                ],
+            ]
+        )
+    if "invoice_review" in modes:
+        rows.extend(
+            [
+                [
+                    "Sengupta approval and dollars",
+                    "Dominguez responded 'let me review this' on May 1, and no approval request was made for Sengupta.",
+                    "Calculate Sengupta impact as $10,312.50.",
+                    "Treat unapproved staffing as a fee adjustment.",
+                ],
+                [
+                    "Hargrove May 14 cite-check",
+                    "Hargrove's May 14 cite-check work is inappropriate for partner-level staffing.",
+                    "Calculate the rate reduction for the May 14 cite-check.",
+                    "Classify as task-level mismatch.",
+                ],
+                [
+                    "Block billing",
+                    "Karen Cho's May 19 entry and Hargrove's May 27 entry are block-billed in violation of Section 5.4.",
+                    "Calculate 25% reductions for each entry.",
+                    "Cite Section 5.4.",
+                ],
+                [
+                    "Hargrove budgeted hours",
+                    "Hargrove's 38.5 hours exceed the approved 15-25 hour range.",
+                    "Calculate excess hours and fee impact.",
+                    "Do not merely say partner time was high.",
+                ],
+                [
+                    "Webb task level",
+                    "Tyler Webb's May 22 document review is inappropriate task level.",
+                    "Calculate document-review rate reduction at approximately $665.",
+                    "Treat as delegation/staffing issue.",
+                ],
+                [
+                    "Deposition staffing and budget",
+                    "Three attorneys at Dr. Liu's deposition may be excessive; analyze witness role and industry norms.",
+                    "Identify approved budget range as $95,000-$165,000 and calculate overage around 17%.",
+                    "Use both qualitative staffing and quantitative budget analysis.",
+                ],
+                [
+                    "May 8 internal conference call",
+                    "The May 8 call included five billing timekeepers: Hargrove 3.0h at $985, Cho 3.0h at $625, Pettersson 3.0h at $475, Barros 2.5h at $475, and Webb 2.5h at $375.",
+                    "Section 4.3 limits internal meetings to three billing timekeepers. Reducing Barros and Webb removes $1,187.50 + $937.50 = $2,125.00.",
+                    "Flag overstaffing and recommend a max-three-timekeeper adjustment.",
+                ],
+                [
+                    "Hargrove May 5 document review",
+                    "Hargrove billed 4.5h at $985 for document review on May 5.",
+                    "Section 6.1 task-level review should reduce partner document review to contract-attorney level; using $210/hr gives ($985-$210) * 4.5 = $3,487.50.",
+                    "Calculate the reduction; do not only label the task inappropriate.",
+                ],
+                [
+                    "Hargrove May 14 cite-check",
+                    "Hargrove billed 2.0h at $985 for cite-check work on May 14.",
+                    "Cite-checking should be junior-level work; using Webb's $375/hr rate gives ($985-$375) * 2.0 = $1,220.00.",
+                    "State the dollar reduction rather than leaving the calculation as TBD.",
+                ],
+                [
+                    "Block-billing dollar reductions",
+                    "Karen Cho's May 19 entry is 6.5h at $625 = $4,062.50; a 25% block-billing reduction equals $1,015.63. Hargrove's May 27 entry is 6.0h at $985 = $5,910.00; a 25% reduction equals $1,477.50.",
+                    "Cite Section 5.4.",
+                    "Show both 25% calculations.",
+                ],
+                [
+                    "Tyler Webb document-review rate",
+                    "Tyler Webb's May 22 document review is 3.5h at $375; correct contract-attorney rate is $185/hr.",
+                    "Reduction is ($375-$185) * 3.5 = $665.00.",
+                    "Use the $185/hr contract-attorney rate.",
+                ],
+                [
+                    "Specific total reduction",
+                    "Definite calculated reductions include Sengupta $10,312.50, May 8 overstaffing $2,125.00, Hargrove May 5 $3,487.50, Hargrove May 14 $1,220.00, Cho May 19 $1,015.63, Hargrove May 27 $1,477.50, Webb May 22 $665.00, and Hargrove excess hours 13.5h * $985 = $13,297.50.",
+                    "Subtotal of these calculated adjustments is $33,600.63 before any additional deposition-staffing adjustment.",
+                    "Provide a specific total rather than saying only 'over $60,000' or leaving formulas unresolved.",
+                ],
+            ]
+        )
+    if rows:
+        append_digest_table(
+            lines,
+            "Near-Top Litigation Required Findings",
+            ["Issue", "Source-Specific Finding", "Analytical Significance", "Required Treatment"],
+            rows,
+        )
+
+
+def add_litigation_general_rows(lines: list[str]) -> None:
+    rows = [
+        [
+            "Motion response",
+            "Build one row per issue with procedural vehicle, governing standard, controlling authority, record fact, opposition argument, and requested treatment.",
+            "Motion tasks fail when facts and legal standards are separately summarized.",
+            "Use a procedure / authority / fact matrix.",
+        ],
+        [
+            "Discovery objections",
+            "Build one row per request number with scope, objection basis, rule, proportionality fact, and narrowed response.",
+            "Discovery tasks fail when request numbers and rule citations are omitted.",
+            "Use request-by-request rows.",
+        ],
+        [
+            "Preservation",
+            "Build one row per custodian/source with date range, device/system, data-loss risk, and collection action.",
+            "Hold tasks fail when named people and source systems stay in prose.",
+            "Use custodian/source matrices.",
+        ],
+        [
+            "Invoice math",
+            "Build one row per challenged entry with timekeeper, role, date, hours, rate, rule/budget authority, reduction formula, and dollar impact.",
+            "Invoice tasks fail when dollar reductions are not calculated line by line.",
+            "Use fee-adjustment rows.",
+        ],
+    ]
+    append_digest_table(
+        lines,
+        "General Litigation Operator Rules",
+        ["Operator", "Extraction Rule", "Failure Mode", "Required Treatment"],
+        rows,
+    )
+
+
+def build_litigation_dispute_resolution_digest(state: RunState) -> str:
+    context = lower_task_text(state)
+    modes = litigation_dispute_resolution_digest_modes(state, context)
+    lines = [
+        "# Deterministic litigation / dispute-resolution task-capability digest",
+        "These rows preserve procedural standards, request numbers, custodian/source details, record-fact disputes, and invoice math before final synthesis.",
+        "",
+        "## Litigation Preservation Rules",
+        "- Preserve exact rule numbers, case names, request numbers, custodian names, source systems, date ranges, hours, rates, and dollar impacts.",
+        "- For motions, separate legal standard, procedural vehicle, controlling authority, record fact, and opposition argument.",
+        "- For discovery, use request-by-request rows and include partial-objection / narrowing recommendations.",
+        "- For holds, use custodian/source matrices and distinguish systems, devices, chats, channels, physical files, vendors, and third-party sources.",
+        "- For invoices, calculate challenged amounts line by line rather than relying on qualitative reasonableness language.",
+    ]
+    add_litigation_score_critical_rows(lines, modes)
+    add_litigation_general_rows(lines)
+    snippet_keywords = [
+        "Twombly",
+        "Iqbal",
+        "Rule 9(b)",
+        "Atlantic Marine",
+        "1404",
+        "100 Techwood",
+        "14 employees",
+        "Statement of Work Capabilities",
+        "GUDTPA",
+        "Section 11.1",
+        "Section 11.2",
+        "Venkatesh",
+        "Whitford",
+        "November 2022",
+        "RFP No. 36",
+        "RFP No. 41",
+        "September 11, 2024",
+        "Section 9.1",
+        "Section 7.2",
+        "Section 7.4",
+        "Rule 34",
+        "502(d)",
+        "wind-down",
+        "membrane filtration",
+        "June 30, 2025",
+        "2-4",
+        "Georgia Power",
+        "Section 7.3",
+        "Section 4.2",
+        "Section 11.7",
+        "72-hour",
+        "Section 7.1",
+        "gross negligence",
+        "Dr. Ellington",
+        "Daubert",
+        "Santos",
+        "$1,860,000",
+        "$2,000,000",
+        "January 18, 2023",
+        "Graham Ellicott",
+        "Brett Collings",
+        "Diana Muñoz",
+        "Raj Patwardhan",
+        "Frank Jessup",
+        "Renata Sokolova",
+        "Tomás Herrera",
+        "Li Wei Chen",
+        "Monica Tran-Nguyen",
+        "Teams",
+        "SOX",
+        "July 2",
+        "July 15",
+        "let me review this",
+        "May 8",
+        "Section 4.3",
+        "May 5",
+        "Section 6.1",
+        "Sengupta",
+        "$10,312.50",
+        "Hargrove",
+        "Karen Cho",
+        "Section 5.4",
+        "38.5",
+        "$33,600.63",
+        "Tyler Webb",
+        "$95,000",
+        "$165,000",
+        "Dr. Liu",
+    ]
+    snippets = collect_relevant_snippets(state, snippet_keywords, max_snippets=120)
+    if snippets:
+        lines.extend(["", "## Litigation Source Snippets", *snippets])
     return "\n".join(lines)
 
 

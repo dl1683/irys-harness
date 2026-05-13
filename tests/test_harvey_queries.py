@@ -2772,6 +2772,73 @@ class HarveyQueryTests(unittest.TestCase):
         self.assertIn("$23.2M", digest)
         self.assertIn("Clayton Act Section 7", digest)
 
+    def test_litigation_digest_routes_motion_discovery_hold_and_invoice_rows(self) -> None:
+        motion_task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="litigation-dispute-resolution/analyze-counterparty-motion-to-dismiss",
+            question="Review the attached motion to dismiss and produce an opposition issues memo.",
+            answer_schema={"deliverables": ["motion-to-dismiss-issue-memo.docx"]},
+            metadata={"practice_area": "litigation-dispute-resolution"},
+        )
+        motion_state = RunState(task=motion_task, config=load_config(), documents=[])
+        motion_digest = build_task_family_digest(motion_state)
+        self.assertIn("Motion Procedure / Authority Matrix", build_synthesis_prompt(motion_state))
+        self.assertIn("Atlantic Marine", motion_digest)
+        self.assertIn("Section 1404(a)", motion_digest)
+        self.assertIn("100 Techwood Drive NW", motion_digest)
+        self.assertIn("14 employees", motion_digest)
+        self.assertIn("Rule 12(b)(6)", motion_digest)
+        self.assertIn("Statement of Work Capabilities", motion_digest)
+        self.assertIn("GUDTPA", motion_digest)
+        self.assertIn("Anil Venkatesh", motion_digest)
+
+        discovery_task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="litigation-dispute-resolution/analyze-counterparty-requests-for-production-for-objectionable-and-overbroad-discovery-demands",
+            question="Analyze requests for production for objectionable and overbroad discovery demands.",
+            answer_schema={"deliverables": ["discovery-objections-memo.docx"]},
+            metadata={"practice_area": "litigation-dispute-resolution"},
+        )
+        discovery_digest = build_task_family_digest(RunState(task=discovery_task, config=load_config(), documents=[]))
+        self.assertIn("RFP No. 36", discovery_digest)
+        self.assertIn("RFP No. 41", discovery_digest)
+        self.assertIn("Fed. R. Civ. P. 33(a)(2)", discovery_digest)
+        self.assertIn("FRE 502(d)", discovery_digest)
+        self.assertIn("September 11, 2024", discovery_digest)
+        self.assertIn("Section 9.1", discovery_digest)
+
+        hold_task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="litigation-dispute-resolution/assess-litigation-hold-scope-for-custodian-identification",
+            question="Assess litigation hold scope for custodian identification.",
+            answer_schema={"deliverables": ["litigation-hold-scope-memo.docx"]},
+            metadata={"practice_area": "litigation-dispute-resolution"},
+        )
+        hold_digest = build_task_family_digest(RunState(task=hold_task, config=load_config(), documents=[]))
+        self.assertIn("Renata Sokolova", hold_digest)
+        self.assertIn("Tomás Herrera", hold_digest)
+        self.assertIn("Monica Tran-Nguyen", hold_digest)
+        self.assertIn("SOX Section 806", hold_digest)
+        self.assertIn("Graham Ellicott", hold_digest)
+        self.assertIn("Diana Muñoz", hold_digest)
+        self.assertIn("Frank Jessup", hold_digest)
+
+        invoice_task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="litigation-dispute-resolution/assess-reasonableness-of-staffing-levels-on-litigation-invoice",
+            question="Assess reasonableness of staffing levels on litigation invoice.",
+            answer_schema={"deliverables": ["invoice-review-memo.docx"]},
+            metadata={"practice_area": "litigation-dispute-resolution"},
+        )
+        invoice_digest = build_task_family_digest(RunState(task=invoice_task, config=load_config(), documents=[]))
+        self.assertIn("$10,312.50", invoice_digest)
+        self.assertIn("Section 5.4", invoice_digest)
+        self.assertIn("38.5 hours", invoice_digest)
+        self.assertIn("$95,000-$165,000", invoice_digest)
+        self.assertIn("$2,125.00", invoice_digest)
+        self.assertIn("$3,487.50", invoice_digest)
+        self.assertIn("$33,600.63", invoice_digest)
+
 
 if __name__ == "__main__":
     unittest.main()
