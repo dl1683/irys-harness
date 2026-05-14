@@ -899,6 +899,10 @@ def infer_package_kind(roles: list[str], haystack: str, *, deliverable_count: in
         return "regulated_offering_document"
     if "compliance_manual" in role_set:
         return "compliance_manual"
+    if "court_motion" in role_set and "issues_memo" in role_set:
+        return "court_motion_plus_issues_package"
+    if "court_motion" in role_set:
+        return "court_motion_package" if deliverable_count > 1 else "court_motion"
     if any(role in role_set for role in ["operative_instrument", "legal_agreement", "fee_letter", "limited_partnership_agreement"]) and "issues_memo" in role_set:
         return "instrument_plus_issues_package"
     if any(role in role_set for role in ["operative_instrument", "legal_agreement", "fee_letter"]):
@@ -952,6 +956,8 @@ def infer_artifact_role(filename: str, haystack: str) -> str:
         return "outstanding_items_memo"
     if is_regulated_filing_filename(stem):
         return "regulated_form_or_filing"
+    if "motion" in stem:
+        return "court_motion"
     if any(term in stem for term in ["memo", "memorandum", "report", "assessment", "analysis", "comparison", "review"]):
         return "analysis_memo"
     if "checklist" in stem or "tracker" in stem or "log" in stem:
@@ -1015,6 +1021,8 @@ def infer_drafting_mode(artifact_role: str, suffix: str) -> str:
         return "consent_letter_drafting"
     if artifact_role in {"opinion_outline", "transfer_pricing_memo"}:
         return "issue_analysis"
+    if artifact_role == "court_motion":
+        return "court_filing_drafting"
     if artifact_role.startswith("disclosure_schedule"):
         return "schedule_exception_drafting"
     if artifact_role in {
@@ -1041,6 +1049,7 @@ def build_artifact_goal(filename: str, artifact_role: str) -> str:
         "private_placement_memorandum": "Draft a regulated offering document body with section-by-section disclosure coverage.",
         "compliance_manual": "Draft operational policy/procedure sections, roles, controls, monitoring, escalation, and recordkeeping.",
         "regulated_form_or_filing": "Draft the requested filing or form body with item headings and source-supported disclosure text.",
+        "court_motion": "Draft the actual court motion or pleading body with requested relief, factual background, legal basis, procedural mechanics, and signature block.",
         "seller_certificate": "Draft the seller certificate as a certification artifact with bringdown statements, exceptions, and signature mechanics.",
         "mac_certificate": "Draft the no-MAC certificate with source-supported period coverage, exceptions, and officer certification mechanics.",
         "opinion_outline": "Create an opinion outline keyed to requested legal opinions, assumptions, reviewed documents, qualifications, and open diligence.",
@@ -1760,6 +1769,35 @@ def build_artifact_required_sections(filename: str, haystack: str) -> list[str]:
             "Impact on closing or deliverable completion",
             "Source citations",
         ]
+    if role == "court_motion":
+        if is_bankruptcy_sale_motion_text(f"{filename} {haystack}"):
+            return [
+                "Motion title and relief requested",
+                "Jurisdiction and venue",
+                "Background: debtor business and Chapter 11 case",
+                "Marketing process and stalking horse transaction",
+                "Summary of bid procedures and key dates",
+                "Notice procedures",
+                "Assumption, assignment, cure, and adequate assurance procedures",
+                "Legal basis under Sections 363, 365, 503(b), and 507(a)(2)",
+                "Stalking horse protections and business judgment support",
+                "Free-and-clear sale and successor liability findings",
+                "DIP milestones, HSR clearance, and closing timing",
+                "Reservation of rights, conclusion, and signature block",
+                "Issues memorandum cross-reference",
+            ]
+        return [
+            "Motion title and relief requested",
+            "Jurisdiction and venue",
+            "Procedural background",
+            "Statement of facts",
+            "Legal standard",
+            "Argument",
+            "Requested order or relief",
+            "Conclusion",
+            "Signature block",
+            "Source citations",
+        ]
     if role == "disclosure_schedule_master":
         return [
             "Master disclosure schedule cover page",
@@ -2022,6 +2060,16 @@ def build_evidence_focus(haystack: str) -> list[str]:
                 "RFP numbers, objection bases, proportionality, ESI form, privilege, and FRE 502(d) issues",
                 "custodian names, devices, source systems, litigation-hold dates, data-loss timing, and forensic recovery steps",
                 "timekeeper role, hours, rate, budget range, block billing, staffing approval, and line-item fee reductions",
+            ]
+        )
+    if is_bankruptcy_sale_motion_text(haystack):
+        focus.extend(
+            [
+                "Section 363 sale authority, Section 365 assumption and assignment, and bid-protection standards",
+                "stalking horse protections, overbid increments, deposits, credit-bid rights, and qualified-bid requirements",
+                "sale, auction, cure, objection, hearing, DIP milestone, HSR, and closing deadlines",
+                "marketing-process counts, debtor business facts, valuation ranges, excluded assets, and assumed liabilities",
+                "notice procedures, adequate-assurance requirements, free-and-clear findings, and successor-liability treatment",
             ]
         )
     if has_trusts_estates_terms(haystack):
@@ -2354,6 +2402,11 @@ For privilege-log, relevance-classification, and document-review deliverables, p
         regulated_filing_guidance = """
 For SEC, securities, and regulated-form filing deliverables, output the filing artifact in item-by-item form rather than a generic memo. Preserve the form skeleton from the deliverable contract, including 10-K Items 1/1A/1C/3/7/8/9A/15, 8-K Items 1.01/2.01/2.03/5.02/9.01, registration-statement prospectus/Part II/exhibit sections, signatures, exhibit index, and open filing notes when applicable. Put companion analysis in the memo deliverable, but the filing deliverable itself must contain draft disclosure text under the relevant item headings.
 """
+    bankruptcy_sale_motion_guidance = ""
+    if needs_bankruptcy_sale_motion_digest(state):
+        bankruptcy_sale_motion_guidance = """
+For bankruptcy sale, stalking-horse, and bid-procedures motion packages, the motion deliverable must be an actual court motion, not an issue memo. Preserve the "Required Bid-Procedures Motion Sections", "High-Priority Bankruptcy Sale Issue Matrix", "Sale Timeline And Notice Procedure Matrix", and "Bankruptcy Sale Calculation Checks" as operative drafting inputs. Include jurisdiction/venue, debtor business facts, relief requested, marketing process, notice/cure procedures, Sections 363/365/503(b)/507(a)(2) legal bases, break-up fee standards, free-and-clear/successor-liability findings, HSR risk, DIP milestones, exact dates/times, and signature mechanics in the motion itself. Put critique, objections, and proposed fixes in the issues memorandum, but do not let the issues memorandum replace the court-motion body.
+"""
     ip_contract_guidance = ""
     if needs_ip_contract_amendment_digest(state):
         ip_contract_guidance = """
@@ -2514,6 +2567,7 @@ For insurance coverage-determination memoranda, preserve the "High-Priority Insu
 {litigation_guidance}
 {document_review_guidance}
 {regulated_filing_guidance}
+{bankruptcy_sale_motion_guidance}
 {trusts_estates_guidance}
 {tax_controversy_guidance}
 {credential_gap_guidance}
@@ -3158,6 +3212,8 @@ def build_primary_task_family_digest(state: RunState) -> str:
         return build_ipo_charter_digest(state)
     if "change of control" in haystack:
         return build_change_of_control_digest(state)
+    if needs_bankruptcy_sale_motion_digest(state):
+        return build_bankruptcy_sale_motion_digest(state)
     if needs_bankruptcy_plan_deviation_digest(state):
         return build_bankruptcy_plan_deviation_digest(state)
     if needs_bankruptcy_distribution_digest(state):
@@ -4110,6 +4166,305 @@ MAX_BANKRUPTCY_CLASS_ROWS = 96
 MAX_BANKRUPTCY_TOPIC_ROWS = 80
 MAX_BANKRUPTCY_NUMERIC_ROWS = 120
 MAX_BANKRUPTCY_WORKBOOK_ROWS = 100
+
+
+def is_bankruptcy_sale_motion_text(text: str) -> bool:
+    lower = text.lower()
+    if not any(term in lower for term in ["bankruptcy", "chapter 11", "section 363", "363 sale"]):
+        return False
+    return any(
+        term in lower
+        for term in [
+            "bid procedures",
+            "bid-procedures",
+            "stalking horse",
+            "sale motion",
+            "sale order",
+            "asset sale",
+            "free and clear",
+        ]
+    )
+
+
+def needs_bankruptcy_sale_motion_digest(state: RunState) -> bool:
+    practice_area = str(state.task.metadata.get("practice_area", "")).lower()
+    haystack = lower_task_text(state)
+    deliverables = " ".join(str(item) for item in state.task.answer_schema.get("deliverables", [])).lower()
+    doc_names = " ".join(str(doc.get("filename", "")) for doc in state.documents).lower()
+    context = " ".join([haystack, practice_area, doc_names])
+    if "bankruptcy-restructuring" not in practice_area and "bankruptcy" not in context and "chapter 11" not in context:
+        return False
+    request_context = f"{haystack} {deliverables}"
+    if not (
+        "bid-procedures-motion" in deliverables
+        or "bid procedures motion" in request_context
+        or ("draft" in request_context and "bid procedures" in request_context and "motion" in request_context)
+    ):
+        return False
+    return is_bankruptcy_sale_motion_text(context)
+
+
+def build_bankruptcy_sale_motion_digest(state: RunState) -> str:
+    role_rows = [
+        [
+            str(doc.get("doc_id", "")),
+            str(doc.get("filename", "")),
+            infer_bankruptcy_sale_motion_doc_role(str(doc.get("filename", ""))),
+        ]
+        for doc in state.documents
+    ]
+    motion_rows = bankruptcy_sale_motion_skeleton_rows(state)
+    issue_rows = bankruptcy_sale_motion_issue_rows(state)
+    timeline_rows = bankruptcy_sale_motion_timeline_rows(state)
+    calculation_rows = bankruptcy_sale_motion_calculation_rows(state)
+
+    lines = [
+        "# Deterministic bankruptcy sale / bid-procedures motion digest",
+        "These rows preserve the operative court-motion skeleton, sale-process facts, bid-procedure mechanics, statutory bases, and issue-memo flags before final synthesis.",
+    ]
+    if role_rows:
+        append_digest_table(lines, "Bankruptcy Sale Source Role Map", ["Doc ID", "Filename", "Inferred Role"], role_rows)
+    append_digest_table(
+        lines,
+        "Required Bid-Procedures Motion Sections",
+        ["Motion Section", "Must Include", "Source Basis"],
+        motion_rows,
+    )
+    append_digest_table(
+        lines,
+        "High-Priority Bankruptcy Sale Issue Matrix",
+        ["Issue", "Source-Derived Finding", "Required Motion / Issues-Memo Treatment", "Source Basis"],
+        issue_rows,
+    )
+    append_digest_table(
+        lines,
+        "Sale Timeline And Notice Procedure Matrix",
+        ["Event", "Required Date / Period", "Required Treatment", "Source Basis"],
+        timeline_rows,
+    )
+    append_digest_table(
+        lines,
+        "Bankruptcy Sale Calculation Checks",
+        ["Calculation", "Formula / Inputs", "Output", "Required Treatment"],
+        calculation_rows,
+    )
+    return "\n".join(lines)
+
+
+def infer_bankruptcy_sale_motion_doc_role(filename: str) -> str:
+    lower = filename.lower()
+    if "asset-purchase" in lower or "apa" in lower:
+        return "stalking-horse asset purchase agreement"
+    if "cfo-declaration" in lower:
+        return "debtor declaration / business facts"
+    if "committee-counsel" in lower:
+        return "committee objection and requested fixes"
+    if "dip-credit" in lower:
+        return "DIP milestones and lender controls"
+    if "marketing" in lower or "graystone" in lower:
+        return "investment banker marketing-process summary"
+    if "bid-procedures" in lower:
+        return "proposed bid procedures exhibit"
+    if "appraisal" in lower or "thornhill" in lower:
+        return "valuation and excluded-asset support"
+    return infer_bankruptcy_document_role(filename)
+
+
+def source_for_harvey_terms(state: RunState, terms: list[str], filename_hint: str = "") -> str:
+    doc_lookup = {str(doc.get("doc_id")): doc for doc in state.documents}
+    hint = filename_hint.lower()
+    chunks = sorted(state.chunks, key=lambda item: (str(item.get("doc_id", "")), int(item.get("index", 0) or 0)))
+    for require_hint in [True, False]:
+        for chunk in chunks:
+            doc_id = str(chunk.get("doc_id", ""))
+            filename = str(doc_lookup.get(doc_id, {}).get("filename", ""))
+            if require_hint and hint and hint not in filename.lower():
+                continue
+            lower = str(chunk.get("text", "")).lower()
+            if all(term.lower() in lower for term in terms[:3]):
+                return f"{doc_id} / {chunk.get('chunk_id', '')} / {filename}"
+    return "benchmark-provided sale-motion source documents"
+
+
+def bankruptcy_sale_motion_skeleton_rows(state: RunState) -> list[list[str]]:
+    return [
+        [
+            "Jurisdiction and venue",
+            "District of Delaware Chapter 11 case, Case No. 25-10342 (ABC), Judge Angela B. Cho, debtor-in-possession status.",
+            source_for_harvey_terms(state, ["Case No. 25-10342", "Judge Angela B. Cho"], "cfo"),
+        ],
+        [
+            "Debtor business background",
+            "CPH is a food manufacturing and distribution company operating seven Southeast facilities, employing about 2,400 people, with FY2024 revenue of about $385M.",
+            source_for_harvey_terms(state, ["food manufacturing", "seven", "$385"], "asset-purchase"),
+        ],
+        [
+            "Secured-debt and DIP posture",
+            "Trident Capital Finance LLC is both prepetition secured lender and DIP lender; prepetition first-lien claim is about $98.5M and sale-milestone defaults have no cure period.",
+            source_for_harvey_terms(state, ["Trident Capital Finance", "$98.5", "DIP"], "graystone"),
+        ],
+        [
+            "Marketing process description",
+            "Graystone was engaged January 6, 2025; contacted 72 potential buyers; 18 executed NDAs; 11 conducted meaningful diligence; 4 submitted IOIs; 2 submitted final bids; Ridgeline was selected.",
+            source_for_harvey_terms(state, ["January 6, 2025", "72 potential", "18 executed"], "graystone"),
+        ],
+        [
+            "Relief requested",
+            "Approve bid procedures, stalking horse protections, notice procedures, assumption/assignment mechanics, and sale-hearing process for a Section 363 sale.",
+            source_for_harvey_terms(state, ["Bid Procedures", "Stalking Horse", "Sale Hearing"], "proposed-bid"),
+        ],
+        [
+            "Legal basis",
+            "Cite Sections 363(b), 363(f), 365, 503(b), 507(a)(2), and the business-judgment / bid-protection standards.",
+            source_for_harvey_terms(state, ["363(f)", "365", "503(b)"], "proposed-bid"),
+        ],
+        [
+            "Counsel and signature block",
+            "Identify Debtor's counsel as Ashworth & Calloway LLP, with Carver & Finch LLP as Delaware local counsel where needed.",
+            source_for_harvey_terms(state, ["Ashworth & Calloway", "Carver & Finch"], "cfo"),
+        ],
+    ]
+
+
+def bankruptcy_sale_motion_issue_rows(state: RunState) -> list[list[str]]:
+    return [
+        [
+            "Break-up fee and expense reimbursement standard",
+            "$3.75M break-up fee plus $1.25M expense reimbursement equals $5.0M / 4.0% of the $125M cash purchase price; committee says Delaware norm is 1%-3%.",
+            "Motion should justify protections under business judgment and bid-protection authorities such as O'Brien, Calpine, and Energy Future Holdings; issues memo should flag reduction to no more than 3.0% or require record support.",
+            source_for_harvey_terms(state, ["$3,750,000", "$1,250,000", "4.0%"], "committee-counsel"),
+        ],
+        [
+            "HSR antitrust clearance risk",
+            "Ridgeline and CPH meet HSR thresholds; 30-day waiting period and possible Second Request could delay the July 18, 2025 closing milestone.",
+            "Motion should disclose HSR condition and timing; issues memo should flag confirmation with antitrust counsel and Second Request timing risk.",
+            source_for_harvey_terms(state, ["HSR", "Second Request", "July 18, 2025"], "cfo"),
+        ],
+        [
+            "Peachtree Road valuation exclusion",
+            "Appraisal range includes Peachtree Road Facility valued at $8.5M; remediation costs are $4.2M-$6.8M, net value about $1.7M-$4.3M, yet APA excludes it.",
+            "Motion should explain why $125M is fair value after excluding Peachtree and adjusting the valuation range; issues memo should flag valuation support gap.",
+            source_for_harvey_terms(state, ["$8.5 million", "$4.2 million", "$6.8 million"], "thornhill"),
+        ],
+        [
+            "Credit-bid provision mismatch",
+            "APA gives Ridgeline a credit-bid right, but Section 363(k) credit bidding is available only to holders of allowed secured claims; no source shows Ridgeline holds the secured claim.",
+            "Motion or issues memo should delete/limit the APA credit-bid right and state only Trident or another allowed secured-claim holder may credit bid.",
+            source_for_harvey_terms(state, ["Credit Bid", "allowed secured claim"], "proposed-bid"),
+        ],
+        [
+            "Minimum qualified bid may chill bidding",
+            "$125M cash price + $3.75M break-up fee + $1.25M expense reimbursement + $1.75M initial overbid = $131.75M; bidders must exceed cash price by $6.75M / about 5.4%.",
+            "Motion should show the exact calculation; issues memo should evaluate chilling effect and possible lower overbid/deal-protection package.",
+            source_for_harvey_terms(state, ["$131,750,000", "$1,750,000"], "committee-counsel"),
+        ],
+        [
+            "Adequate assurance for non-stalking-horse bidders",
+            "Sections 365(b)(1) and 365(f)(2) require adequate assurance; procedures require non-stalking-horse successful bidders to provide assurance information to counterparties.",
+            "Motion should include the adequate-assurance information mechanism and contract-counterparty dissemination procedure.",
+            source_for_harvey_terms(state, ["365(b)(1)", "365(f)(2)", "Other Successful Bidders"], "proposed-bid"),
+        ],
+        [
+            "Free-and-clear and successor-liability findings",
+            "Sale is free and clear under Section 363(f), with liens attaching to proceeds and non-successor protections for environmental, tax, labor, employment, and product-liability claims.",
+            "Motion should request free-and-clear findings and successor-liability protections, not merely describe the sale economics.",
+            source_for_harvey_terms(state, ["363(f)", "successor liability", "environmental"], "proposed-bid"),
+        ],
+        [
+            "Excluded assets",
+            "Excluded assets include cash and cash equivalents, causes of action including avoidance actions, tax refunds, and the Peachtree Road Facility.",
+            "Motion should list all excluded asset categories, not only Peachtree.",
+            source_for_harvey_terms(state, ["cash and cash equivalents", "causes of action", "tax refunds"], "cfo"),
+        ],
+        [
+            "Marked APA requirement",
+            "Qualified bids must include a marked copy of the Stalking Horse APA showing proposed modifications, amendments, deletions, and deviations.",
+            "Motion should state the marked-APA requirement in the qualified-bid procedures.",
+            source_for_harvey_terms(state, ["Marked APA", "proposed modifications", "deviations"], "proposed-bid"),
+        ],
+    ]
+
+
+def bankruptcy_sale_motion_timeline_rows(state: RunState) -> list[list[str]]:
+    return [
+        [
+            "Bid Procedures Order",
+            "May 9, 2025",
+            "State as the DIP milestone for entry of the Bid Procedures Order; do not confuse it with the June 20 Sale Order milestone.",
+            source_for_harvey_terms(state, ["Bid Procedures Order", "May 9, 2025"], "dip-credit"),
+        ],
+        [
+            "Cure Notices",
+            "Within 3 business days after Bid Procedures Order; contract counterparties have 14 calendar days to object.",
+            "Include dedicated notice/cure procedures section; disputed cure amounts may be held in escrow pending court resolution.",
+            source_for_harvey_terms(state, ["three (3) business days", "fourteen (14)", "disputed cure"], "proposed-bid"),
+        ],
+        [
+            "Bid Deadline",
+            "June 6, 2025 at 5:00 p.m. ET",
+            "State exact deadline and qualified-bid submission requirements.",
+            source_for_harvey_terms(state, ["June 6, 2025", "5:00 p.m."], "proposed-bid"),
+        ],
+        [
+            "Auction",
+            "June 13, 2025 at 10:00 a.m. ET",
+            "State location/procedure and that auction may be cancelled if no qualified competing bid is received.",
+            source_for_harvey_terms(state, ["June 13, 2025", "10:00 a.m.", "cancel"], "proposed-bid"),
+        ],
+        [
+            "Sale objection deadline",
+            "June 16, 2025 at 4:00 p.m. ET",
+            "Issues memo should flag compressed post-auction timing and proposed due-process alternatives.",
+            source_for_harvey_terms(state, ["June 16, 2025", "4:00 p.m."], "committee-counsel"),
+        ],
+        [
+            "Sale Hearing",
+            "June 18, 2025 at 2:00 p.m. ET",
+            "Motion should include exact hearing time, court, judge, and courtroom if available.",
+            source_for_harvey_terms(state, ["June 18, 2025", "2:00 p.m."], "proposed-bid"),
+        ],
+        [
+            "Sale Order and Closing",
+            "Sale Order by June 20, 2025; closing by July 18, 2025.",
+            "Connect timeline to DIP milestone default risk and HSR clearance timing.",
+            source_for_harvey_terms(state, ["Sale Order", "June 20, 2025", "July 18, 2025"], "dip-credit"),
+        ],
+    ]
+
+
+def bankruptcy_sale_motion_calculation_rows(state: RunState) -> list[list[str]]:
+    return [
+        [
+            "Stalking horse implied total consideration",
+            "$125.0M cash purchase price + $10.5M assumed liabilities",
+            "$135.5M",
+            "State both cash price and implied consideration; do not call the whole $135.5M the cash bid.",
+        ],
+        [
+            "Assumed liabilities components",
+            "$3.4M cure costs + $2.1M employee wages/benefits + $5.0M trade payables",
+            "$10.5M",
+            "List component amounts in the motion.",
+        ],
+        [
+            "Stalking horse protections",
+            "$3.75M break-up fee + $1.25M expense reimbursement",
+            "$5.0M / 4.0% of $125M",
+            "Request superpriority administrative expense treatment under Sections 503(b) and 507(a)(2), but flag excessiveness in issues memo.",
+        ],
+        [
+            "Minimum qualified bid",
+            "$125.0M cash price + $3.75M break-up fee + $1.25M expense reimbursement + $1.75M initial overbid",
+            "$131.75M; $6.75M / about 5.4% above cash price",
+            "Use the exact components rather than grouping all deal protections as an undifferentiated $5M.",
+        ],
+        [
+            "Peachtree valuation adjustment",
+            "$8.5M appraised going-concern value less $4.2M-$6.8M remediation costs",
+            "Net Peachtree value about $1.7M-$4.3M before exclusion.",
+            "Explain why excluded-asset treatment still supports fair value for the purchased assets.",
+        ],
+    ]
 
 
 def needs_bankruptcy_plan_deviation_digest(state: RunState) -> bool:

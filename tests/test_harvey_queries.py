@@ -1581,6 +1581,120 @@ class HarveyQueryTests(unittest.TestCase):
         self.assertIn("Section 365", digest)
         self.assertIn("May 28 agenda", digest)
 
+    def test_bankruptcy_bid_procedures_motion_contract_and_digest_preserve_motion_shape(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="bankruptcy-restructuring/draft-bid-procedures-motion",
+            question=(
+                "Draft a bid procedures motion for a Chapter 11 asset sale based on the attached source documents, "
+                "and prepare a separate issues memo flagging risks and recommended fixes."
+            ),
+            answer_schema={"deliverables": ["bid-procedures-motion.docx", "issues-memorandum.docx"]},
+            metadata={"practice_area": "bankruptcy-restructuring"},
+        )
+        state = RunState(
+            task=task,
+            config=load_config(),
+            documents=[
+                {"doc_id": "doc_1", "filename": "asset-purchase-agreement.docx"},
+                {"doc_id": "doc_2", "filename": "cfo-declaration.docx"},
+                {"doc_id": "doc_3", "filename": "committee-counsel-letter.eml"},
+                {"doc_id": "doc_4", "filename": "dip-credit-agreement-summary.docx"},
+                {"doc_id": "doc_5", "filename": "graystone-marketing-summary.docx"},
+                {"doc_id": "doc_6", "filename": "proposed-bid-procedures-exhibit.docx"},
+                {"doc_id": "doc_7", "filename": "thornhill-appraisal-summary.docx"},
+            ],
+            chunks=[
+                {
+                    "doc_id": "doc_5",
+                    "chunk_id": "c1",
+                    "index": 0,
+                    "text": (
+                        "Graystone was engaged January 6, 2025. 72 potential buyers were contacted; "
+                        "18 executed NDAs; 11 conducted meaningful diligence; 4 submitted IOIs; "
+                        "2 submitted final bids. Trident Capital Finance LLC holds a $98.5 million first-lien claim."
+                    ),
+                },
+                {
+                    "doc_id": "doc_6",
+                    "chunk_id": "c2",
+                    "index": 1,
+                    "text": (
+                        "The bid procedures provide for a sale free and clear under Section 363(f), "
+                        "adequate assurance under Sections 365(b)(1) and 365(f)(2), a June 18, 2025 "
+                        "Sale Hearing at 2:00 p.m. ET, successor liability findings, a Marked APA, "
+                        "and Cure Notices within three (3) business days with fourteen (14) calendar days to object."
+                    ),
+                },
+                {
+                    "doc_id": "doc_3",
+                    "chunk_id": "c3",
+                    "index": 2,
+                    "text": (
+                        "The Committee objects to $3,750,000 plus $1,250,000 in protections, or 4.0%, "
+                        "and flags HSR Second Request timing, the $131,750,000 minimum qualified bid, "
+                        "and the June 16, 2025 sale objection deadline."
+                    ),
+                },
+                {
+                    "doc_id": "doc_7",
+                    "chunk_id": "c4",
+                    "index": 3,
+                    "text": (
+                        "The Peachtree Road Facility is appraised at $8.5 million, with remediation costs "
+                        "of $4.2 million to $6.8 million."
+                    ),
+                },
+            ],
+        )
+        contract = build_deliverable_contract(state)
+        roles = {item["filename"]: item for item in contract["deliverables"]}
+        self.assertEqual(roles["bid-procedures-motion.docx"]["artifact_role"], "court_motion")
+        self.assertEqual(contract["package_plan"]["package_kind"], "court_motion_plus_issues_package")
+        self.assertIn("Jurisdiction and venue", roles["bid-procedures-motion.docx"]["required_sections"])
+        self.assertIn(
+            "Legal basis under Sections 363, 365, 503(b), and 507(a)(2)",
+            roles["bid-procedures-motion.docx"]["required_sections"],
+        )
+
+        digest = build_task_family_digest(state)
+        self.assertIn("Deterministic bankruptcy sale / bid-procedures motion digest", digest)
+        self.assertIn("Required Bid-Procedures Motion Sections", digest)
+        self.assertIn("O'Brien", digest)
+        self.assertIn("$131.75M", digest)
+        self.assertIn("June 18, 2025 at 2:00 p.m. ET", digest)
+        self.assertIn("$98.5M", digest)
+        self.assertIn("Marked APA", digest)
+
+        state.task.answer_schema["deliverable_contract"] = contract
+        prompt = build_synthesis_prompt(state)
+        self.assertIn("the motion deliverable must be an actual court motion", prompt)
+        self.assertIn("Sections 363/365/503(b)/507(a)(2)", prompt)
+
+    def test_bankruptcy_sale_motion_digest_does_not_trigger_on_bid_comparison(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="bankruptcy-restructuring/compare-competing-bid-terms-against-stalking-horse-asset-purchase-agreement",
+            question="Compare competing bid terms against the stalking horse asset purchase agreement.",
+            answer_schema={"deliverables": ["bid-comparison-memo.docx"]},
+            metadata={"practice_area": "bankruptcy-restructuring"},
+        )
+        state = RunState(
+            task=task,
+            config=load_config(),
+            documents=[{"doc_id": "doc_1", "filename": "stalking-horse-asset-purchase-agreement.docx"}],
+            chunks=[
+                {
+                    "doc_id": "doc_1",
+                    "chunk_id": "c1",
+                    "index": 0,
+                    "text": "The Chapter 11 stalking horse asset purchase agreement includes bid protections.",
+                }
+            ],
+        )
+        digest = build_task_family_digest(state)
+        self.assertNotIn("Deterministic bankruptcy sale / bid-procedures motion digest", digest)
+
     def test_requirement_reconciliation_digest_preserves_checklist_rows(self) -> None:
         task = BenchmarkTask(
             benchmark="harvey_lab_sample",
