@@ -3418,6 +3418,7 @@ DOCUMENT_COMPARISON_ISSUE_FAMILIES: list[tuple[str, list[str]]] = [
 MAX_DOCUMENT_COMPARISON_ISSUE_ROWS = 140
 MAX_DOCUMENT_COMPARISON_NUMERIC_ROWS = 70
 MAX_REQUIREMENT_RECONCILIATION_ROWS = 120
+MAX_STRUCTURED_FINANCE_ASSET_ISSUE_ROWS = 90
 
 
 BANKRUPTCY_DISTRIBUTION_TOPIC_FAMILIES: list[tuple[str, list[str]]] = [
@@ -10786,8 +10787,9 @@ def build_structured_finance_digest(state: RunState) -> str:
         add_structured_finance_clo_indentures_rows(lines)
     if "whitmore auto receivables trust 2025-1" in context or "ridgefield national bank" in context:
         add_structured_finance_psa_backup_servicer_rows(lines)
-    if "thornfield clo" in context or "collateral tape" in context or "loan #14" in context:
+    if has_legacy_structured_finance_collateral_fixture(context):
         add_structured_finance_collateral_tape_rows(lines)
+    add_structured_finance_asset_issue_register(lines, state)
 
     add_structured_finance_generic_checklist(lines)
     snippets = collect_relevant_snippets(
@@ -10819,6 +10821,204 @@ def build_structured_finance_digest(state: RunState) -> str:
     if snippets:
         lines.extend(["", "## Structured Finance Source Snippets", *snippets])
     return "\n".join(lines)
+
+
+STRUCTURED_FINANCE_ASSET_ID_RE = re.compile(
+    r"\b(?:WC-\d{4}-\d{5}|Loan\s+#?[A-Za-z0-9][A-Za-z0-9-]*|Asset\s+#?[A-Za-z0-9][A-Za-z0-9-]*)\b",
+    re.IGNORECASE,
+)
+
+
+def has_legacy_structured_finance_collateral_fixture(context: str) -> bool:
+    return any(
+        marker in context
+        for marker in [
+            "thornfield clo",
+            "orion behavioral health partners",
+            "pinnacle dental management group",
+            "crossbridge logistics",
+            "summit ridge hospitality",
+            "industry #18 high tech",
+        ]
+    )
+
+
+def add_structured_finance_asset_issue_register(lines: list[str], state: RunState) -> None:
+    rows = collect_structured_finance_asset_issue_rows(state)
+    if not rows:
+        return
+    append_digest_table(
+        lines,
+        "Dynamic Asset / Loan Issue Register",
+        ["Asset / Loan ID", "Issue Type", "Source Fact", "Required Treatment", "Source"],
+        rows,
+    )
+    lines.extend(
+        [
+            "",
+            "## Asset-Level Due Diligence Operator",
+            "- For due-diligence, collateral-tape, eligibility, closing, and securitization memoranda, preserve each listed asset or loan ID as a separate issue row.",
+            "- Do not replace task-specific asset IDs with generic or legacy example IDs.",
+            "- For each asset issue, state the identifier, source value, governing threshold or requirement, legal/credit effect, recommended disposition, and source document.",
+            "- Separate hard eligibility failures from concentration or disclosure issues; do not merge multiple defects on the same asset unless the final answer still lists each defect.",
+        ]
+    )
+
+
+def collect_structured_finance_asset_issue_rows(state: RunState) -> list[list[str]]:
+    doc_lookup = {str(doc.get("doc_id")): doc for doc in state.documents}
+    candidates: list[tuple[int, int, list[str]]] = []
+    seen: set[tuple[str, str]] = set()
+    sequence = 0
+    for chunk in sorted(state.chunks, key=lambda item: (str(item.get("doc_id", "")), int(item.get("index", 0) or 0))):
+        text = str(chunk.get("text", ""))
+        if not text.strip():
+            continue
+        doc_id = str(chunk.get("doc_id", ""))
+        chunk_id = str(chunk.get("chunk_id", ""))
+        filename = str(doc_lookup.get(doc_id, {}).get("filename", ""))
+        source = f"{doc_id} / {chunk_id} / {filename}"
+        for match in STRUCTURED_FINANCE_ASSET_ID_RE.finditer(text):
+            asset_id = normalize_structured_finance_asset_id(match.group(0))
+            snippet = asset_issue_window(text, match.start(), match.end())
+            if not is_structured_finance_asset_issue_snippet(snippet):
+                continue
+            issue_type = classify_structured_finance_asset_issue(snippet)
+            key = (asset_id.lower(), normalize_issue_key(snippet)[:220])
+            if key in seen:
+                continue
+            seen.add(key)
+            sequence += 1
+            candidates.append(
+                (
+                    score_structured_finance_asset_issue(snippet),
+                    sequence,
+                    [
+                        asset_id,
+                        issue_type,
+                        compact_digest_text(snippet, limit=720),
+                        structured_finance_asset_required_treatment(snippet),
+                        source,
+                    ],
+                )
+            )
+    return [
+        row
+        for _score, _sequence, row in sorted(
+            candidates,
+            key=lambda item: (-item[0], item[1]),
+        )[:MAX_STRUCTURED_FINANCE_ASSET_ISSUE_ROWS]
+    ]
+
+
+def normalize_structured_finance_asset_id(raw: str) -> str:
+    cleaned = " ".join(raw.strip().split())
+    cleaned = re.sub(r"^(loan|asset)\s*#?\s*", lambda match: match.group(1).title() + " #", cleaned, flags=re.IGNORECASE)
+    return cleaned
+
+
+def asset_issue_window(text: str, start: int, end: int, window: int = 520) -> str:
+    left = max(0, start - window)
+    right = min(len(text), end + window)
+    return " ".join(text[left:right].split())
+
+
+def is_structured_finance_asset_issue_snippet(snippet: str) -> bool:
+    lower = snippet.lower()
+    if any(
+        term in lower
+        for term in [
+            "breach",
+            "defect",
+            "exception",
+            "ineligible",
+            "missing",
+            "expired",
+            "stale",
+            "suspended",
+            "discrepancy",
+            "mismatch",
+            "shortfall",
+            "delinquent",
+            "default",
+            "mechanic",
+            "lien",
+            "flood",
+            "insurance",
+            "guarantee",
+            "guaranty",
+            "license",
+            "appraisal",
+            "ltv",
+            "maturity",
+            "extension",
+            "servicing system",
+            "collateral tape",
+        ]
+    ):
+        return True
+    return bool(re.search(r"\b(?:19|20)\d{2}\b", snippet) and re.search(r"\$?\d[\d,]*(?:\.\d+)?%?", snippet))
+
+
+def classify_structured_finance_asset_issue(snippet: str) -> str:
+    lower = snippet.lower()
+    issue_types: list[str] = []
+    if "ltv" in lower or "appraisal" in lower or "reappraisal" in lower:
+        issue_types.append("valuation / LTV")
+    if "suspended" in lower or "capacity" in lower or "enforceability" in lower:
+        issue_types.append("entity capacity / enforceability")
+    if "flood" in lower or "insurance" in lower or "mortgagee" in lower or "loss payee" in lower:
+        issue_types.append("insurance / mortgagee")
+    if "mechanic" in lower or "lien" in lower or "priority" in lower:
+        issue_types.append("lien priority")
+    if "license" in lower or "broker" in lower or "unlicensed" in lower:
+        issue_types.append("licensing / origination")
+    if "guarantee" in lower or "guaranty" in lower or "signature" in lower:
+        issue_types.append("guarantee / signature")
+    if "delinquent" in lower or "default" in lower or "servicing system" in lower:
+        issue_types.append("delinquency / servicing data")
+    if "maturity" in lower or "extension" in lower:
+        issue_types.append("maturity / extension")
+    if "eligib" in lower or "concentration" in lower or "warf" in lower or "was" in lower:
+        issue_types.append("eligibility / concentration")
+    if not issue_types:
+        issue_types.append("asset-level issue")
+    return ", ".join(dict.fromkeys(issue_types))
+
+
+def score_structured_finance_asset_issue(snippet: str) -> int:
+    lower = snippet.lower()
+    score = 0
+    for term in ["breach", "defect", "exception", "ineligible", "missing", "discrepancy", "shortfall", "default", "delinquent"]:
+        if term in lower:
+            score += 8
+    for term in ["ltv", "appraisal", "insurance", "lien", "license", "guarantee", "guaranty", "maturity", "extension"]:
+        if term in lower:
+            score += 5
+    if re.search(r"\$?\d[\d,]*(?:\.\d+)?%?", snippet):
+        score += 4
+    if re.search(r"\b(?:19|20)\d{2}\b", snippet):
+        score += 3
+    return score
+
+
+def structured_finance_asset_required_treatment(snippet: str) -> str:
+    lower = snippet.lower()
+    if "ltv" in lower or "appraisal" in lower:
+        return "State appraised value, LTV test, recalculated LTV, breach, and remove/repurchase/re-underwrite recommendation."
+    if "insurance" in lower or "flood" in lower:
+        return "State insurance defect, legal/regulatory consequence, and required endorsement, policy, or exclusion treatment."
+    if "lien" in lower:
+        return "State lien defect, priority law or perfection risk, and required release/subordination/removal."
+    if "license" in lower or "broker" in lower:
+        return "State licensing defect, origination/enforceability risk, and cure or exclusion recommendation."
+    if "guarantee" in lower or "guaranty" in lower:
+        return "State guarantee/signature requirement, missing party or signature defect, and closing cure or exclusion."
+    if "delinquent" in lower or "default" in lower:
+        return "State tape-vs-servicer mismatch, affected loan count/UPB, disclosure/rating impact, and reconciliation/removal treatment."
+    if "maturity" in lower or "extension" in lower:
+        return "State maturity or extension mismatch, eligibility/disclosure impact, and corrected tape treatment."
+    return "State the exact asset ID, defect, governing requirement, impact, severity, and remediation."
 
 
 def add_structured_finance_closing_checklist_rows(lines: list[str]) -> None:

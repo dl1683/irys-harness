@@ -764,6 +764,58 @@ class HarveyQueryTests(unittest.TestCase):
         self.assertIn("Industry #18", digest)
         self.assertIn("$31.875M", digest)
 
+    def test_structured_finance_digest_uses_dynamic_asset_rows_without_legacy_contamination(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="structured-finance-securitization/draft-due-diligence-summary-memorandum",
+            question="Draft a due diligence summary memorandum from the collateral tape and loan diligence reports.",
+            answer_schema={"deliverables": ["dd-summary-memorandum.docx"]},
+            metadata={"practice_area": "structured-finance-securitization"},
+        )
+        state = RunState(
+            task=task,
+            config=load_config(),
+            documents=[
+                {"doc_id": "doc_1", "filename": "collateral-tape-summary.xlsx"},
+                {"doc_id": "doc_2", "filename": "loan-diligence-report.docx"},
+            ],
+            chunks=[
+                {
+                    "doc_id": "doc_1",
+                    "chunk_id": "c1",
+                    "index": 0,
+                    "text": (
+                        "Collateral tape issue: WC-2024-08831 has an independent reappraisal "
+                        "value of $1,490,000 and recalculated as-is LTV of 83.6%, exceeding "
+                        "the 80.0% eligibility threshold. WC-2025-00142 has a flood insurance "
+                        "gap in a special flood hazard area."
+                    ),
+                },
+                {
+                    "doc_id": "doc_2",
+                    "chunk_id": "c2",
+                    "index": 1,
+                    "text": (
+                        "Loan WC-2024-09217 borrower Redstone Ventures LLC is suspended in "
+                        "California, creating entity capacity and enforceability concerns. "
+                        "Loan WC-2024-09650 lacks the required James Petrovich personal guarantee."
+                    ),
+                },
+            ],
+        )
+        digest = build_task_family_digest(state)
+        self.assertIn("Dynamic Asset / Loan Issue Register", digest)
+        self.assertIn("WC-2024-08831", digest)
+        self.assertIn("83.6%", digest)
+        self.assertIn("WC-2025-00142", digest)
+        self.assertIn("flood insurance", digest)
+        self.assertIn("WC-2024-09217", digest)
+        self.assertIn("Redstone Ventures LLC", digest)
+        self.assertIn("WC-2024-09650", digest)
+        self.assertIn("James Petrovich", digest)
+        self.assertNotIn("Loan #14 SOFR floor breach", digest)
+        self.assertNotIn("Industry #18 High Tech concentration breach", digest)
+
     def test_white_collar_digest_preserves_dpa_payment_and_monitor_rows(self) -> None:
         task = BenchmarkTask(
             benchmark="harvey_lab_sample",
