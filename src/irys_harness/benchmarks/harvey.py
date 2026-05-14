@@ -425,6 +425,51 @@ class HarveyLabAdapter(BenchmarkAdapter):
                         "summary": atom_map,
                     }
                 )
+            packet_creator_reasons = pre_synthesis_packet_creator_activation_reasons(
+                state,
+                deliverable_contract=deliverable_contract,
+                atom_map=atom_map,
+            )
+            if packet_creator_reasons:
+                packet_creator_prompt = build_pre_synthesis_packet_creator_prompt(state)
+                packet_creator_result = router.generate(
+                    module="critic",
+                    prompt=packet_creator_prompt,
+                    temperature=0.0,
+                    max_output_tokens=12000,
+                )
+                state.metrics.add_call(packet_creator_result.usage)
+                pre_synthesis_packet = parse_pre_synthesis_packet_creator_output(packet_creator_result.text)
+                state.final_packet["pre_synthesis_packet"] = pre_synthesis_packet
+                state.final_packet["pre_synthesis_packet_diagnostics"] = summarize_pre_synthesis_packet(
+                    packet=pre_synthesis_packet,
+                    raw_output=packet_creator_result.text,
+                    worker_packet=combined_worker_summary,
+                    artifact_appendix=appendix,
+                    activation_reasons=packet_creator_reasons,
+                )
+                state.extraction_records.append(
+                    {
+                        "mode": "mid_tier_pre_synthesis_packet_creator",
+                        "summary": {
+                            "packet": pre_synthesis_packet,
+                            "diagnostics": state.final_packet["pre_synthesis_packet_diagnostics"],
+                        },
+                    }
+                )
+            else:
+                state.final_packet["pre_synthesis_packet_diagnostics"] = summarize_pre_synthesis_packet_skip(
+                    state,
+                    deliverable_contract=deliverable_contract,
+                    worker_packet=combined_worker_summary,
+                    artifact_appendix=appendix,
+                )
+                state.extraction_records.append(
+                    {
+                        "mode": "pre_synthesis_packet_creator_skipped",
+                        "summary": state.final_packet["pre_synthesis_packet_diagnostics"],
+                    }
+                )
 
             prompt = build_synthesis_prompt(state)
             result = router.generate(
@@ -776,6 +821,190 @@ def build_deliverable_atom_map(
         "max_atoms_per_deliverable": max_atoms,
         "deliverables": mapped,
     }
+
+
+def should_run_pre_synthesis_packet_creator(
+    state: RunState,
+    *,
+    deliverable_contract: dict[str, Any],
+    atom_map: dict[str, Any],
+) -> bool:
+    return bool(
+        pre_synthesis_packet_creator_activation_reasons(
+            state,
+            deliverable_contract=deliverable_contract,
+            atom_map=atom_map,
+        )
+    )
+
+
+def pre_synthesis_packet_creator_activation_reasons(
+    state: RunState,
+    *,
+    deliverable_contract: dict[str, Any],
+    atom_map: dict[str, Any],
+) -> list[str]:
+    if pre_synthesis_packet_creator_skip_reasons(state, deliverable_contract=deliverable_contract):
+        return []
+    deliverables = list(state.task.answer_schema.get("deliverables", []) or [])
+    package_plan = deliverable_contract.get("package_plan", {}) or {}
+    reasons: list[str] = []
+    if len(deliverables) > 1:
+        reasons.append("multiple_deliverables")
+    if package_plan.get("requires_file_by_file_allocation"):
+        reasons.append("requires_file_by_file_allocation")
+    if len(deliverables) > 1:
+        for item in (atom_map.get("deliverables") or {}).values():
+            if isinstance(item, dict) and item.get("coverage_risk") == "high":
+                reasons.append("high_atom_coverage_risk")
+                break
+    return reasons
+
+
+def pre_synthesis_packet_creator_skip_reasons(
+    state: RunState,
+    *,
+    deliverable_contract: dict[str, Any],
+) -> list[str]:
+    reasons: list[str] = []
+    task_family = str(deliverable_contract.get("task_family") or "")
+    if task_family in {"structured_finance_securitization_review", "ipo_charter_comparison"}:
+        reasons.append("mature_specialized_synthesis_path")
+    deliverables = list(state.task.answer_schema.get("deliverables", []) or [])
+    package_plan = deliverable_contract.get("package_plan", {}) or {}
+    if len(deliverables) <= 1 and not package_plan.get("requires_file_by_file_allocation"):
+        reasons.append("single_deliverable_legacy_path")
+    return reasons
+
+
+def build_pre_synthesis_packet_creator_prompt(state: RunState) -> str:
+    packet = state.final_packet or {}
+    worker_packet = str(packet.get("cheap_worker_summary") or "")
+    artifact_appendix = str(packet.get("artifact_appendix") or "")
+    atom_map = packet.get("deliverable_atom_map") or {}
+    deliverable_contract = packet.get("deliverable_contract") or state.task.answer_schema.get("deliverable_contract") or {}
+    documents = [
+        {
+            "doc_id": doc.get("doc_id"),
+            "filename": doc.get("filename"),
+            "doc_type_guess": doc.get("doc_type_guess"),
+        }
+        for doc in state.documents
+    ]
+    controller_input = {
+        "task_id": state.task.task_id,
+        "original_task_instructions": state.task.question,
+        "requested_deliverables": state.task.answer_schema.get("deliverables", []),
+        "criteria_count": state.task.answer_schema.get("criteria_count", 0),
+        "documents": documents,
+        "deliverable_contract": deliverable_contract,
+        "package_plan": packet.get("package_plan") or deliverable_contract.get("package_plan", {}),
+        "deliverable_atom_map": atom_map,
+    }
+    return f"""Create the clean packet for final synthesis.
+
+The final synthesis model is strong. Do not teach it legal drafting. Give it the original task focus, exact deliverables, useful evidence, and any task-specific output constraints. Remove or demote distracting material. Do not draft the final answer.
+
+Important: do not arbitrarily compress away row-level evidence. The goal is to remove wrong-scope material, not to make the packet tiny. Preserve enough facts, issue rows, calculations, document references, and file-specific atoms for the final model to produce the requested work product.
+
+Return JSON only with these keys:
+- task_focus: short restatement of the actual assignment.
+- deliverables: file-by-file list with the intended artifact and any task-specific must-deliver content.
+- selected_evidence: source-grounded facts, issues, calculations, rows, or document references useful for the task.
+- background_or_excluded: material from the worker packet that should not control the answer.
+- synthesis_instruction: concise instruction the final model should follow, centered on the original task.
+- open_gaps: important missing or uncertain items.
+
+Controller input:
+{json.dumps(controller_input, indent=2, sort_keys=True)}
+
+Worker packet to clean:
+{compact_digest_text(worker_packet, limit=180000)}
+
+Artifact appendix:
+{compact_digest_text(artifact_appendix, limit=60000)}
+"""
+
+
+def parse_pre_synthesis_packet_creator_output(text: str) -> dict[str, Any]:
+    raw = str(text or "").strip()
+    if not raw:
+        return {"format": "empty", "raw_text": ""}
+    cleaned = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    candidates = [cleaned]
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start >= 0 and end > start:
+        candidates.append(cleaned[start : end + 1])
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            parsed.setdefault("format", "json")
+            return parsed
+    return {
+        "format": "raw_text",
+        "raw_text": compact_digest_text(raw, limit=12000),
+    }
+
+
+def summarize_pre_synthesis_packet(
+    *,
+    packet: dict[str, Any],
+    raw_output: str,
+    worker_packet: str,
+    artifact_appendix: str,
+    activation_reasons: list[str],
+) -> dict[str, Any]:
+    return {
+        "activated": True,
+        "activation_reasons": activation_reasons,
+        "worker_packet_chars": len(str(worker_packet or "")),
+        "artifact_appendix_chars": len(str(artifact_appendix or "")),
+        "raw_output_chars": len(str(raw_output or "")),
+        "parsed_packet_chars": len(json.dumps(packet, sort_keys=True)),
+        "parse_format": packet.get("format"),
+        "selected_evidence_count": count_packet_items(packet.get("selected_evidence")),
+        "deliverable_count": count_packet_items(packet.get("deliverables")),
+        "background_or_excluded_count": count_packet_items(packet.get("background_or_excluded")),
+        "open_gap_count": count_packet_items(packet.get("open_gaps")),
+    }
+
+
+def summarize_pre_synthesis_packet_skip(
+    state: RunState,
+    *,
+    deliverable_contract: dict[str, Any],
+    worker_packet: str,
+    artifact_appendix: str,
+) -> dict[str, Any]:
+    return {
+        "activated": False,
+        "activation_reasons": [],
+        "skip_reasons": pre_synthesis_packet_creator_skip_reasons(
+            state,
+            deliverable_contract=deliverable_contract,
+        ),
+        "task_family": deliverable_contract.get("task_family"),
+        "deliverable_count": len(list(state.task.answer_schema.get("deliverables", []) or [])),
+        "worker_packet_chars": len(str(worker_packet or "")),
+        "artifact_appendix_chars": len(str(artifact_appendix or "")),
+    }
+
+
+def count_packet_items(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, dict):
+        return len(value)
+    if isinstance(value, list):
+        return len(value)
+    if isinstance(value, str):
+        return 1 if value.strip() else 0
+    return 1
 
 
 def select_deliverable_atoms(
@@ -2386,6 +2615,49 @@ def dedupe_strings(items: list[str]) -> list[str]:
     return result
 
 
+def build_slim_synthesis_prompt(
+    state: RunState,
+    *,
+    clean_packet: dict[str, Any],
+    deliverables: str,
+) -> str:
+    packet = state.final_packet or {}
+    clean_packet_text = json.dumps(clean_packet, indent=2, sort_keys=True)
+    support_sections: list[str] = []
+    appendix = str(packet.get("artifact_appendix") or "")
+    if appendix:
+        support_sections.extend(
+            [
+                "Structured supporting evidence:",
+                compact_digest_text(appendix, limit=80000),
+            ]
+        )
+    atom_map = packet.get("deliverable_atom_map")
+    if atom_map:
+        support_sections.extend(
+            [
+                "Deliverable atom map:",
+                json.dumps(atom_map, indent=2, sort_keys=True),
+            ]
+        )
+    supporting_evidence = "\n\n".join(support_sections)
+    return f"""Produce the requested benchmark legal work product using only the original task and clean synthesis packet below.
+
+Original task:
+{state.task.question}
+
+Requested deliverables:
+{deliverables}
+
+Clean synthesis packet:
+{clean_packet_text}
+
+{supporting_evidence}
+
+Write the requested deliverable content. Keep the original task controlling. Use the clean packet and supporting evidence as source material. If multiple deliverables are requested, use each exact filename as a heading. Output readable work-product text only; do not output JSON, code fences, base64, XML, or file internals.
+"""
+
+
 def build_synthesis_prompt(state: RunState) -> str:
     packet = state.final_packet or {}
     cheap_summary = packet.get("cheap_worker_summary")
@@ -2410,6 +2682,13 @@ def build_synthesis_prompt(state: RunState) -> str:
     package_plan_text = json.dumps(package_plan, indent=2, sort_keys=True)
     atom_map = packet.get("deliverable_atom_map") or {}
     atom_map_text = json.dumps(atom_map, indent=2, sort_keys=True)
+    pre_synthesis_packet = packet.get("pre_synthesis_packet")
+    if isinstance(pre_synthesis_packet, dict) and pre_synthesis_packet:
+        return build_slim_synthesis_prompt(
+            state,
+            clean_packet=pre_synthesis_packet,
+            deliverables=deliverables,
+        )
     prenuptial_guidance = ""
     if needs_prenuptial_asset_rights_digest(state):
         prenuptial_guidance = """

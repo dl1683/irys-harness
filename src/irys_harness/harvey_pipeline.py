@@ -21,11 +21,28 @@ class HarveyPipelineResult:
     rubric_passed: int | None
     rubric_total: int | None
     rubric_pass_rate: float | None
+    estimated_cost: float
+    total_tokens: int
     token_share_by_tier: dict[str, float]
     error: str | None = None
     status: str = "completed"
 
     def to_dict(self) -> dict[str, Any]:
+        cost_per_rubric_criterion = (
+            self.estimated_cost / self.rubric_total
+            if self.rubric_total
+            else None
+        )
+        cost_per_passed_criterion = (
+            self.estimated_cost / self.rubric_passed
+            if self.rubric_passed
+            else None
+        )
+        tokens_per_rubric_criterion = (
+            self.total_tokens / self.rubric_total
+            if self.rubric_total
+            else None
+        )
         return {
             "task_id": self.task_id,
             "trace_path": self.trace_path,
@@ -34,6 +51,11 @@ class HarveyPipelineResult:
             "rubric_passed": self.rubric_passed,
             "rubric_total": self.rubric_total,
             "rubric_pass_rate": self.rubric_pass_rate,
+            "estimated_cost": self.estimated_cost,
+            "total_tokens": self.total_tokens,
+            "cost_per_rubric_criterion": cost_per_rubric_criterion,
+            "cost_per_passed_criterion": cost_per_passed_criterion,
+            "tokens_per_rubric_criterion": tokens_per_rubric_criterion,
             "token_share_by_tier": self.token_share_by_tier,
             "error": self.error,
             "status": self.status,
@@ -149,6 +171,8 @@ def maybe_resume_harvey_task(
                 rubric_passed=None,
                 rubric_total=None,
                 rubric_pass_rate=None,
+                estimated_cost=float(summary.get("estimated_cost") or 0.0),
+                total_tokens=int(summary.get("total_tokens") or 0),
                 token_share_by_tier=summary.get("token_share_by_tier", {}),
                 error=f"{type(exc).__name__}: {exc}",
                 status="resume_score_error",
@@ -184,6 +208,8 @@ def result_from_summary(
         rubric_passed=summary.get("rubric_passed"),
         rubric_total=summary.get("rubric_total"),
         rubric_pass_rate=summary.get("rubric_pass_rate"),
+        estimated_cost=float(summary.get("estimated_cost") or 0.0),
+        total_tokens=int(summary.get("total_tokens") or 0),
         token_share_by_tier=summary.get("token_share_by_tier", {}),
         status=status,
     )
@@ -226,6 +252,8 @@ def run_harvey_task_pipeline(
                 rubric_passed=None,
                 rubric_total=None,
                 rubric_pass_rate=None,
+                estimated_cost=float(summary.get("estimated_cost") or 0.0),
+                total_tokens=int(summary.get("total_tokens") or 0),
                 token_share_by_tier=summary.get("token_share_by_tier", {}),
             )
         scores = evaluate_prepared_harvey_run(
@@ -246,6 +274,8 @@ def run_harvey_task_pipeline(
             rubric_passed=summary.get("rubric_passed"),
             rubric_total=summary.get("rubric_total"),
             rubric_pass_rate=summary.get("rubric_pass_rate"),
+            estimated_cost=float(summary.get("estimated_cost") or 0.0),
+            total_tokens=int(summary.get("total_tokens") or 0),
             token_share_by_tier=summary.get("token_share_by_tier", {}),
         )
     except Exception as exc:  # noqa: BLE001 - batch runner must report per-task failures.
@@ -257,6 +287,8 @@ def run_harvey_task_pipeline(
             rubric_passed=None,
             rubric_total=None,
             rubric_pass_rate=None,
+            estimated_cost=0.0,
+            total_tokens=0,
             token_share_by_tier={},
             error=f"{type(exc).__name__}: {exc}",
             status="task_error",

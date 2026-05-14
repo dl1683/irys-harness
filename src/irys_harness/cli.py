@@ -287,6 +287,28 @@ def refresh_harvey_diagnostics(*, trace_dir: str | Path, harvey_root: str | Path
     }
 
 
+def median_number(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    sorted_values = sorted(float(value or 0.0) for value in values)
+    midpoint = len(sorted_values) // 2
+    if len(sorted_values) % 2:
+        return sorted_values[midpoint]
+    return (sorted_values[midpoint - 1] + sorted_values[midpoint]) / 2
+
+
+def max_cost_summary(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    item = max(rows, key=lambda row: float(row.get("estimated_cost") or 0.0))
+    return {
+        "benchmark": item.get("benchmark"),
+        "task_id": item.get("task_id"),
+        "estimated_cost": float(item.get("estimated_cost") or 0.0),
+        "total_tokens": int(item.get("total_tokens") or 0),
+    }
+
+
 def cmd_summarize(args: argparse.Namespace) -> int:
     traces = load_trace_dir(args.run)
     summaries = [trace_summary(trace) for trace in traces]
@@ -294,6 +316,7 @@ def cmd_summarize(args: argparse.Namespace) -> int:
     passed = sum(1 for item in summaries if item.get("passed") is True)
     total_tokens = sum(int(item.get("total_tokens") or 0) for item in summaries)
     total_cost = sum(float(item.get("estimated_cost") or 0.0) for item in summaries)
+    task_costs = [float(item.get("estimated_cost") or 0.0) for item in summaries]
     tokens_by_tier = aggregate_tokens_by_tier(traces)
     print_json(
         {
@@ -302,6 +325,9 @@ def cmd_summarize(args: argparse.Namespace) -> int:
             "score_rate": passed / total if total else 0.0,
             "total_tokens": total_tokens,
             "estimated_cost": total_cost,
+            "average_cost_per_task": total_cost / total if total else 0.0,
+            "median_cost_per_task": median_number(task_costs),
+            "max_cost_task": max_cost_summary(summaries),
             "tokens_by_tier": tokens_by_tier,
             "token_share_by_tier": token_share(tokens_by_tier),
             "traces": summaries,
@@ -423,6 +449,15 @@ def compare_run_dirs(run_a: str | Path, run_b: str | Path) -> dict[str, Any]:
             "before_common_cost": before_common_cost,
             "after_common_cost": after_common_cost,
             "common_cost_delta": after_common_cost - before_common_cost,
+            "before_common_average_cost_per_task": (
+                before_common_cost / len(common) if common else 0.0
+            ),
+            "after_common_average_cost_per_task": (
+                after_common_cost / len(common) if common else 0.0
+            ),
+            "common_average_cost_per_task_delta": (
+                (after_common_cost - before_common_cost) / len(common) if common else 0.0
+            ),
             "token_delta": after_tokens - before_tokens,
             "before_common_tokens": before_common_tokens,
             "after_common_tokens": after_common_tokens,
@@ -721,6 +756,31 @@ def build_harvey_batch_report(
     average_token_share_by_tier = {
         tier: value / len(results) for tier, value in sorted(tokens_by_tier.items())
     } if results else {}
+    task_costs = [float(item.estimated_cost or 0.0) for item in results]
+    evaluated_task_costs = [float(item.estimated_cost or 0.0) for item in evaluated]
+    task_tokens = [int(item.total_tokens or 0) for item in results]
+    total_cost = sum(task_costs)
+    total_tokens = sum(task_tokens)
+    max_cost_item = max(results, key=lambda item: float(item.estimated_cost or 0.0), default=None)
+    max_token_item = max(results, key=lambda item: int(item.total_tokens or 0), default=None)
+    max_cost_task = (
+        {
+            "task_id": max_cost_item.task_id,
+            "estimated_cost": float(max_cost_item.estimated_cost or 0.0),
+            "total_tokens": int(max_cost_item.total_tokens or 0),
+        }
+        if max_cost_item
+        else None
+    )
+    max_token_task = (
+        {
+            "task_id": max_token_item.task_id,
+            "estimated_cost": float(max_token_item.estimated_cost or 0.0),
+            "total_tokens": int(max_token_item.total_tokens or 0),
+        }
+        if max_token_item
+        else None
+    )
 
     status_counts = Counter(item.status for item in results)
     failed_tasks = [
@@ -744,7 +804,12 @@ def build_harvey_batch_report(
             "errors": 0,
             "rubric_passed": 0,
             "rubric_total": 0,
+            "estimated_cost": 0.0,
+            "total_tokens": 0,
             "average_rubric_pass_rate": None,
+            "average_cost_per_task": 0.0,
+            "average_cost_per_evaluated_task": None,
+            "average_tokens_per_task": 0.0,
             "failure_tag_counts": {},
             "suspected_module_counts": {},
             "suspected_actor_counts": {},
@@ -758,6 +823,8 @@ def build_harvey_batch_report(
         area = item.task_id.split("/", 1)[0]
         row = by_practice_area[area]
         row["tasks"] += 1
+        row["estimated_cost"] += float(item.estimated_cost or 0.0)
+        row["total_tokens"] += int(item.total_tokens or 0)
         if item.passed is True:
             row["passed"] += 1
         if item.error is not None:
@@ -795,6 +862,11 @@ def build_harvey_batch_report(
         row["average_rubric_pass_rate"] = (
             row["rubric_passed"] / row["rubric_total"] if row["rubric_total"] else None
         )
+        row["average_cost_per_task"] = row["estimated_cost"] / row["tasks"] if row["tasks"] else 0.0
+        row["average_cost_per_evaluated_task"] = (
+            row["estimated_cost"] / row["evaluated"] if row["evaluated"] else None
+        )
+        row["average_tokens_per_task"] = row["total_tokens"] / row["tasks"] if row["tasks"] else 0.0
 
     return {
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -810,6 +882,17 @@ def build_harvey_batch_report(
         "incomplete": len(incomplete_tasks),
         "failed": len(failed_tasks),
         "average_rubric_pass_rate": average_rubric_pass_rate,
+        "estimated_cost": total_cost,
+        "average_cost_per_task": total_cost / len(results) if results else 0.0,
+        "average_cost_per_evaluated_task": (
+            sum(evaluated_task_costs) / len(evaluated_task_costs) if evaluated_task_costs else None
+        ),
+        "median_cost_per_task": median_number(task_costs),
+        "max_cost_task": max_cost_task,
+        "total_tokens": total_tokens,
+        "average_tokens_per_task": total_tokens / len(results) if results else 0.0,
+        "median_tokens_per_task": median_number([float(value) for value in task_tokens]),
+        "max_token_task": max_token_task,
         "average_token_share_by_tier": average_token_share_by_tier,
         "status_counts": dict(sorted(status_counts.items())),
         "failure_tag_counts": dict(sorted(failure_tag_counts.items())),
@@ -886,7 +969,23 @@ def get_adapter(name: str) -> FixtureAdapter | HarveyLabAdapter:
 def load_trace_dir(path: str | Path) -> list[dict[str, Any]]:
     root = Path(path)
     files = sorted(root.rglob("*.json")) if root.exists() else []
-    return [load_trace(file) for file in files]
+    traces: list[dict[str, Any]] = []
+    for file in files:
+        trace = load_trace(file)
+        if not is_trace_json(trace):
+            continue
+        traces.append(trace)
+    return traces
+
+
+def is_trace_json(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("benchmark"), str)
+        and bool(value.get("benchmark"))
+        and isinstance(value.get("task_id"), str)
+        and bool(value.get("task_id"))
+    )
 
 
 def trace_key(trace: dict[str, Any]) -> str:

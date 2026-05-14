@@ -11,8 +11,10 @@ from irys_harness.benchmarks.harvey import (
     build_deliverable_contract,
     build_deliverable_atom_map,
     build_document_review_privilege_digest,
+    build_pre_synthesis_packet_creator_prompt,
     build_synthesis_prompt,
     build_task_family_digest,
+    count_packet_items,
     is_encoded_artifact_answer,
     is_anemic_synthesis_answer,
     build_anemic_synthesis_fallback_answer,
@@ -23,6 +25,12 @@ from irys_harness.benchmarks.harvey import (
     needs_covenant_calculation_worker,
     needs_document_review_privilege_digest,
     needs_regulated_filing_guidance,
+    parse_pre_synthesis_packet_creator_output,
+    pre_synthesis_packet_creator_activation_reasons,
+    pre_synthesis_packet_creator_skip_reasons,
+    should_run_pre_synthesis_packet_creator,
+    summarize_pre_synthesis_packet,
+    summarize_pre_synthesis_packet_skip,
 )
 from irys_harness.config import load_config
 from irys_harness.state import BenchmarkTask, RunState
@@ -673,6 +681,180 @@ class HarveyQueryTests(unittest.TestCase):
         self.assertIn("top-level section for every requested filename", prompt)
         self.assertIn("lpa-draft.docx", prompt)
         self.assertIn("side-letter-checklist.docx", prompt)
+
+    def test_pre_synthesis_packet_creator_skips_single_deliverable_dense_task(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="antitrust-competition/draft-pre-notification-briefing-paper",
+            question="Draft a pre-notification briefing paper for the LabVantage / Prism transaction.",
+            context_files=[],
+            answer_schema={
+                "deliverables": ["pre-notification-briefing-paper.docx"],
+                "criteria_count": 66,
+            },
+            metadata={"practice_area": "antitrust-competition"},
+        )
+        state = RunState(task=task, config=load_config(), documents=[])
+        contract = build_deliverable_contract(state)
+        self.assertFalse(
+            should_run_pre_synthesis_packet_creator(
+                state,
+                deliverable_contract=contract,
+                atom_map={},
+            )
+        )
+
+    def test_pre_synthesis_packet_creator_runs_for_multi_file_package(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="corporate-ma/draft-spa-drafting",
+            question="Draft the NovaBridge stock purchase agreement package.",
+            context_files=[],
+            answer_schema={"deliverables": ["stock-purchase-agreement.docx", "drafting-memo.docx"], "criteria_count": 149},
+            metadata={"practice_area": "corporate-ma"},
+        )
+        state = RunState(task=task, config=load_config(), documents=[])
+        contract = build_deliverable_contract(state)
+        reasons = pre_synthesis_packet_creator_activation_reasons(
+            state,
+            deliverable_contract=contract,
+            atom_map={},
+        )
+        self.assertIn("multiple_deliverables", reasons)
+        self.assertTrue(should_run_pre_synthesis_packet_creator(state, deliverable_contract=contract, atom_map={}))
+
+    def test_pre_synthesis_packet_creator_skips_mature_structured_finance_path(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="capital-markets/draft-indenture-for-senior-secured-notes-offering",
+            question="Draft an indenture and issues memorandum for a senior secured notes offering.",
+            context_files=[],
+            answer_schema={"deliverables": ["indenture-draft.docx", "issues-memorandum.docx"], "criteria_count": 83},
+            metadata={"practice_area": "capital-markets"},
+        )
+        state = RunState(task=task, config=load_config(), documents=[])
+        contract = build_deliverable_contract(state)
+        self.assertEqual(contract["task_family"], "structured_finance_securitization_review")
+        self.assertIn(
+            "mature_specialized_synthesis_path",
+            pre_synthesis_packet_creator_skip_reasons(state, deliverable_contract=contract),
+        )
+        self.assertFalse(should_run_pre_synthesis_packet_creator(state, deliverable_contract=contract, atom_map={}))
+
+    def test_pre_synthesis_packet_creator_prompt_reanchors_task_before_synthesis(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="corporate-ma/draft-spa-drafting",
+            question="Draft the NovaBridge stock purchase agreement package.",
+            context_files=[],
+            answer_schema={"deliverables": ["draft-spa.docx", "drafting-memo.docx"], "criteria_count": 149},
+            metadata={"practice_area": "corporate-ma"},
+        )
+        state = RunState(task=task, config=load_config(), documents=[])
+        contract = build_deliverable_contract(state)
+        state.final_packet = {
+            "deliverable_contract": contract,
+            "package_plan": contract["package_plan"],
+            "cheap_worker_summary": "NovaBridge purchase price is $187.5M. Background: unrelated Meridian deal is $458M.",
+            "artifact_appendix": "Corporate M&A issue rows.",
+            "deliverable_atom_map": build_deliverable_atom_map(
+                contract,
+                "NovaBridge purchase price is $187.5M. Drafting memo should discuss escrow and indemnity.",
+            ),
+        }
+        prompt = build_pre_synthesis_packet_creator_prompt(state)
+        self.assertIn("Draft the NovaBridge stock purchase agreement package.", prompt)
+        self.assertIn("NovaBridge purchase price is $187.5M", prompt)
+        self.assertIn("unrelated Meridian deal is $458M", prompt)
+        self.assertIn("Remove or demote distracting material", prompt)
+        self.assertIn("do not arbitrarily compress away row-level evidence", prompt)
+        self.assertIn("Do not draft the final answer", prompt)
+
+    def test_parse_pre_synthesis_packet_creator_output_accepts_fenced_json(self) -> None:
+        parsed = parse_pre_synthesis_packet_creator_output(
+            """```json
+{"task_focus": "Draft the requested memo.", "selected_evidence": ["Fact A"]}
+```"""
+        )
+        self.assertEqual(parsed["task_focus"], "Draft the requested memo.")
+        self.assertEqual(parsed["format"], "json")
+
+    def test_pre_synthesis_packet_diagnostics_expose_compression(self) -> None:
+        packet = {
+            "format": "json",
+            "deliverables": [{"filename": "a.docx"}, {"filename": "b.docx"}],
+            "selected_evidence": ["fact 1", "fact 2"],
+            "background_or_excluded": "wrong deal",
+            "open_gaps": [],
+        }
+        diagnostics = summarize_pre_synthesis_packet(
+            packet=packet,
+            raw_output='{"selected_evidence":["fact 1","fact 2"]}',
+            worker_packet="x" * 100,
+            artifact_appendix="y" * 50,
+            activation_reasons=["multiple_deliverables"],
+        )
+        self.assertEqual(diagnostics["worker_packet_chars"], 100)
+        self.assertEqual(diagnostics["artifact_appendix_chars"], 50)
+        self.assertEqual(diagnostics["selected_evidence_count"], 2)
+        self.assertEqual(diagnostics["deliverable_count"], 2)
+        self.assertEqual(diagnostics["background_or_excluded_count"], 1)
+        self.assertEqual(count_packet_items({"a": 1, "b": 2}), 2)
+
+    def test_pre_synthesis_packet_skip_diagnostics_are_trace_visible(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="corporate-governance/extract-indemnification-provisions-from-bylaws",
+            question="Extract indemnification provisions from bylaws.",
+            context_files=[],
+            answer_schema={"deliverables": ["indemnification-summary-memo.docx"], "criteria_count": 70},
+            metadata={"practice_area": "corporate-governance"},
+        )
+        state = RunState(task=task, config=load_config(), documents=[])
+        contract = build_deliverable_contract(state)
+        diagnostics = summarize_pre_synthesis_packet_skip(
+            state,
+            deliverable_contract=contract,
+            worker_packet="worker",
+            artifact_appendix="appendix",
+        )
+        self.assertFalse(diagnostics["activated"])
+        self.assertIn("single_deliverable_legacy_path", diagnostics["skip_reasons"])
+        self.assertEqual(diagnostics["worker_packet_chars"], len("worker"))
+
+    def test_synthesis_prompt_uses_clean_packet_without_legacy_playbook(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="antitrust-competition/draft-pre-notification-briefing-paper",
+            question="Draft a pre-notification briefing paper for the LabVantage / Prism transaction.",
+            context_files=[],
+            answer_schema={"deliverables": ["pre-notification-briefing-paper.docx"], "criteria_count": 66},
+            metadata={"practice_area": "antitrust-competition"},
+        )
+        state = RunState(task=task, config=load_config(), documents=[])
+        contract = build_deliverable_contract(state)
+        state.task.answer_schema["deliverable_contract"] = contract
+        state.final_packet = {
+            "deliverable_contract": contract,
+            "package_plan": contract["package_plan"],
+            "cheap_worker_summary": "Polluted broad worker packet should not be copied into the slim synthesis prompt.",
+            "pre_synthesis_packet": {
+                "task_focus": "Draft the LabVantage / Prism pre-notification briefing paper.",
+                "selected_evidence": ["Use LabVantage / Prism market facts and do not use Meridian background."],
+                "synthesis_instruction": "Produce the requested briefing paper.",
+            },
+            "artifact_appendix": "Structured row A should remain visible.",
+            "verified_evidence": [],
+        }
+        prompt = build_synthesis_prompt(state)
+        self.assertIn("Original task:", prompt)
+        self.assertIn("Clean synthesis packet:", prompt)
+        self.assertIn("LabVantage / Prism pre-notification", prompt)
+        self.assertIn("Structured supporting evidence:", prompt)
+        self.assertIn("Structured row A should remain visible.", prompt)
+        self.assertNotIn("Polluted broad worker packet", prompt)
+        self.assertNotIn("For antitrust, HSR", prompt)
+        self.assertNotIn("Evidence packet prepared by the worker tier", prompt)
 
     def test_deliverable_atom_map_allocates_package_source_lines(self) -> None:
         task = BenchmarkTask(

@@ -11,6 +11,7 @@ from irys_harness.cli import (
     build_harvey_batch_report,
     compare_run_dirs,
     dedupe,
+    load_trace_dir,
     read_task_file,
     refresh_harvey_diagnostics,
     resolve_harvey_smoke_task_ids,
@@ -101,11 +102,39 @@ class TraceCliTests(unittest.TestCase):
             self.assertAlmostEqual(comparison["summary"]["common_macro_rubric_pass_rate_delta"], 0.3)
             self.assertEqual(comparison["summary"]["common_rubric_passed_delta"], 3)
             self.assertEqual(comparison["summary"]["common_token_delta"], 20)
+            self.assertAlmostEqual(comparison["summary"]["common_average_cost_per_task_delta"], 0.5)
             self.assertEqual(comparison["top_gains"][0]["task"], "harvey_lab_sample::area/task")
             self.assertAlmostEqual(comparison["top_gains"][0]["rubric_pass_rate_delta"], 0.3)
             self.assertEqual(comparison["family_deltas"][0]["family"], "task")
             self.assertEqual(comparison["family_deltas"][0]["rubric_passed_delta"], 3)
             self.assertAlmostEqual(comparison["family_deltas"][0]["macro_rubric_pass_rate_delta"], 0.3)
+
+    def test_trace_loader_accepts_bom_and_trace_dir_ignores_report_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run = root / "run"
+            trace_dir = run / "harvey_lab_sample" / "area"
+            trace_dir.mkdir(parents=True)
+            trace_path = trace_dir / "task.json"
+            trace_path.write_text(
+                json_trace(
+                    task_id="area/task",
+                    passed=False,
+                    rubric_passed=6,
+                    rubric_total=10,
+                    cost=1.0,
+                    tokens=100,
+                ),
+                encoding="utf-8-sig",
+            )
+            (run / "summary.json").write_text(json.dumps({"tasks": 1}), encoding="utf-8")
+
+            trace = load_trace(trace_path)
+            traces = load_trace_dir(run)
+
+            self.assertEqual(trace["task_id"], "area/task")
+            self.assertEqual(len(traces), 1)
+            self.assertEqual(traces[0]["task_id"], "area/task")
 
     def test_compare_run_dirs_groups_task_family_deltas(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -315,6 +344,8 @@ class TraceCliTests(unittest.TestCase):
                     rubric_passed=10,
                     rubric_total=10,
                     rubric_pass_rate=1.0,
+                    estimated_cost=0.30,
+                    total_tokens=3000,
                     token_share_by_tier={"cheap_worker": 0.9},
                     status="completed",
                 ),
@@ -326,6 +357,8 @@ class TraceCliTests(unittest.TestCase):
                     rubric_passed=8,
                     rubric_total=10,
                     rubric_pass_rate=0.8,
+                    estimated_cost=0.50,
+                    total_tokens=5000,
                     token_share_by_tier={"cheap_worker": 0.8},
                     status="completed",
                 ),
@@ -337,6 +370,8 @@ class TraceCliTests(unittest.TestCase):
                     rubric_passed=None,
                     rubric_total=None,
                     rubric_pass_rate=None,
+                    estimated_cost=0.0,
+                    total_tokens=0,
                     token_share_by_tier={},
                     error="RuntimeError: boom",
                     status="error",
@@ -353,6 +388,14 @@ class TraceCliTests(unittest.TestCase):
             self.assertEqual(report["failed_tasks"], ["area/fail"])
             self.assertEqual(report["error_tasks"], ["other/error"])
             self.assertEqual(report["non_pass_tasks"], ["area/fail", "other/error"])
+            self.assertAlmostEqual(report["estimated_cost"], 0.80)
+            self.assertAlmostEqual(report["average_cost_per_task"], 0.80 / 3)
+            self.assertAlmostEqual(report["median_cost_per_task"], 0.30)
+            self.assertEqual(report["max_cost_task"]["task_id"], "area/fail")
+            self.assertEqual(report["total_tokens"], 8000)
+            self.assertEqual(report["max_token_task"]["task_id"], "area/fail")
+            self.assertAlmostEqual(report["by_practice_area"]["area"]["estimated_cost"], 0.80)
+            self.assertAlmostEqual(report["results"][0]["cost_per_rubric_criterion"], 0.03)
             paths = write_harvey_batch_tracking(report)
             self.assertTrue(Path(paths["summary"]).exists())
             self.assertEqual(Path(paths["failed_task_file"]).read_text(encoding="utf-8").strip(), "area/fail")
