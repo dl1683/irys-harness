@@ -7,7 +7,7 @@ from pathlib import Path
 from docx import Document
 from openpyxl import load_workbook
 
-from irys_harness.artifacts import render_deliverables
+from irys_harness.artifacts import apply_deliverable_coverage_audit, render_deliverables
 
 
 class ArtifactRenderingTests(unittest.TestCase):
@@ -92,7 +92,54 @@ class ArtifactRenderingTests(unittest.TestCase):
             doc = Document(Path(artifacts[0]["path"]))
             text = "\n".join(paragraph.text for paragraph in doc.paragraphs)
             self.assertIn("Structured Findings Appendix", text)
-            self.assertIn("2023 Merger Guidelines threshold", text)
+        self.assertIn("2023 Merger Guidelines threshold", text)
+
+    def test_docx_renderer_adds_missing_deliverable_coverage_fill(self) -> None:
+        packet = {
+            "deliverable_contract": {
+                "deliverables": [
+                    {
+                        "filename": "seller-certificate.docx",
+                        "artifact_role": "seller_certificate",
+                        "artifact_goal": "Draft the seller certificate.",
+                        "required_sections": [
+                            "Seller certificate title",
+                            "Bringdown representations and warranties",
+                        ],
+                    },
+                    {
+                        "filename": "mac-certificate.docx",
+                        "artifact_role": "mac_certificate",
+                        "artifact_goal": "Draft the no-MAC certificate.",
+                        "required_sections": ["Covered period and no-MAC statement"],
+                    },
+                ]
+            },
+            "draft_answer": "mac-certificate.docx\n\nCovered period and no-MAC statement.",
+            "cheap_worker_summary": "Seller certificate should bring down the reps and disclose schedule exceptions.",
+            "verified_evidence": [],
+        }
+        audit = apply_deliverable_coverage_audit(
+            packet,
+            ["seller-certificate.docx", "mac-certificate.docx"],
+        )
+        self.assertFalse(audit[0]["present_in_draft"])
+        self.assertTrue(audit[1]["present_in_draft"])
+        with tempfile.TemporaryDirectory() as tmp:
+            artifacts = render_deliverables(
+                output_dir=tmp,
+                deliverables=["seller-certificate.docx", "mac-certificate.docx"],
+                title="Disclosure Package",
+                packet=packet,
+            )
+            seller_doc = Document(Path(artifacts[0]["path"]))
+            seller_text = "\n".join(paragraph.text for paragraph in seller_doc.paragraphs)
+            mac_doc = Document(Path(artifacts[1]["path"]))
+            mac_text = "\n".join(paragraph.text for paragraph in mac_doc.paragraphs)
+        self.assertIn("Deliverable-Specific Coverage Fill", seller_text)
+        self.assertIn("Bringdown representations and warranties", seller_text)
+        self.assertIn("Seller certificate should bring down the reps", seller_text)
+        self.assertNotIn("Deliverable-Specific Coverage Fill", mac_text)
 
     def test_xlsx_renderer_keeps_cells_evaluator_sized(self) -> None:
         packet = {

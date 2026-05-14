@@ -10,7 +10,7 @@ from typing import Any
 from openpyxl import load_workbook
 
 from irys_harness.agents import build_final_packet, extract_evidence_from_retrieval
-from irys_harness.artifacts import render_deliverables
+from irys_harness.artifacts import apply_deliverable_coverage_audit, render_deliverables
 from irys_harness.benchmarks.base import BenchmarkAdapter
 from irys_harness.events import EventLogger
 from irys_harness.indexing import load_documents, retrieve_chunks
@@ -465,6 +465,16 @@ class HarveyLabAdapter(BenchmarkAdapter):
             sort_keys=True,
         )
         if state.output_dir:
+            coverage_audit = apply_deliverable_coverage_audit(
+                state.final_packet,
+                state.task.answer_schema.get("deliverables", []),
+            )
+            state.extraction_records.append(
+                {
+                    "mode": "deterministic_deliverable_coverage_audit",
+                    "summary": coverage_audit,
+                }
+            )
             state.artifacts = render_deliverables(
                 output_dir=state.output_dir,
                 deliverables=state.task.answer_schema.get("deliverables", []),

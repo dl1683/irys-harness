@@ -20,6 +20,7 @@ def render_deliverables(
 ) -> list[dict[str, Any]]:
     root = Path(output_dir)
     root.mkdir(parents=True, exist_ok=True)
+    apply_deliverable_coverage_audit(packet, deliverables)
     artifacts: list[dict[str, Any]] = []
     for filename in deliverables:
         path = root / filename
@@ -54,6 +55,12 @@ def render_docx(path: Path, *, title: str, deliverable: str, packet: dict[str, A
         if is_probably_encoded_artifact(str(draft_answer)):
             draft_answer = packet.get("plain_text_fallback") or packet.get("cheap_worker_summary") or ""
         for block in str(draft_answer).split("\n\n"):
+            if block.strip():
+                doc.add_paragraph(safe_text(block.strip()))
+    coverage = find_coverage_record(packet, deliverable)
+    if coverage and not coverage.get("present_in_draft") and coverage.get("fallback_text"):
+        doc.add_heading("Deliverable-Specific Coverage Fill", level=2)
+        for block in str(coverage["fallback_text"]).split("\n\n"):
             if block.strip():
                 doc.add_paragraph(safe_text(block.strip()))
     appendix = packet.get("artifact_appendix")
@@ -113,6 +120,161 @@ def find_deliverable_plan(packet: dict[str, Any], deliverable: str) -> dict[str,
         if str(item.get("filename", "")).lower() == deliverable.lower():
             return item
     return None
+
+
+def apply_deliverable_coverage_audit(packet: dict[str, Any], deliverables: list[str]) -> list[dict[str, Any]]:
+    existing = packet.get("deliverable_coverage_audit")
+    if isinstance(existing, list) and existing:
+        return existing
+    draft_answer = str(packet.get("draft_answer") or "")
+    records: list[dict[str, Any]] = []
+    for deliverable in deliverables:
+        present, matched_by = deliverable_present_in_text(draft_answer, deliverable)
+        plan = find_deliverable_plan(packet, deliverable)
+        record: dict[str, Any] = {
+            "filename": deliverable,
+            "present_in_draft": present,
+            "matched_by": matched_by,
+            "artifact_role": plan.get("artifact_role") if plan else None,
+            "required_sections": list(plan.get("required_sections", []) or []) if plan else [],
+        }
+        if not present:
+            record["fallback_text"] = build_missing_deliverable_fill(deliverable, plan, packet)
+        records.append(record)
+    packet["deliverable_coverage_audit"] = records
+    missing = [record["filename"] for record in records if not record["present_in_draft"]]
+    if missing:
+        packet["deliverable_coverage_summary"] = {
+            "missing_deliverables": missing,
+            "present_deliverables": [record["filename"] for record in records if record["present_in_draft"]],
+        }
+    return records
+
+
+def deliverable_present_in_text(text: str, deliverable: str) -> tuple[bool, str | None]:
+    lower_text = text.lower()
+    lower_name = deliverable.lower()
+    stem = Path(lower_name).stem
+    variants = [
+        lower_name,
+        stem,
+        stem.replace("-", " "),
+        stem.replace("_", " "),
+    ]
+    for variant in dedupe_preserve_order([item for item in variants if item]):
+        if variant in lower_text:
+            return True, variant
+    return False, None
+
+
+def find_coverage_record(packet: dict[str, Any], deliverable: str) -> dict[str, Any] | None:
+    for record in packet.get("deliverable_coverage_audit", []) or []:
+        if str(record.get("filename", "")).lower() == deliverable.lower():
+            return record
+    return None
+
+
+def build_missing_deliverable_fill(
+    deliverable: str,
+    plan: dict[str, Any] | None,
+    packet: dict[str, Any],
+) -> str:
+    artifact_goal = str((plan or {}).get("artifact_goal") or f"Produce {deliverable}.")
+    required_sections = [str(section) for section in (plan or {}).get("required_sections", []) or []]
+    lines = [
+        deliverable,
+        "",
+        "Coverage audit note",
+        "The synthesis draft did not include a filename-level section for this requested deliverable. The renderer preserved the full global draft and adds this deliverable-specific fill so the requested artifact remains inspectable.",
+        "",
+        "Artifact goal",
+        artifact_goal,
+    ]
+    if required_sections:
+        lines.extend(["", "Required sections"])
+        for section in required_sections[:16]:
+            lines.append(f"- {section}")
+    support = select_deliverable_support(deliverable, plan, packet)
+    if support:
+        lines.extend(["", "Source-state notes"])
+        for item in support:
+            lines.append(f"- {item}")
+    else:
+        lines.extend(
+            [
+                "",
+                "Source-state notes",
+                "- No deterministic source line matched this deliverable name. Review the global draft, structured findings appendix, and candidate evidence packet for source support.",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def select_deliverable_support(
+    deliverable: str,
+    plan: dict[str, Any] | None,
+    packet: dict[str, Any],
+    *,
+    max_items: int = 8,
+) -> list[str]:
+    source_text = "\n".join(
+        str(packet.get(key) or "")
+        for key in ["cheap_worker_summary", "artifact_appendix", "draft_answer"]
+    )
+    keywords = deliverable_keywords(deliverable, plan)
+    selected: list[str] = []
+    for raw_line in source_text.splitlines():
+        line = " ".join(raw_line.strip().split())
+        if len(line) < 24:
+            continue
+        lower_line = line.lower()
+        if any(keyword in lower_line for keyword in keywords):
+            selected.append(safe_text(line, limit=500))
+        if len(selected) >= max_items:
+            break
+    return dedupe_preserve_order(selected)
+
+
+def deliverable_keywords(deliverable: str, plan: dict[str, Any] | None) -> list[str]:
+    raw_terms = [
+        Path(deliverable.lower()).stem.replace("-", " "),
+        str((plan or {}).get("artifact_role") or "").replace("_", " "),
+        str((plan or {}).get("artifact_goal") or ""),
+        " ".join(str(section) for section in (plan or {}).get("required_sections", []) or []),
+    ]
+    stopwords = {
+        "and",
+        "the",
+        "for",
+        "with",
+        "from",
+        "this",
+        "that",
+        "source",
+        "citations",
+        "document",
+        "documents",
+        "section",
+        "sections",
+        "deliverable",
+    }
+    terms: list[str] = []
+    for text in raw_terms:
+        for token in re.findall(r"[a-z][a-z0-9]{3,}", text.lower()):
+            if token not in stopwords:
+                terms.append(token)
+    return dedupe_preserve_order(terms)
+
+
+def dedupe_preserve_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        deduped.append(item)
+    return deduped
 
 
 def normalize_sheet_plans(deliverable_plan: dict[str, Any] | None) -> list[dict[str, str]]:
