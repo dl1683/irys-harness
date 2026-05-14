@@ -229,6 +229,77 @@ class HarveyQueryTests(unittest.TestCase):
         self.assertIn("Dr. James Moriarty (Exhibit G)", digest)
         self.assertIn("Dr. Sandra Okonkwo is referenced as Exhibit H but is not present", digest)
 
+    def test_credential_gap_digest_maps_requirements_to_evidence(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="immigration/compare-immigration",
+            question=(
+                "Review the attached PERM application against the beneficiary's supporting credentials "
+                "and produce a gap analysis memo with remedial recommendations."
+            ),
+            answer_schema={"deliverables": ["credential-gap-analysis.docx"]},
+            metadata={"practice_area": "immigration"},
+        )
+        state = RunState(
+            task=task,
+            config=load_config(),
+            documents=[],
+            chunks=[
+                {
+                    "doc_id": "doc_1",
+                    "chunk_id": "c1",
+                    "index": 0,
+                    "text": (
+                        "ETA 9089 PERM requires a master's degree in Computer Science, 5 years of progressive "
+                        "post-master's experience, TensorFlow or PyTorch, NLP pipeline development, Apache Spark, "
+                        "AWS SageMaker, Python and R programming, AWS Certified Machine Learning - Specialty, "
+                        "and supervision of 3-5 ML engineers. PWD uses SOC 15-2051 Data Scientists for the "
+                        "Senior Machine Learning Engineer role. Alternative classifications may include 15-1252 "
+                        "Software Developers or 15-1299 Computer Occupations, All Other."
+                    ),
+                },
+                {
+                    "doc_id": "doc_2",
+                    "chunk_id": "c2",
+                    "index": 1,
+                    "text": (
+                        "Beneficiary has M.S. in Computer Science from North Carolina State. Evalpoint Software "
+                        "Engineer role ran July 1, 2013 to July 15, 2016. Research Assistant ran August 15, 2016 "
+                        "to May 15, 2018 during the master's program. DataBridge employment begins June 4, 2018 "
+                        "as Data Scientist I and Data Scientist II. Data Scientist II began January 2021 and used "
+                        "Apache Spark and AWS SageMaker. Transcript lists Statistical Computing with R grade A-. "
+                        "Resume lists R (intermediate) and some use of R for statistical reporting. She led 2 junior "
+                        "data scientists. She has AWS Cloud Practitioner expired and TensorFlow Developer, which is "
+                        "not affiliated with Amazon Web Services, and does not hold any such certification. Professor "
+                        "Tsai is on sabbatical and has not responded. F-1 STEM OPT cap-gap, I-129 July 15, 2025 filing, "
+                        "and FY2026 cap lottery selected status are noted."
+                    ),
+                },
+                {
+                    "doc_id": "doc_3",
+                    "chunk_id": "c3",
+                    "index": 2,
+                    "text": (
+                        "IAE credential evaluation says B.Tech in Electronics and Communication Engineering, "
+                        "with limited computer-related coursework."
+                    ),
+                },
+            ],
+        )
+        contract = build_deliverable_contract(state)
+        digest = build_task_family_digest(state)
+        self.assertEqual(contract["task_family"], "credential_gap_review")
+        self.assertIn("Deterministic credential / qualification gap digest", digest)
+        self.assertIn("Evalpoint is pre-master's", digest)
+        self.assertIn("RA is concurrent with the master's", digest)
+        self.assertIn("Team-size and supervised-title mismatch", digest)
+        self.assertIn("Statistical Computing with R", digest)
+        self.assertIn("SOC 15-2051", digest)
+        self.assertIn("15-1252", digest)
+        self.assertIn("TensorFlow Developer as automatically equivalent", digest)
+        self.assertIn("Professor Tsai is on sabbatical", digest)
+        self.assertIn("FY2026 cap lottery", digest)
+
     def test_deliverable_contract_plans_section_382_workbook_tabs(self) -> None:
         task = BenchmarkTask(
             benchmark="harvey_lab_sample",

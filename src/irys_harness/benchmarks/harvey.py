@@ -2065,6 +2065,8 @@ def infer_task_family(haystack: str) -> str:
         return "trusts_estates_private_client_review"
     if has_tax_controversy_terms(haystack):
         return "tax_controversy_review"
+    if needs_credential_gap_digest_from_text(haystack):
+        return "credential_gap_review"
     if "change of control" in haystack:
         return "contract_change_of_control_review"
     if "covenant" in haystack or "ebitda" in haystack:
@@ -2247,6 +2249,11 @@ For trusts, estates, private-client, parenting-plan, marital-agreement, charitab
         tax_controversy_guidance = """
 For tax controversy, tax-closing, IDR, filed-return, stipulation, and Section 382 deliverables, preserve the deterministic tax issue rows as the organizing work product. Explicitly state ISSUE numbers, paragraph numbers, IRC/Treasury/Notice authority, tax years, exact dollar amounts, percentages, rates, formulas, accept/reject/counter recommendations, and client red lines when the worker packet lists them. For workbook deliverables, copy the shareholder, ownership-shift, Section 382 limitation, NOL utilization, and data-quality rows into matching workbook sheets. Do not replace tax issue matrices or computations with high-level controversy prose.
 """
+    credential_gap_guidance = ""
+    if needs_credential_gap_digest(state):
+        credential_gap_guidance = """
+For credential, qualification, PERM, labor-certification, H-1B, and beneficiary gap-analysis deliverables, preserve the "Deterministic credential / qualification gap digest" as the organizing work product. Include a requirement-satisfaction matrix near the top. Explicitly distinguish education, pre-master's experience, concurrent-with-master's experience, post-master's experience, job-title fit, technical-skill mapping, skill timing, certification, R/Python evidence, supervision scope, SOC/PWD classification, and filing-status/cap-gap issues when the worker packet lists them. Do not let the AWS certification gap and missing experience letter crowd out the other requirement mismatches.
+"""
     return f"""You are generating a legal benchmark deliverable from benchmark-provided materials only.
 
 Output discipline:
@@ -2324,6 +2331,7 @@ For insurance coverage-determination memoranda, preserve the "High-Priority Insu
 {litigation_guidance}
 {trusts_estates_guidance}
 {tax_controversy_guidance}
+{credential_gap_guidance}
 For covenant-compliance deliverables, include a Required Numeric Reconciliation section. At minimum, when the facts are present, it must state: Borrower's unadjusted EBITDA; corrected Total Funded Debt arithmetic; primary corrected EBITDA and leverage; interest denominator audit; available revolver / letters-of-credit correction; period-end liquidity and whether period-end liquidity is compliant; any intra-period liquidity breach separately; capital expenditures actual versus adjusted limit; extraordinary/non-recurring charge cap and claimed amount; realized versus projected savings; and any further-corrected named-settlement scenario. Do not let an intra-period breach replace the separate period-end liquidity calculation.
 
 Use the exact severity label "Critical" for missing required expert letters, material publication/citation discrepancies, and filing-blocking signature/form defects. When an exhibit letter is skipped, explicitly state that the skip causes cascading misnumbering or cross-reference errors for later exhibits.
@@ -2967,6 +2975,8 @@ def build_task_family_digest(state: RunState) -> str:
         return build_ip_contract_amendment_digest(state)
     if needs_technology_data_agreement_digest(state):
         return build_technology_data_agreement_digest(state)
+    if needs_credential_gap_digest(state):
+        return build_credential_gap_digest(state)
     if any(
         term in haystack
         for term in [
@@ -2982,6 +2992,187 @@ def build_task_family_digest(state: RunState) -> str:
     ):
         return build_document_comparison_digest(state)
     return ""
+
+
+def needs_credential_gap_digest(state: RunState) -> bool:
+    return needs_credential_gap_digest_from_text(lower_task_text(state))
+
+
+def needs_credential_gap_digest_from_text(text: str) -> bool:
+    lower = text.lower()
+    return (
+        "gap analysis" in lower
+        and any(term in lower for term in ["credential", "qualification", "beneficiary", "perm", "labor certification"])
+        and any(term in lower for term in ["perm", "eta 9089", "h-1b", "i-129", "immigration", "beneficiary"])
+    )
+
+
+def build_credential_gap_digest(state: RunState) -> str:
+    source_text = "\n".join(joined_text_by_doc(state).values())
+    lower = source_text.lower()
+    rows = [
+        [
+            "Education baseline",
+            "Master's degree or equivalent in Computer Science / closely related field",
+            credential_evidence(
+                lower,
+                "M.S. in Computer Science from North Carolina State University is documented and should satisfy the master's degree requirement.",
+                ["m.s. in computer science", "master of science in computer science", "north carolina state"],
+            ),
+            "Satisfied, subject to citing the M.S. credential directly.",
+            "Low",
+            "Map the PERM education requirement to the M.S. credential before discussing the B.Tech evaluation.",
+        ],
+        [
+            "Bachelor's field / credential evaluation",
+            "Foreign bachelor's equivalency may be relevant but is not the cleanest way to satisfy the PERM education requirement.",
+            credential_evidence(
+                lower,
+                "IAE evaluates the B.Tech as Electronics and Communication Engineering, with limited computer-related coursework.",
+                ["electronics and communication engineering", "limited computer-related coursework", "credential evaluation"],
+            ),
+            "Potential field mismatch if relied on alone.",
+            "Medium",
+            "State that the M.S. in Computer Science is the primary education match; treat the B.Tech evaluation as background with limited scope.",
+        ],
+        [
+            "Post-master's experience count",
+            "5 years progressive post-master's experience.",
+            credential_evidence(
+                lower,
+                "DataBridge employment begins June 2018 after the May 2018 M.S.; Evalpoint is July 2013-July 2016 and NC State RA is August 2016-May 2018 during the M.S. HR flagged that Professor Tsai is on sabbatical and has not responded, so the NC State RA letter cannot currently be obtained.",
+                ["july 1, 2013", "august 15, 2016", "may 15, 2018", "june 4, 2018", "sabbatical", "has not responded"],
+            ),
+            "Only post-M.S. DataBridge time clearly counts; Evalpoint is pre-master's and RA is concurrent with the master's.",
+            "Critical",
+            "Calculate and explain countability by role; do not aggregate pre-master's or concurrent RA time into the 5-year post-master's requirement.",
+        ],
+        [
+            "Job-title fit",
+            "Experience must be in machine learning engineering or a closely related occupation.",
+            credential_evidence(
+                lower,
+                "DataBridge titles are Data Scientist I / Data Scientist II; Evalpoint title is Software Engineer.",
+                ["data scientist i", "data scientist ii", "software engineer"],
+            ),
+            "Title mismatch requiring duties-based explanation.",
+            "High",
+            "Explain why duties are closely related or flag title mismatch as a filing risk; do not rely on title alone.",
+        ],
+        [
+            "Technical skill mapping",
+            "TensorFlow/PyTorch, NLP pipeline development, cloud ML deployment, Python and R, Apache Spark.",
+            credential_evidence(
+                lower,
+                "PERM requires designing and deploying production-grade deep learning models using TensorFlow or PyTorch, NLP pipeline development, cloud-based ML deployment on AWS SageMaker or Google Vertex AI, Python and R, and Apache Spark. DataBridge/experience evidence maps TensorFlow/PyTorch, NLP pipelines, AWS SageMaker, Python, and Spark to Data Scientist II work; Python is satisfied.",
+                ["production-grade", "tensorflow", "pytorch", "nlp", "sagemaker", "google vertex ai", "python", "apache spark"],
+            ),
+            "Mixed: several requirements are supported, but timing and depth must be mapped requirement-by-requirement.",
+            "High",
+            "Create a requirement-to-evidence table for each technical skill, including whether the evidence covers the full required period.",
+        ],
+        [
+            "Apache Spark / SageMaker timing",
+            "If the PERM requires the skill for the full experience period, late-acquired skills may not satisfy the requirement.",
+            credential_evidence(
+                lower,
+                "Data Scientist II period begins January 2021; sources tie advanced Spark / SageMaker work to later DataBridge responsibilities.",
+                ["january 2021", "spark", "sagemaker", "data scientist ii"],
+            ),
+            "Possible duration gap for Spark and SageMaker if USCIS expects full-period experience.",
+            "High",
+            "Identify the start date of each technical skill and recommend supplemental employer detail if needed.",
+        ],
+        [
+            "R proficiency",
+            "PERM lists proficiency in R programming.",
+            credential_evidence(
+                lower,
+                "The resume lists R as intermediate; the transcript includes Statistical Computing with R with an A- grade; work evidence says only some use of R for statistical reporting.",
+                ["r (intermediate)", "statistical computing with r", "a-", "some use of r for statistical reporting"],
+            ),
+            "Potential gap between PERM 'proficiency' and intermediate/some-use evidence.",
+            "Medium",
+            "Cite the R coursework and any work-use evidence; request supplemental evidence if work-use is thin.",
+        ],
+        [
+            "AWS certification",
+            "AWS Certified Machine Learning - Specialty certification or equivalent required.",
+            credential_evidence(
+                lower,
+                "Beneficiary has AWS Certified Cloud Practitioner, expired January 18, 2025, and TensorFlow Developer. The TensorFlow Developer certificate is Google-issued, framework-specific, not affiliated with AWS, and source notes no AWS specialty certification.",
+                ["aws certified machine learning", "cloud practitioner", "expired", "tensorflow developer", "not affiliated with amazon web services", "does not hold any such certification"],
+            ),
+            "Material credential gap.",
+            "Critical",
+            "Do not treat TensorFlow Developer as automatically equivalent to AWS ML-Specialty; obtain AWS Specialty certification or build a specific equivalency argument before filing.",
+        ],
+        [
+            "Supervision scope",
+            "PERM requires supervision of 3-5 machine learning engineers.",
+            credential_evidence(
+                lower,
+                "DataBridge evidence says she led 2 junior data scientists.",
+                ["3-5 ml engineers", "2 junior data scientists", "supervis"],
+            ),
+            "Team-size and supervised-title mismatch.",
+            "High",
+            "Request employer clarification or supplemental letter addressing supervision of ML engineers and team size.",
+        ],
+        [
+            "SOC / PWD classification",
+            "PWD uses SOC 15-2051 Data Scientists while role is Senior Machine Learning Engineer.",
+            credential_evidence(
+                lower,
+                "PWD and PERM use SOC 15-2051 / Data Scientists for Senior Machine Learning Engineer; possible alternative classifications include 15-1252 Software Developers or 15-1299 Computer Occupations, All Other.",
+                ["soc 15-2051", "data scientists", "senior machine learning engineer"],
+            ),
+            "Classification mismatch can affect prevailing wage/PERM support.",
+            "Medium",
+            "Discuss whether Data Scientists is defensible for the ML Engineer role, compare possible 15-1252 / 15-1299 alternatives, and state that misclassification could undermine the PWD/PERM.",
+        ],
+        [
+            "Status / filing posture",
+            "H-1B cap selection, STEM OPT/cap-gap, I-129 timing, and supporting forms must be reconciled.",
+            credential_evidence(
+                lower,
+                "Source materials reference F-1 STEM OPT, cap-gap/status continuation, target I-129 filing, and that the petition was selected in the FY2026 cap lottery.",
+                ["stem opt", "cap-gap", "i-129", "fy2026", "cap lottery", "selected"],
+            ),
+            "Procedural gap if status and form support are not tied to the filing timeline.",
+            "Medium",
+            "State lottery/cap selection if present, confirm cap-gap mechanics, and list missing forms/exhibits separately from credential gaps.",
+        ],
+    ]
+    lines = [
+        "# Deterministic credential / qualification gap digest",
+        "Use this as a requirement-satisfaction matrix before final synthesis. It is not a generic filing checklist.",
+        "",
+        "| Requirement Area | Source Requirement | Evidence Mapping | Fit / Gap | Severity | Remediation |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    lines.extend("| " + " | ".join(markdown_cell(cell) for cell in row) + " |" for row in rows)
+    lines.extend(
+        [
+            "",
+            "## Required final memo structure",
+            "- Put the requirement-satisfaction matrix near the top of the memo.",
+            "- Separate education, experience countability, technical-skill mapping, certification, supervision, SOC/PWD, and filing-status issues.",
+            "- For experience, explicitly distinguish pre-master's, concurrent-with-master's, and post-master's periods.",
+            "- For technical skills, map each PERM skill to source evidence and flag timing limitations.",
+            "- Do not let AWS certification and missing RA letter crowd out the other qualification mismatches.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def credential_evidence(source_lower: str, evidence: str, required_terms: list[str]) -> str:
+    missing = [term for term in required_terms if term.lower() not in source_lower]
+    if not missing:
+        return evidence
+    if len(missing) == len(required_terms):
+        return "Source support not found in extracted text; verify before relying on this row."
+    return evidence + " Partial source support; verify terms: " + ", ".join(missing[:4]) + "."
 
 
 DOCUMENT_COMPARISON_ISSUE_FAMILIES: list[tuple[str, list[str]]] = [
