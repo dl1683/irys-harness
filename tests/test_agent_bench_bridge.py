@@ -336,6 +336,19 @@ class AgentBenchBridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(rendered, "53.23%")
 
+    def test_docfinqa_renderer_extracts_direct_calculation_result(self) -> None:
+        rendered = render_benchmark_answer(
+            benchmark="docfinqa",
+            answer=(
+                "To calculate the percent of net earnings for 2019:\n\n"
+                "**Calculation:**\n"
+                "($1,786.2 / $2,807.0) * 100 = 63.6337...%\n\n"
+                "In 2019, the percent was approximately 63.6%."
+            ),
+            context="",
+        )
+        self.assertEqual(rendered, "63.6337%")
+
     def test_extract_docfinqa_computed_answer_from_millions(self) -> None:
         value = extract_docfinqa_computed_answer(
             "ANSWER_CANDIDATE: 51.28\nCOMPUTATIONS:\n"
@@ -430,6 +443,28 @@ class AgentBenchBridgeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(router.calls, ["extraction", "critic", "synthesis"])
             trace_text = next(Path(temp).rglob("*.json")).read_text(encoding="utf-8")
             self.assertIn('"selected_pipeline": "three-tier"', trace_text)
+
+    async def test_adaptive_backend_keeps_docfinqa_on_three_tier_numeric_path(self) -> None:
+        config = bridge_test_config()
+        router = FakeRouter(config)
+        with tempfile.TemporaryDirectory() as temp:
+            backend = IrysAgentBenchBackend(
+                config=config,
+                benchmark="docfinqa",
+                split="train",
+                mode="adaptive",
+                trace_dir=temp,
+                router=router,  # type: ignore[arg-type]
+            )
+            result = await backend.run(
+                query="what was the total operating expenses in 2018 in millions",
+                context="| Total operating expenses | 41,932 | 38,391 |",
+            )
+            self.assertEqual(result.answer, "B")
+            self.assertEqual(router.calls, ["extraction", "critic", "synthesis"])
+            trace_text = next(Path(temp).rglob("*.json")).read_text(encoding="utf-8")
+            self.assertIn('"selected_pipeline": "three-tier"', trace_text)
+            self.assertIn('"docfinqa_query_numeric_digest"', trace_text)
 
 
 if __name__ == "__main__":

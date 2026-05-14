@@ -46,7 +46,6 @@ DEFAULT_BENCHMARK_SPECS = [
 FULL_CONTEXT_DIRECT_BENCHMARK_REASONS = {
     "longbench_v2": "long-context multiple choice usually benefits from preserving the full adapted context.",
     "facts_grounding": "grounding/refusal tasks are best scored from direct source-context adherence.",
-    "docfinqa": "financial QA currently needs exact table and period visibility more than lossy compression.",
     "mrcr": "conversation-position retrieval is damaged by intermediate summarization.",
     "l_citeeval": "citation tasks need answer-bearing source labels preserved through rendering.",
     "fanoutqa": "fan-out lookup needs broad source coverage before aggregation.",
@@ -1116,6 +1115,8 @@ def render_benchmark_answer(
         candidate = extract_answer_candidate(evidence_packet)
         value = candidate if candidate and candidate.upper() != "INSUFFICIENT" else answer
         computed = extract_docfinqa_computed_answer(evidence_packet)
+        if not computed:
+            computed = extract_docfinqa_computed_answer(answer)
         if computed and (computed.endswith("%") or str(value).strip().upper() == "INSUFFICIENT"):
             value = computed
         return normalize_docfinqa_answer(value)
@@ -1214,9 +1215,11 @@ def extract_docfinqa_computed_answer(text: str) -> str | None:
 
     upper = text.upper()
     start = upper.find("\nCOMPUTATIONS:")
-    if start < 0:
-        return None
-    computation_text = text[start:]
+    if start >= 0:
+        computation_text = text[start:]
+    else:
+        calculation_start = upper.find("CALCULATION:")
+        computation_text = text[calculation_start:] if calculation_start >= 0 else text
     stop = computation_text.upper().find("\nRISKS:")
     if stop >= 0:
         computation_text = computation_text[:stop]
