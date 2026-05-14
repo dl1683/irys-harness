@@ -745,6 +745,15 @@ def select_deliverable_atoms(
     max_atoms: int,
 ) -> list[dict[str, Any]]:
     keywords = build_deliverable_atom_keywords(filename, plan)
+    return select_atoms_for_keywords(keywords, source_text, max_atoms=max_atoms)
+
+
+def select_atoms_for_keywords(
+    keywords: list[str],
+    source_text: str,
+    *,
+    max_atoms: int,
+) -> list[dict[str, Any]]:
     if not keywords:
         return []
     candidates: list[tuple[int, int, dict[str, Any]]] = []
@@ -753,7 +762,7 @@ def select_deliverable_atoms(
         if len(line) < 32:
             continue
         lower_line = line.lower()
-        matched = [keyword for keyword in keywords if keyword in lower_line]
+        matched = [keyword for keyword in keywords if keyword_matches_line(keyword, lower_line)]
         if not matched:
             continue
         candidates.append(
@@ -768,6 +777,31 @@ def select_deliverable_atoms(
         )
     ranked = sorted(candidates, key=lambda item: (-item[0], item[1]))[:max_atoms]
     return [item[2] for item in ranked]
+
+
+def keyword_matches_line(keyword: str, lower_line: str) -> bool:
+    schedule_ref = parse_schedule_reference_keyword(keyword)
+    if schedule_ref:
+        major, minor = schedule_ref
+        if minor is None:
+            pattern = rf"(?<![a-z0-9])schedule[\s\-_]+0?{major}(?!\d)"
+            return re.search(pattern, lower_line) is not None
+        compact_refs = {f"{major}{minor}", f"{major}{minor:02d}"}
+        separated_pattern = rf"(?<![a-z0-9])schedule[\s\-_]+0?{major}[\.\s\-_]+0?{minor}(?!\d)"
+        compact_pattern = rf"(?<![a-z0-9])schedule[\s\-_]+(?:{'|'.join(sorted(compact_refs, key=len, reverse=True))})(?!\d)"
+        return re.search(separated_pattern, lower_line) is not None or re.search(compact_pattern, lower_line) is not None
+    if re.fullmatch(r"\d+\.\d+", keyword):
+        return re.search(rf"(?<![\d.]){re.escape(keyword)}(?!\d)", lower_line) is not None
+    return keyword in lower_line
+
+
+def parse_schedule_reference_keyword(keyword: str) -> tuple[int, int | None] | None:
+    match = re.fullmatch(r"schedule[\s\-]+(\d+)(?:[\.\s\-]+(\d+))?", keyword)
+    if not match:
+        return None
+    major = int(match.group(1))
+    minor_raw = match.group(2)
+    return major, int(minor_raw) if minor_raw is not None else None
 
 
 def build_deliverable_atom_keywords(filename: str, plan: dict[str, Any]) -> list[str]:

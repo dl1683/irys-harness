@@ -429,6 +429,33 @@ class HarveyQueryTests(unittest.TestCase):
         self.assertIn("Seller certificate", mapped["seller-certificate.docx"]["atoms"][0]["text"])
         self.assertIn("Transfer pricing", mapped["transfer-pricing-memo.docx"]["atoms"][0]["text"])
 
+    def test_deliverable_atom_map_does_not_match_adjacent_schedule_numbers(self) -> None:
+        deliverables = ["schedule-3-02.docx", "schedule-3-20.docx", "seller-certificate.docx"]
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="corporate-ma/draft-disclosure-schedule-preparation",
+            question="Prepare the full disclosure schedule package for the UPA.",
+            context_files=[],
+            answer_schema={"deliverables": deliverables},
+            metadata={"practice_area": "corporate-ma"},
+        )
+        state = RunState(task=task, config=load_config(), documents=[])
+        contract = build_deliverable_contract(state)
+        atom_map = build_deliverable_atom_map(
+            contract,
+            "\n".join(
+                [
+                    "| `doc_0013` | `schedule-3-20.docx` | CGL policy (Reliance National); Products liability sublimit ($1M); D&O policy. |",
+                    "Seller certificate should bring down representations and warranties subject to disclosure schedule exceptions.",
+                ]
+            ),
+        )
+        mapped = atom_map["deliverables"]
+        self.assertEqual(mapped["schedule-3-02.docx"]["atom_count"], 0)
+        self.assertEqual(mapped["schedule-3-20.docx"]["atom_count"], 1)
+        self.assertIn("Reliance National", mapped["schedule-3-20.docx"]["atoms"][0]["text"])
+        self.assertIn("Seller certificate", mapped["seller-certificate.docx"]["atoms"][0]["text"])
+
     def test_funds_route_does_not_match_unrelated_stipulation_text(self) -> None:
         task = BenchmarkTask(
             benchmark="harvey_lab_sample",
