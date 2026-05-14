@@ -950,6 +950,8 @@ def infer_artifact_role(filename: str, haystack: str) -> str:
         return "consent_letter"
     if "outstanding-items" in stem or ("outstanding" in stem and ("items" in stem or "memo" in stem)):
         return "outstanding_items_memo"
+    if is_regulated_filing_filename(stem):
+        return "regulated_form_or_filing"
     if any(term in stem for term in ["memo", "memorandum", "report", "assessment", "analysis", "comparison", "review"]):
         return "analysis_memo"
     if "checklist" in stem or "tracker" in stem or "log" in stem:
@@ -973,6 +975,29 @@ def infer_artifact_role(filename: str, haystack: str) -> str:
     if any(term in haystack for term in ["proxy statement", "form 8-k", "form 10", "quarterly report"]):
         return "regulated_form_or_filing"
     return "analysis_memo"
+
+
+def is_regulated_filing_filename(stem: str) -> bool:
+    normalized = stem.lower().replace("_", "-")
+    return any(
+        term in normalized
+        for term in [
+            "10k",
+            "10-k",
+            "10q",
+            "10-q",
+            "8k",
+            "8-k",
+            "form-8",
+            "form-10",
+            "form-s-1",
+            "form-s-3",
+            "s-1",
+            "s-3",
+            "registration-statement",
+            "prospectus",
+        ]
+    )
 
 
 def infer_drafting_mode(artifact_role: str, suffix: str) -> str:
@@ -1609,6 +1634,10 @@ def build_artifact_required_sections(filename: str, haystack: str) -> list[str]:
     lower = filename.lower()
     stem = Path(lower).stem
     role = infer_artifact_role(filename, haystack)
+    if role == "regulated_form_or_filing":
+        sections = build_regulated_filing_sections(filename, haystack)
+        if sections:
+            return sections
     if role == "issues_memo":
         return [
             "Executive summary",
@@ -1814,6 +1843,63 @@ def build_artifact_required_sections(filename: str, haystack: str) -> list[str]:
             "Drafting notes appendix",
         ]
     return []
+
+
+def build_regulated_filing_sections(filename: str, haystack: str) -> list[str]:
+    combined = f"{filename} {haystack}".lower()
+    if any(term in combined for term in ["10-k", "10k", "form 10", "annual report"]):
+        return [
+            "Form 10-K cover page and filer status",
+            "Part I - Item 1 Business",
+            "Part I - Item 1A Risk Factors",
+            "Part I - Item 1B Unresolved Staff Comments",
+            "Part I - Item 1C Cybersecurity",
+            "Part I - Item 2 Properties",
+            "Part I - Item 3 Legal Proceedings",
+            "Part II - Item 5 Market for Registrant's Common Equity and Related Stockholder Matters",
+            "Part II - Item 7 MD&A results, liquidity, capital resources, trends, and known uncertainties",
+            "Part II - Item 7A Quantitative and Qualitative Disclosures About Market Risk",
+            "Part II - Item 8 Financial Statements and Supplementary Data",
+            "Part II - Item 9A Controls and Procedures",
+            "Part III - Items 10-14 governance, executive compensation, ownership, and related-party disclosure",
+            "Part IV - Item 15 Exhibits and financial statement schedules",
+            "Open drafting notes and unresolved source inconsistencies",
+        ]
+    if any(term in combined for term in ["8-k", "8k", "form 8", "current report"]):
+        return [
+            "Form 8-K cover page",
+            "Item 1.01 Entry into a Material Definitive Agreement",
+            "Item 2.01 Completion of Acquisition or Disposition of Assets",
+            "Item 2.03 Creation of a Direct Financial Obligation",
+            "Item 5.02 Departure, Election, Appointment, or Compensatory Arrangement of Officers and Directors",
+            "Item 7.01 Regulation FD Disclosure if applicable",
+            "Item 8.01 Other Events if applicable",
+            "Item 9.01 Financial Statements and Exhibits",
+            "Signature block",
+            "Exhibit index",
+            "Open drafting notes and unresolved filing issues",
+        ]
+    if any(term in combined for term in ["s-1", "s1", "s-3", "s3", "registration statement", "prospectus"]):
+        return [
+            "Registration statement cover page",
+            "Prospectus summary and offering overview",
+            "Risk factors",
+            "Use of proceeds",
+            "Description of securities",
+            "Selling stockholders or plan of distribution if applicable",
+            "Incorporation by reference or prior filing cross-checks",
+            "Experts, legal matters, and material agreements",
+            "Part II information not required in prospectus",
+            "Exhibit index and undertakings",
+            "Open drafting notes, SEC comment risks, and unresolved source inconsistencies",
+        ]
+    return [
+        "Regulated form cover page",
+        "Required item-by-item disclosure",
+        "Source-supported narrative disclosure",
+        "Exhibits, schedules, signatures, and filing mechanics",
+        "Open drafting notes and unresolved source inconsistencies",
+    ]
 
 
 def infer_schedule_number(stem: str) -> str | None:
@@ -2228,6 +2314,11 @@ For litigation, motion-response, discovery-objection, litigation-hold, and invoi
         document_review_guidance = """
 For privilege-log, relevance-classification, and document-review deliverables, preserve the "Full Document Review Inventory", "Privilege Log Rows", and "Relevance Classification Rows" as substantive work product. The final answer must include one row for every source document, with document ID, filename, date, author/from, recipient/to, relevance tier, privilege status, justification, and production/redaction guidance. Do not replace a document-by-document log with issue-category prose. If a document is partially privileged, state what to redact and what can be produced.
 """
+    regulated_filing_guidance = ""
+    if needs_regulated_filing_guidance(state):
+        regulated_filing_guidance = """
+For SEC, securities, and regulated-form filing deliverables, output the filing artifact in item-by-item form rather than a generic memo. Preserve the form skeleton from the deliverable contract, including 10-K Items 1/1A/1C/3/7/8/9A/15, 8-K Items 1.01/2.01/2.03/5.02/9.01, registration-statement prospectus/Part II/exhibit sections, signatures, exhibit index, and open filing notes when applicable. Put companion analysis in the memo deliverable, but the filing deliverable itself must contain draft disclosure text under the relevant item headings.
+"""
     ip_contract_guidance = ""
     if needs_ip_contract_amendment_digest(state):
         ip_contract_guidance = """
@@ -2382,6 +2473,7 @@ For insurance coverage-determination memoranda, preserve the "High-Priority Insu
 {antitrust_competition_guidance}
 {litigation_guidance}
 {document_review_guidance}
+{regulated_filing_guidance}
 {trusts_estates_guidance}
 {tax_controversy_guidance}
 {credential_gap_guidance}
@@ -3082,6 +3174,43 @@ def needs_document_review_privilege_digest(state: RunState) -> bool:
     ):
         return True
     return "production set" in combined and any(term in combined for term in ["privilege", "relevance", "document review"])
+
+
+def needs_regulated_filing_guidance(state: RunState) -> bool:
+    contract = state.task.answer_schema.get("deliverable_contract") or {}
+    if any(item.get("artifact_role") == "regulated_form_or_filing" for item in contract.get("deliverables", []) or []):
+        return True
+    haystack = lower_task_text(state)
+    filing_review_terms = [
+        "compare-form-10",
+        "compare form 10",
+        "yoy-comparison",
+        "year-over-year",
+        "complete-form-check",
+        "form check",
+        "form-check",
+        "compare-registration-statement",
+        "registration statement against prior filings",
+        "draft-comfort-letter-request",
+        "comfort-letter-request",
+        "comfort letter request",
+    ]
+    if any(term in haystack for term in filing_review_terms):
+        return True
+    drafting_terms = ["draft", "prepare"]
+    form_terms = [
+        "form 10-k",
+        "form 10",
+        "10-k",
+        "form 8-k",
+        "8-k",
+        "form s-1",
+        "form s-3",
+    ]
+    return any(term in haystack for term in drafting_terms) and any(
+        term in haystack
+        for term in form_terms
+    )
 
 
 def build_document_review_privilege_digest(state: RunState) -> str:

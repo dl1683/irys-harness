@@ -22,6 +22,7 @@ from irys_harness.benchmarks.harvey import (
     needs_checklist_worker,
     needs_covenant_calculation_worker,
     needs_document_review_privilege_digest,
+    needs_regulated_filing_guidance,
 )
 from irys_harness.config import load_config
 from irys_harness.state import BenchmarkTask, RunState
@@ -1235,6 +1236,51 @@ class HarveyQueryTests(unittest.TestCase):
         self.assertIn("federal forum", digest)
         self.assertIn("written-consent permission", digest)
         self.assertIn("Series A/B/C preferred", digest)
+
+    def test_regulated_filing_contract_uses_sec_form_item_skeletons(self) -> None:
+        form10_task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="capital-markets/draft-annual-report-on-form-10",
+            question="Draft the FY2024 Form 10-K narrative sections and a companion memorandum.",
+            answer_schema={"deliverables": ["10k-draft-fy2024.docx", "issues-memorandum.docx"]},
+            metadata={"practice_area": "capital-markets"},
+        )
+        form10_state = RunState(task=form10_task, config=load_config())
+        form10_contract = build_deliverable_contract(form10_state)
+        form10_plan = form10_contract["deliverables"][0]
+        self.assertEqual(form10_plan["artifact_role"], "regulated_form_or_filing")
+        self.assertIn("Part I - Item 1C Cybersecurity", form10_plan["required_sections"])
+        self.assertIn("Part II - Item 7 MD&A results, liquidity, capital resources, trends, and known uncertainties", form10_plan["required_sections"])
+        self.assertIn("Part IV - Item 15 Exhibits and financial statement schedules", form10_plan["required_sections"])
+
+        form8_task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="capital-markets/draft-current-report-on-form-8",
+            question="Draft a Form 8-K for the acquisition closing and a cover memo.",
+            answer_schema={"deliverables": ["cover-memo.docx", "form-8k-draft.docx"]},
+            metadata={"practice_area": "capital-markets"},
+        )
+        form8_state = RunState(task=form8_task, config=load_config())
+        form8_contract = build_deliverable_contract(form8_state)
+        form8_plan = form8_contract["deliverables"][1]
+        self.assertEqual(form8_plan["artifact_role"], "regulated_form_or_filing")
+        self.assertIn("Item 1.01 Entry into a Material Definitive Agreement", form8_plan["required_sections"])
+        self.assertIn("Item 2.01 Completion of Acquisition or Disposition of Assets", form8_plan["required_sections"])
+        self.assertIn("Item 9.01 Financial Statements and Exhibits", form8_plan["required_sections"])
+        form8_state.task.answer_schema["deliverable_contract"] = form8_contract
+        prompt = build_synthesis_prompt(form8_state)
+        self.assertIn("For SEC, securities, and regulated-form filing deliverables", prompt)
+
+        underwriting_task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="capital-markets/analyze-counterparty-markup-of-underwriting-agreement",
+            question="Analyze an underwriting agreement markup against the prospectus.",
+            answer_schema={"deliverables": ["redline-analysis-memo.docx"]},
+            metadata={"practice_area": "capital-markets"},
+        )
+        underwriting_state = RunState(task=underwriting_task, config=load_config())
+        underwriting_state.task.answer_schema["deliverable_contract"] = build_deliverable_contract(underwriting_state)
+        self.assertFalse(needs_regulated_filing_guidance(underwriting_state))
 
     def test_bankruptcy_distribution_digest_preserves_class_and_calculation_rows(self) -> None:
         task = BenchmarkTask(
