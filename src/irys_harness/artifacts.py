@@ -28,7 +28,7 @@ def render_deliverables(
         if path.suffix.lower() == ".xlsx":
             render_xlsx(path, title=title, deliverable=filename, packet=packet)
         else:
-            render_docx(path, title=title, deliverable=filename, packet=packet)
+            render_docx(path, title=title, deliverable=filename, packet=packet, deliverables=deliverables)
         artifacts.append(
             {
                 "filename": filename,
@@ -40,7 +40,14 @@ def render_deliverables(
     return artifacts
 
 
-def render_docx(path: Path, *, title: str, deliverable: str, packet: dict[str, Any]) -> None:
+def render_docx(
+    path: Path,
+    *,
+    title: str,
+    deliverable: str,
+    packet: dict[str, Any],
+    deliverables: list[str] | None = None,
+) -> None:
     doc = Document()
     doc.add_heading(safe_text(title), level=1)
     doc.add_paragraph(safe_text(f"Deliverable: {deliverable}"))
@@ -54,6 +61,11 @@ def render_docx(path: Path, *, title: str, deliverable: str, packet: dict[str, A
         doc.add_heading("Draft Work Product", level=2)
         if is_probably_encoded_artifact(str(draft_answer)):
             draft_answer = packet.get("plain_text_fallback") or packet.get("cheap_worker_summary") or ""
+        draft_answer = extract_deliverable_draft_text(
+            str(draft_answer),
+            deliverable=deliverable,
+            deliverables=deliverables or [deliverable],
+        )
         for block in str(draft_answer).split("\n\n"):
             if block.strip():
                 doc.add_paragraph(safe_text(block.strip()))
@@ -112,6 +124,60 @@ def render_xlsx(path: Path, *, title: str, deliverable: str, packet: dict[str, A
             source_text=text,
         )
     workbook.save(path)
+
+
+def extract_deliverable_draft_text(text: str, *, deliverable: str, deliverables: list[str]) -> str:
+    """Return the filename-labeled section for a deliverable when synthesis emitted one."""
+    if not text.strip():
+        return text
+    lines = text.splitlines()
+    headings: list[tuple[int, str]] = []
+    for index, line in enumerate(lines):
+        matched = match_deliverable_heading(line, deliverables)
+        if matched:
+            headings.append((index, matched))
+    start_indexes = [index for index, matched in headings if matched.lower() == deliverable.lower()]
+    if not start_indexes:
+        return text
+    start = start_indexes[0]
+    end = len(lines)
+    for index, matched in headings:
+        if index > start and matched.lower() != deliverable.lower():
+            end = index
+            break
+    section = "\n".join(lines[start:end]).strip()
+    return section or text
+
+
+def match_deliverable_heading(line: str, deliverables: list[str]) -> str | None:
+    normalized = normalize_deliverable_heading(line)
+    if not normalized or len(normalized) > 200:
+        return None
+    for deliverable in deliverables:
+        name = deliverable.lower()
+        patterns = [
+            name,
+            f"deliverable: {name}",
+            f"file: {name}",
+            f"filename: {name}",
+            f"artifact: {name}",
+        ]
+        if normalized in patterns or any(normalized.startswith(f"{pattern} ") for pattern in patterns):
+            return deliverable
+    return None
+
+
+def normalize_deliverable_heading(line: str) -> str:
+    cleaned = line.strip()
+    if not cleaned:
+        return ""
+    if len(cleaned) > 240:
+        return ""
+    cleaned = re.sub(r"^\s{0,3}(?:#{1,6}|[-*+>]|\d+[.)])\s*", "", cleaned)
+    cleaned = cleaned.replace("**", "").replace("__", "").strip()
+    cleaned = cleaned.strip("`'\" ")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip(":- ").lower()
 
 
 def find_deliverable_plan(packet: dict[str, Any], deliverable: str) -> dict[str, Any] | None:

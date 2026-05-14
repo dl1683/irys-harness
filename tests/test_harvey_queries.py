@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 from irys_harness.benchmarks.harvey import (
@@ -10,11 +11,15 @@ from irys_harness.benchmarks.harvey import (
     build_covenant_calculation_worker_prompt,
     build_deliverable_contract,
     build_deliverable_atom_map,
+    build_self_contained_deliverable_coverage_pack,
     build_document_review_privilege_digest,
     build_pre_synthesis_packet_creator_prompt,
     build_synthesis_prompt,
     build_task_family_digest,
+    build_workbook_sheet_plan,
+    build_artifact_required_sections,
     count_packet_items,
+    infer_artifact_role,
     is_encoded_artifact_answer,
     is_anemic_synthesis_answer,
     build_anemic_synthesis_fallback_answer,
@@ -23,6 +28,7 @@ from irys_harness.benchmarks.harvey import (
     build_provision_comparison_worker_prompt,
     needs_checklist_worker,
     needs_covenant_calculation_worker,
+    needs_numeric_audit_worker,
     needs_document_review_privilege_digest,
     needs_regulated_filing_guidance,
     parse_pre_synthesis_packet_creator_output,
@@ -793,13 +799,36 @@ class HarveyQueryTests(unittest.TestCase):
             )
         )
 
-    def test_pre_synthesis_packet_creator_runs_for_multi_file_package(self) -> None:
+    def test_pre_synthesis_packet_creator_skips_dense_multi_file_package(self) -> None:
         task = BenchmarkTask(
             benchmark="harvey_lab_sample",
             task_id="corporate-ma/draft-spa-drafting",
             question="Draft the NovaBridge stock purchase agreement package.",
             context_files=[],
             answer_schema={"deliverables": ["stock-purchase-agreement.docx", "drafting-memo.docx"], "criteria_count": 149},
+            metadata={"practice_area": "corporate-ma"},
+        )
+        state = RunState(task=task, config=load_config(), documents=[])
+        contract = build_deliverable_contract(state)
+        reasons = pre_synthesis_packet_creator_activation_reasons(
+            state,
+            deliverable_contract=contract,
+            atom_map={},
+        )
+        self.assertEqual(reasons, [])
+        self.assertIn(
+            "dense_artifact_full_context_synthesis_path",
+            pre_synthesis_packet_creator_skip_reasons(state, deliverable_contract=contract),
+        )
+        self.assertFalse(should_run_pre_synthesis_packet_creator(state, deliverable_contract=contract, atom_map={}))
+
+    def test_pre_synthesis_packet_creator_still_runs_for_light_multi_file_analysis_package(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="corporate-ma/analyze-board-materials",
+            question="Prepare the requested analysis report and executive summary.",
+            context_files=[],
+            answer_schema={"deliverables": ["analysis-report.docx", "executive-summary.docx"], "criteria_count": 42},
             metadata={"practice_area": "corporate-ma"},
         )
         state = RunState(task=task, config=load_config(), documents=[])
@@ -857,6 +886,8 @@ class HarveyQueryTests(unittest.TestCase):
         self.assertIn("unrelated Meridian deal is $458M", prompt)
         self.assertIn("Remove or demote distracting material", prompt)
         self.assertIn("do not arbitrarily compress away row-level evidence", prompt)
+        self.assertIn("coverage packet", prompt)
+        self.assertIn("must-include drafting requirements", prompt)
         self.assertIn("Do not draft the final answer", prompt)
 
     def test_parse_pre_synthesis_packet_creator_output_accepts_fenced_json(self) -> None:
@@ -944,6 +975,159 @@ class HarveyQueryTests(unittest.TestCase):
         self.assertNotIn("Polluted broad worker packet", prompt)
         self.assertNotIn("For antitrust, HSR", prompt)
         self.assertNotIn("Evidence packet prepared by the worker tier", prompt)
+
+    def test_synthesis_prompt_adds_worker_safety_net_for_dense_artifact_packet(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="real-estate/draft-commercial-lease-agreement",
+            question="Draft a commercial lease and drafting memorandum.",
+            context_files=[],
+            answer_schema={"deliverables": ["lease-agreement.docx", "drafting-memorandum.docx"], "criteria_count": 96},
+            metadata={"practice_area": "real-estate"},
+        )
+        state = RunState(task=task, config=load_config(), documents=[])
+        contract = build_deliverable_contract(state)
+        state.task.answer_schema["deliverable_contract"] = contract
+        state.final_packet = {
+            "deliverable_contract": contract,
+            "package_plan": contract["package_plan"],
+            "cheap_worker_summary": "Grease trap row. Rent Commencement Date row. CAM cap row.",
+            "pre_synthesis_packet": {
+                "task_focus": "Draft the requested lease package.",
+                "selected_evidence": ["Only four broad themes."],
+            },
+            "pre_synthesis_packet_diagnostics": {
+                "activated": True,
+                "worker_packet_chars": 90000,
+                "artifact_appendix_chars": 50000,
+                "parsed_packet_chars": 4500,
+                "selected_evidence_count": 4,
+            },
+            "artifact_appendix": "Structured lease rows.",
+            "verified_evidence": [],
+        }
+        prompt = build_synthesis_prompt(state)
+        self.assertIn("Worker packet safety net:", prompt)
+        self.assertIn("Grease trap row", prompt)
+        self.assertIn("Rent Commencement Date row", prompt)
+
+    def test_self_contained_coverage_pack_preserves_shared_rows_for_split_artifacts(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="real-estate/draft-commercial-lease-negotiation",
+            question="Draft a commercial lease and drafting memorandum.",
+            context_files=[],
+            answer_schema={"deliverables": ["drafting-memorandum.docx", "lease-agreement.docx"], "criteria_count": 96},
+            metadata={"practice_area": "real-estate"},
+        )
+        state = RunState(task=task, config=load_config(), documents=[])
+        contract = build_deliverable_contract(state)
+        source_text = "\n".join(
+            [
+                json.dumps(contract, indent=2, sort_keys=True),
+                "Critical free rent row: original lease had 8 months; landlord markup reduced it to 5 months.",
+                "High TIA retainage row: 15% of $4,579,000 equals $686,850 retained until certificate of occupancy.",
+                "lease-agreement.docx must include operative rent, TIA, assignment, casualty, default, and arbitration clauses.",
+                "drafting-memorandum.docx must include issue severity, evidence, risk, and recommended response.",
+            ]
+        )
+        atom_map = build_deliverable_atom_map(contract, source_text)
+        coverage_pack = build_self_contained_deliverable_coverage_pack(contract, source_text, atom_map=atom_map)
+
+        self.assertEqual(coverage_pack["source"], "deterministic_self_contained_deliverable_coverage")
+        entries = {entry["filename"]: entry for entry in coverage_pack["deliverables"]}
+        self.assertIn("drafting-memorandum.docx", entries)
+        self.assertIn("lease-agreement.docx", entries)
+        self.assertIn("stand on its own", " ".join(coverage_pack["policy"]))
+        lease_rows = json.dumps(entries["lease-agreement.docx"], sort_keys=True)
+        self.assertIn("lease-agreement.docx", lease_rows)
+        lease_row_text = " ".join(row["text"] for row in entries["lease-agreement.docx"]["file_specific_rows"])
+        self.assertNotIn("artifact_goal", lease_row_text)
+        self.assertIn("free rent", json.dumps(entries["drafting-memorandum.docx"], sort_keys=True).lower())
+
+    def test_slim_synthesis_prompt_includes_self_contained_coverage_pack(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="real-estate/draft-commercial-lease-negotiation",
+            question="Draft a commercial lease and drafting memorandum.",
+            context_files=[],
+            answer_schema={"deliverables": ["drafting-memorandum.docx", "lease-agreement.docx"], "criteria_count": 96},
+            metadata={"practice_area": "real-estate"},
+        )
+        state = RunState(task=task, config=load_config(), documents=[])
+        contract = build_deliverable_contract(state)
+        coverage_pack = {
+            "version": 1,
+            "deliverables": [
+                {
+                    "filename": "lease-agreement.docx",
+                    "self_contained_requirement": "Include operative lease provisions and shared issue context.",
+                    "shared_rows_to_repeat_if_relevant": [{"text": "Critical free rent row"}],
+                }
+            ],
+        }
+        state.final_packet = {
+            "deliverable_contract": contract,
+            "package_plan": contract["package_plan"],
+            "pre_synthesis_packet": {
+                "task_focus": "Draft the requested lease package.",
+                "selected_evidence": ["Lease package rows."],
+            },
+            "deliverable_coverage_pack": coverage_pack,
+            "verified_evidence": [],
+        }
+        prompt = build_synthesis_prompt(state)
+        self.assertIn("Self-contained deliverable coverage pack:", prompt)
+        self.assertIn("Critical free rent row", prompt)
+
+    def test_stipulation_filename_is_treated_as_court_order_artifact(self) -> None:
+        haystack = "Draft a cash collateral stipulation and counsel memorandum for a Chapter 11 case."
+        self.assertEqual(infer_artifact_role("cash-collateral-stipulation.docx", haystack), "court_stipulation_or_order")
+        sections = build_artifact_required_sections("cash-collateral-stipulation.docx", haystack)
+        self.assertIn("Caption and court information", sections)
+        self.assertIn("Operative stipulations or ordered paragraphs", sections)
+
+    def test_redlined_rider_is_treated_as_operative_instrument(self) -> None:
+        haystack = "Prepare redlined lease and rider documents for a tenant-side negotiation package."
+        self.assertEqual(infer_artifact_role("redlined-rider.docx", haystack), "operative_instrument")
+
+    def test_comparison_matrix_workbook_preserves_issue_matrix_shape(self) -> None:
+        sheets = build_workbook_sheet_plan(
+            "comparison-matrix.xlsx",
+            "Review a lease package with calculations, exceptions, and issue comparisons.",
+        )
+        sheet_names = [sheet["name"] for sheet in sheets]
+        self.assertIn("Summary Dashboard", sheet_names)
+        self.assertIn("Issue Matrix", sheet_names)
+        self.assertIn("Calculations", sheet_names)
+        self.assertIn("Exceptions", sheet_names)
+
+    def test_numeric_audit_worker_runs_for_non_covenant_markup_math(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="intellectual-property/analyze-counterparty-markup-of-joint-development-agreement",
+            question="Analyze counterparty markup of joint development agreement.",
+            context_files=[],
+            answer_schema={"deliverables": ["markup-analysis.docx"]},
+            metadata={"practice_area": "intellectual-property"},
+        )
+        state = RunState(
+            task=task,
+            config=load_config(),
+            documents=[],
+            chunks=[
+                {
+                    "doc_id": "doc_1",
+                    "chunk_id": "c1",
+                    "text": "Cascade states a 50/50 cost split of a $94M budget but lists Cascade share as $23.5M. Royalty rates change from 4.5% to 6.5%.",
+                }
+            ],
+        )
+        self.assertTrue(needs_numeric_audit_worker(state))
+        prompt = build_numeric_audit_worker_prompt(state)
+        self.assertIn("Comparison/delta table", prompt)
+        self.assertIn("internal arithmetic inconsistencies", prompt)
+        self.assertIn("contract markups", prompt)
 
     def test_deliverable_atom_map_allocates_package_source_lines(self) -> None:
         task = BenchmarkTask(

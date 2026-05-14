@@ -7,7 +7,11 @@ from pathlib import Path
 from docx import Document
 from openpyxl import load_workbook
 
-from irys_harness.artifacts import apply_deliverable_coverage_audit, render_deliverables
+from irys_harness.artifacts import (
+    apply_deliverable_coverage_audit,
+    extract_deliverable_draft_text,
+    render_deliverables,
+)
 
 
 class ArtifactRenderingTests(unittest.TestCase):
@@ -140,6 +144,45 @@ class ArtifactRenderingTests(unittest.TestCase):
         self.assertIn("Bringdown representations and warranties", seller_text)
         self.assertIn("Seller certificate should bring down the reps", seller_text)
         self.assertNotIn("Deliverable-Specific Coverage Fill", mac_text)
+
+    def test_docx_renderer_writes_matching_filename_section_to_each_deliverable(self) -> None:
+        packet = {
+            "draft_answer": """# seller-certificate.docx
+
+Seller-only certificate text.
+
+# mac-certificate.docx
+
+MAC-only certificate text.
+""",
+            "verified_evidence": [],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            artifacts = render_deliverables(
+                output_dir=tmp,
+                deliverables=["seller-certificate.docx", "mac-certificate.docx"],
+                title="Disclosure Package",
+                packet=packet,
+            )
+            seller_doc = Document(Path(artifacts[0]["path"]))
+            seller_text = "\n".join(paragraph.text for paragraph in seller_doc.paragraphs)
+            mac_doc = Document(Path(artifacts[1]["path"]))
+            mac_text = "\n".join(paragraph.text for paragraph in mac_doc.paragraphs)
+        self.assertIn("Seller-only certificate text", seller_text)
+        self.assertNotIn("MAC-only certificate text", seller_text)
+        self.assertIn("MAC-only certificate text", mac_text)
+        self.assertNotIn("Seller-only certificate text", mac_text)
+
+    def test_deliverable_section_extraction_preserves_global_draft_without_heading(self) -> None:
+        text = "One global answer without exact filename sections."
+        self.assertEqual(
+            extract_deliverable_draft_text(
+                text,
+                deliverable="memo.docx",
+                deliverables=["memo.docx", "schedule.docx"],
+            ),
+            text,
+        )
 
     def test_xlsx_renderer_keeps_cells_evaluator_sized(self) -> None:
         packet = {

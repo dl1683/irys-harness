@@ -266,6 +266,7 @@ class HarveyLabAdapter(BenchmarkAdapter):
                     max_output_tokens=9000,
                 )
                 state.metrics.add_call(covenant_result.usage)
+            if needs_numeric_audit_worker(state) or covenant_result is not None:
                 numeric_prompt = build_numeric_audit_worker_prompt(state)
                 numeric_result = router.generate(
                     module="extraction",
@@ -306,13 +307,13 @@ class HarveyLabAdapter(BenchmarkAdapter):
                         "summary": covenant_result.text,
                     }
                 )
-                if numeric_result is not None:
-                    state.extraction_records.append(
-                        {
-                            "mode": "cheap_worker_numeric_audit",
-                            "summary": numeric_result.text,
-                        }
-                    )
+            if numeric_result is not None:
+                state.extraction_records.append(
+                    {
+                        "mode": "cheap_worker_numeric_audit",
+                        "summary": numeric_result.text,
+                    }
+                )
             worker_sections = [
             ]
             if numeric_digest:
@@ -376,13 +377,13 @@ class HarveyLabAdapter(BenchmarkAdapter):
                         covenant_result.text,
                     ]
                 )
-                if numeric_result is not None:
-                    worker_sections.extend(
-                        [
-                            "## Numeric audit analysis",
-                            numeric_result.text,
-                        ]
-                    )
+            if numeric_result is not None:
+                worker_sections.extend(
+                    [
+                        "## Numeric audit analysis",
+                        numeric_result.text,
+                    ]
+                )
 
             extraction_prompt = build_live_extraction_prompt(state, retrieved_dicts)
             extraction_result = router.generate(
@@ -423,6 +424,19 @@ class HarveyLabAdapter(BenchmarkAdapter):
                     {
                         "mode": "deterministic_deliverable_atom_map",
                         "summary": atom_map,
+                    }
+                )
+            coverage_pack = build_self_contained_deliverable_coverage_pack(
+                deliverable_contract,
+                "\n\n".join([combined_worker_summary, appendix]),
+                atom_map=atom_map,
+            )
+            if coverage_pack:
+                state.final_packet["deliverable_coverage_pack"] = coverage_pack
+                state.extraction_records.append(
+                    {
+                        "mode": "deterministic_self_contained_deliverable_coverage_pack",
+                        "summary": coverage_pack,
                     }
                 )
             packet_creator_reasons = pre_synthesis_packet_creator_activation_reasons(
@@ -823,6 +837,170 @@ def build_deliverable_atom_map(
     }
 
 
+def build_self_contained_deliverable_coverage_pack(
+    deliverable_contract: dict[str, Any],
+    source_text: str,
+    *,
+    atom_map: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    deliverables = list(deliverable_contract.get("deliverables", []) or [])
+    package_plan = deliverable_contract.get("package_plan", {}) or {}
+    if len(deliverables) <= 1 and not package_plan.get("requires_file_by_file_allocation"):
+        return {}
+    if not source_text.strip():
+        return {}
+    package_rows = select_package_wide_coverage_rows(source_text, max_rows=10)
+    mapped_atoms = (atom_map or {}).get("deliverables", {}) if isinstance(atom_map, dict) else {}
+    file_entries: list[dict[str, Any]] = []
+    for plan in deliverables:
+        filename = str(plan.get("filename") or "")
+        if not filename:
+            continue
+        existing_atoms = []
+        if isinstance(mapped_atoms, dict):
+            existing_atoms = list((mapped_atoms.get(filename) or {}).get("atoms", []) or [])
+        if existing_atoms:
+            atoms = existing_atoms[:8]
+        else:
+            atoms = select_deliverable_atoms(filename, plan, source_text, max_atoms=8)
+        role_rows = select_atoms_for_keywords(
+            build_role_coverage_keywords(plan),
+            source_text,
+            max_atoms=6,
+        )
+        section_names = [str(section) for section in plan.get("required_sections", []) or []]
+        file_entries.append(
+            {
+                "filename": filename,
+                "artifact_role": plan.get("artifact_role"),
+                "drafting_mode": plan.get("drafting_mode"),
+                "artifact_goal": plan.get("artifact_goal"),
+                "required_sections": section_names[:14],
+                "self_contained_requirement": build_self_contained_requirement(plan),
+                "file_specific_rows": atoms,
+                "role_or_section_rows": role_rows,
+                "shared_rows_to_repeat_if_relevant": package_rows[:6],
+                "coverage_risk": "high" if not atoms and not role_rows else "medium" if len(atoms) + len(role_rows) < 3 else "low",
+            }
+        )
+    if not file_entries:
+        return {}
+    return {
+        "version": 1,
+        "source": "deterministic_self_contained_deliverable_coverage",
+        "package_kind": package_plan.get("package_kind"),
+        "policy": [
+            "Each filename section must stand on its own.",
+            "Repeat shared facts, numbers, definitions, party names, issue rows, and drafting notes inside every deliverable that depends on them.",
+            "Do not rely on a companion memo, appendix, schedule, or workbook to satisfy another deliverable's operative content.",
+        ],
+        "deliverables": file_entries,
+    }
+
+
+def build_role_coverage_keywords(plan: dict[str, Any]) -> list[str]:
+    role = str(plan.get("artifact_role") or "").replace("_", " ")
+    mode = str(plan.get("drafting_mode") or "").replace("_", " ")
+    sections = " ".join(str(section) for section in plan.get("required_sections", []) or [])
+    goal = str(plan.get("artifact_goal") or "")
+    keywords = deliverable_keywords(str(plan.get("filename") or ""), plan)
+    for text in [role, mode, sections, goal]:
+        keywords.extend(token for token in re.findall(r"[a-z][a-z0-9]{3,}", text.lower()) if token)
+    role_key = str(plan.get("artifact_role") or "")
+    if role_key in {"operative_instrument", "legal_agreement", "limited_partnership_agreement", "fee_letter"}:
+        keywords.extend(["clause", "section", "provision", "drafting", "operative", "signature", "schedule"])
+    elif role_key in {"court_motion", "court_stipulation_or_order", "court_filing_or_response"}:
+        keywords.extend(["caption", "relief", "order", "motion", "argument", "facts", "reservation", "signature"])
+    elif role_key in {"issues_memo", "analysis_memo"}:
+        keywords.extend(["issue", "risk", "severity", "recommendation", "analysis", "source", "remediation"])
+    elif role_key in {"checklist_tracker", "data_room_mapping", "outstanding_items_memo"}:
+        keywords.extend(["item", "checklist", "status", "missing", "owner", "deadline", "source"])
+    elif role_key.startswith("bankruptcy_"):
+        keywords.extend(["debtor", "creditor", "claim", "asset", "liability", "schedule", "sofa", "petition"])
+    return dedupe_strings([keyword for keyword in keywords if len(keyword) >= 4])
+
+
+def select_package_wide_coverage_rows(source_text: str, *, max_rows: int) -> list[dict[str, Any]]:
+    keywords = [
+        "critical",
+        "high",
+        "must",
+        "required",
+        "do not omit",
+        "required treatment",
+        "recommended",
+        "recommendation",
+        "source-specific",
+        "exact",
+        "formula",
+        "calculation",
+        "threshold",
+        "deadline",
+        "signature",
+        "missing",
+        "omitted",
+        "row",
+    ]
+    return select_atoms_for_keywords(keywords, source_text, max_atoms=max_rows)
+
+
+def build_self_contained_requirement(plan: dict[str, Any]) -> str:
+    role = str(plan.get("artifact_role") or "")
+    if role in {"operative_instrument", "legal_agreement", "limited_partnership_agreement", "fee_letter"}:
+        return "Include operative clause text plus any source-backed drafting notes needed to understand why the provisions are drafted that way."
+    if role in {"court_motion", "court_stipulation_or_order", "court_filing_or_response"}:
+        return "Include caption, relief or ordered terms, factual support, procedural mechanics, reservations, and signature mechanics inside this filing."
+    if role in {"issues_memo", "analysis_memo"}:
+        return "Include the issue matrix, evidence, severity or priority, recommendation, and any cross-deliverable facts needed to make the memo stand alone."
+    if role in {"checklist_tracker", "data_room_mapping", "outstanding_items_memo"}:
+        return "Include row-level items with source, status, gap, responsible action, and deadline or owner when available."
+    if role.endswith("_workbook"):
+        return "Include workbook rows with source inputs, calculations or comparisons, conclusions, and support."
+    if role.startswith("bankruptcy_"):
+        return "Include form-style rows and exact debtor, creditor, asset, liability, claim, transfer, schedule, and signature facts relevant to this form."
+    return "Include all shared source facts and file-specific rows needed for this deliverable to be understood without reading a companion artifact."
+
+
+DENSE_ARTIFACT_FULL_CONTEXT_ROLES = {
+    "operative_instrument",
+    "legal_agreement",
+    "limited_partnership_agreement",
+    "fee_letter",
+    "private_placement_memorandum",
+    "compliance_manual",
+    "regulated_form_or_filing",
+    "court_motion",
+    "court_stipulation_or_order",
+    "court_filing_or_response",
+    "checklist_tracker",
+    "data_room_mapping",
+    "outstanding_items_memo",
+    "seller_certificate",
+    "mac_certificate",
+    "consent_letter",
+    "opinion_outline",
+    "disclosure_schedule",
+    "disclosure_schedule_master",
+}
+
+
+def needs_dense_artifact_full_context_synthesis(deliverable_contract: dict[str, Any]) -> bool:
+    deliverables = list(deliverable_contract.get("deliverables", []) or [])
+    package_plan = deliverable_contract.get("package_plan", {}) or {}
+    if len(deliverables) <= 1 and not package_plan.get("requires_file_by_file_allocation"):
+        return False
+    roles = {
+        str(item.get("artifact_role") or "")
+        for item in deliverables
+        if isinstance(item, dict)
+    }
+    if not roles:
+        return False
+    if any(role.endswith("_workbook") or role.startswith("bankruptcy_") for role in roles):
+        return True
+    return bool(roles & DENSE_ARTIFACT_FULL_CONTEXT_ROLES)
+
+
 def should_run_pre_synthesis_packet_creator(
     state: RunState,
     *,
@@ -874,6 +1052,8 @@ def pre_synthesis_packet_creator_skip_reasons(
     package_plan = deliverable_contract.get("package_plan", {}) or {}
     if len(deliverables) <= 1 and not package_plan.get("requires_file_by_file_allocation"):
         reasons.append("single_deliverable_legacy_path")
+    if needs_dense_artifact_full_context_synthesis(deliverable_contract):
+        reasons.append("dense_artifact_full_context_synthesis_path")
     return reasons
 
 
@@ -882,6 +1062,7 @@ def build_pre_synthesis_packet_creator_prompt(state: RunState) -> str:
     worker_packet = str(packet.get("cheap_worker_summary") or "")
     artifact_appendix = str(packet.get("artifact_appendix") or "")
     atom_map = packet.get("deliverable_atom_map") or {}
+    coverage_pack = packet.get("deliverable_coverage_pack") or {}
     deliverable_contract = packet.get("deliverable_contract") or state.task.answer_schema.get("deliverable_contract") or {}
     documents = [
         {
@@ -900,12 +1081,19 @@ def build_pre_synthesis_packet_creator_prompt(state: RunState) -> str:
         "deliverable_contract": deliverable_contract,
         "package_plan": packet.get("package_plan") or deliverable_contract.get("package_plan", {}),
         "deliverable_atom_map": atom_map,
+        "deliverable_coverage_pack": coverage_pack,
     }
     return f"""Create the clean packet for final synthesis.
 
 The final synthesis model is strong. Do not teach it legal drafting. Give it the original task focus, exact deliverables, useful evidence, and any task-specific output constraints. Remove or demote distracting material. Do not draft the final answer.
 
 Important: do not arbitrarily compress away row-level evidence. The goal is to remove wrong-scope material, not to make the packet tiny. Preserve enough facts, issue rows, calculations, document references, and file-specific atoms for the final model to produce the requested work product.
+
+For dense artifact tasks, selected_evidence must be a coverage packet, not a handful of themes. Preserve every material row from deterministic digests, artifact matrices, checklist rows, numeric audit rows, and deliverable atom maps unless it is clearly wrong-scope. If there are many rows, group them compactly by deliverable and issue instead of omitting them.
+
+For operative instruments, stipulations, orders, pleadings, agreements, leases, certificates, forms, or redline markups, convert issue findings into must-include drafting requirements. The packet must say which provisions, clauses, recitals, schedules, signatures, calculations, and replacement-language points belong in the actual artifact, not only in a memo.
+
+When a deliverable_coverage_pack is present, use it as the file-by-file coverage floor. Preserve every file-specific row and repeat shared rows inside each deliverable that needs them so cleanly separated rendered artifacts remain self-contained.
 
 Return JSON only with these keys:
 - task_focus: short restatement of the actual assignment.
@@ -1027,10 +1215,17 @@ def select_atoms_for_keywords(
     if not keywords:
         return []
     candidates: list[tuple[int, int, dict[str, Any]]] = []
+    seen_lines: set[str] = set()
     for index, raw_line in enumerate(source_text.splitlines()):
         line = " ".join(raw_line.strip().split())
         if len(line) < 32:
             continue
+        if is_internal_contract_or_control_line(line):
+            continue
+        line_key = line.lower()
+        if line_key in seen_lines:
+            continue
+        seen_lines.add(line_key)
         lower_line = line.lower()
         matched = [keyword for keyword in keywords if keyword_matches_line(keyword, lower_line)]
         if not matched:
@@ -1047,6 +1242,30 @@ def select_atoms_for_keywords(
         )
     ranked = sorted(candidates, key=lambda item: (-item[0], item[1]))[:max_atoms]
     return [item[2] for item in ranked]
+
+
+def is_internal_contract_or_control_line(line: str) -> bool:
+    stripped = line.strip()
+    lower = stripped.lower()
+    if not stripped:
+        return True
+    if re.match(
+        r'^"?('
+        r"artifact_goal|artifact_role|drafting_mode|filename|package_kind|deliverable_count|"
+        r"required_section_count|required_sections|workbook_sheet_count|workbook_sheets|"
+        r"deliverable_roles|shared_state_policy|deliverable_contract|package_plan|"
+        r"mode|source|version|coverage_risk|atom_count|max_atoms_per_deliverable"
+        r')"?\s*:',
+        lower,
+    ):
+        return True
+    if lower in {"{", "}", "[", "]", "},", "],"}:
+        return True
+    if stripped.startswith('"') and (stripped.endswith('"') or stripped.endswith('",')):
+        return True
+    if lower.startswith('"artifact_goal":') or lower.startswith("'artifact_goal':"):
+        return True
+    return False
 
 
 def keyword_matches_line(keyword: str, lower_line: str) -> bool:
@@ -1115,6 +1334,10 @@ def build_deliverable_atom_keywords(filename: str, plan: dict[str, Any]) -> list
         keywords.extend(["consent", "landlord", "lease"])
     elif artifact_role == "data_room_mapping":
         keywords.extend(["data room", "mapping", "source document"])
+    elif artifact_role == "court_stipulation_or_order":
+        keywords.extend(["stipulation", "agreed order", "proposed order", "caption", "recitals", "operative paragraphs"])
+    elif artifact_role == "court_filing_or_response":
+        keywords.extend(["caption", "relief", "argument", "facts", "legal standard", "signature"])
     elif artifact_role == "bankruptcy_petition_form":
         keywords.extend(["voluntary petition", "form 201", "chapter 11", "debtor", "assets", "liabilities", "creditors"])
     elif artifact_role == "bankruptcy_statement_of_financial_affairs":
@@ -1201,7 +1424,14 @@ def infer_artifact_role(filename: str, haystack: str) -> str:
         return "regulated_form_or_filing"
     if "motion" in stem:
         return "court_motion"
-    if any(term in stem for term in ["memo", "memorandum", "report", "assessment", "analysis", "comparison", "review"]):
+    analysis_like_stem = any(term in stem for term in ["memo", "memorandum", "report", "assessment", "analysis", "comparison", "review", "markup"])
+    if (any(term in stem for term in ["stipulation", "agreed-order", "proposed-order"]) or stem.endswith("-order")) and not analysis_like_stem:
+        return "court_stipulation_or_order"
+    if any(term in stem for term in ["complaint", "answer", "brief", "objection", "application"]):
+        return "court_filing_or_response"
+    if any(term in stem for term in ["redline", "redlined", "rider"]) and not analysis_like_stem:
+        return "operative_instrument"
+    if analysis_like_stem:
         return "analysis_memo"
     if "checklist" in stem or "tracker" in stem or "log" in stem:
         return "checklist_tracker"
@@ -1309,7 +1539,7 @@ def infer_drafting_mode(artifact_role: str, suffix: str) -> str:
         return "consent_letter_drafting"
     if artifact_role in {"opinion_outline", "transfer_pricing_memo"}:
         return "issue_analysis"
-    if artifact_role == "court_motion":
+    if artifact_role in {"court_motion", "court_stipulation_or_order", "court_filing_or_response"}:
         return "court_filing_drafting"
     if artifact_role in {
         "bankruptcy_petition_form",
@@ -1344,6 +1574,8 @@ def build_artifact_goal(filename: str, artifact_role: str) -> str:
         "compliance_manual": "Draft operational policy/procedure sections, roles, controls, monitoring, escalation, and recordkeeping.",
         "regulated_form_or_filing": "Draft the requested filing or form body with item headings and source-supported disclosure text.",
         "court_motion": "Draft the actual court motion or pleading body with requested relief, factual background, legal basis, procedural mechanics, and signature block.",
+        "court_stipulation_or_order": "Draft the actual stipulation or proposed order with caption, recitals, operative paragraphs, relief, reservations, and signature mechanics.",
+        "court_filing_or_response": "Draft the actual pleading, brief, application, objection, response, or litigation filing body requested by the task.",
         "seller_certificate": "Draft the seller certificate as a certification artifact with bringdown statements, exceptions, and signature mechanics.",
         "mac_certificate": "Draft the no-MAC certificate with source-supported period coverage, exceptions, and officer certification mechanics.",
         "opinion_outline": "Create an opinion outline keyed to requested legal opinions, assumptions, reviewed documents, qualifications, and open diligence.",
@@ -1597,6 +1829,15 @@ def has_tax_controversy_terms(text: str) -> bool:
 
 def build_workbook_sheet_plan(filename: str, haystack: str) -> list[dict[str, str]]:
     file_lower = filename.lower()
+    if "comparison-matrix" in file_lower:
+        return sheet_plans(
+            [
+                ("Summary Dashboard", "Issue counts, priority totals, and total quantified impact"),
+                ("Issue Matrix", "Issue-by-issue comparison, gap, risk, and required treatment"),
+                ("Calculations", "Formula-level calculations and quantified impacts"),
+                ("Exceptions", "Exceptions, caveats, and disputed inputs"),
+            ]
+        )
     if "financial-statements" in file_lower:
         return sheet_plans(
             [
@@ -2142,6 +2383,31 @@ def build_artifact_required_sections(filename: str, haystack: str) -> list[str]:
             "Requested order or relief",
             "Conclusion",
             "Signature block",
+            "Source citations",
+        ]
+    if role == "court_stipulation_or_order":
+        return [
+            "Caption and court information",
+            "Case number, judge, and parties",
+            "Recitals and stipulated facts",
+            "Defined terms and agreement references",
+            "Operative stipulations or ordered paragraphs",
+            "Budget, payment, deadline, or covenant mechanics",
+            "Adequate protection, reservations, waivers, and rights preserved",
+            "Default, notice, cure, and termination mechanics",
+            "Signatures, consent, and approval blocks",
+            "Source-backed drafting notes appendix",
+        ]
+    if role == "court_filing_or_response":
+        return [
+            "Caption and filing title",
+            "Introduction or preliminary statement",
+            "Parties, jurisdiction, and procedural posture",
+            "Factual background",
+            "Legal standard or governing authority",
+            "Argument or response by issue",
+            "Requested relief",
+            "Reservations, exhibits, and signature block",
             "Source citations",
         ]
     if role == "disclosure_schedule_master":
@@ -2805,8 +3071,30 @@ def build_slim_synthesis_prompt(
                 json.dumps(atom_map, indent=2, sort_keys=True),
             ]
         )
+    coverage_pack = packet.get("deliverable_coverage_pack")
+    if coverage_pack:
+        support_sections.extend(
+            [
+                "Self-contained deliverable coverage pack:",
+                json.dumps(coverage_pack, indent=2, sort_keys=True),
+            ]
+        )
+    if needs_worker_packet_safety_net_for_synthesis(state):
+        worker_packet = str(packet.get("cheap_worker_summary") or "")
+        if worker_packet:
+            support_sections.extend(
+                [
+                    "Worker packet safety net:",
+                    (
+                        "The clean packet may be incomplete. Use these structured worker rows as additional controlling "
+                        "source material for row-level issues, calculations, and drafting requirements. Do not ignore "
+                        "a worker row merely because it was not repeated in selected_evidence."
+                    ),
+                    compact_digest_text(worker_packet, limit=120000),
+                ]
+            )
     supporting_evidence = "\n\n".join(support_sections)
-    return f"""Produce the requested benchmark legal work product using only the original task and clean synthesis packet below.
+    return f"""Produce the requested benchmark legal work product using only the original task, clean synthesis packet, and supporting evidence below.
 
 Original task:
 {state.task.question}
@@ -2821,6 +3109,43 @@ Clean synthesis packet:
 
 Write the requested deliverable content. Keep the original task controlling. Use the clean packet and supporting evidence as source material. If multiple deliverables are requested, use each exact filename as a heading. Output readable work-product text only; do not output JSON, code fences, base64, XML, or file internals.
 """
+
+
+def needs_worker_packet_safety_net_for_synthesis(state: RunState) -> bool:
+    packet = state.final_packet or {}
+    diagnostics = packet.get("pre_synthesis_packet_diagnostics") or {}
+    if not isinstance(diagnostics, dict) or not diagnostics.get("activated"):
+        return False
+    worker_chars = int(diagnostics.get("worker_packet_chars") or 0)
+    appendix_chars = int(diagnostics.get("artifact_appendix_chars") or 0)
+    parsed_chars = int(diagnostics.get("parsed_packet_chars") or 0)
+    selected_count = int(diagnostics.get("selected_evidence_count") or 0)
+    deliverable_contract = packet.get("deliverable_contract") or state.task.answer_schema.get("deliverable_contract") or {}
+    roles = {
+        str(deliverable.get("artifact_role") or "")
+        for deliverable in deliverable_contract.get("deliverables", []) or []
+        if isinstance(deliverable, dict)
+    }
+    dense_artifact_role = bool(
+        roles
+        & {
+            "operative_instrument",
+            "legal_agreement",
+            "limited_partnership_agreement",
+            "court_motion",
+            "court_stipulation_or_order",
+            "court_filing_or_response",
+            "regulated_form_or_filing",
+            "checklist_tracker",
+            "disclosure_schedule",
+            "disclosure_schedule_master",
+        }
+    )
+    if dense_artifact_role and worker_chars >= 20000:
+        return True
+    if worker_chars >= 60000 and (parsed_chars < 10000 or selected_count < 12):
+        return True
+    return appendix_chars >= 50000 and (parsed_chars < 10000 or selected_count < 12)
 
 
 def build_synthesis_prompt(state: RunState) -> str:
@@ -2847,6 +3172,8 @@ def build_synthesis_prompt(state: RunState) -> str:
     package_plan_text = json.dumps(package_plan, indent=2, sort_keys=True)
     atom_map = packet.get("deliverable_atom_map") or {}
     atom_map_text = json.dumps(atom_map, indent=2, sort_keys=True)
+    coverage_pack = packet.get("deliverable_coverage_pack") or {}
+    coverage_pack_text = json.dumps(coverage_pack, indent=2, sort_keys=True)
     pre_synthesis_packet = packet.get("pre_synthesis_packet")
     if isinstance(pre_synthesis_packet, dict) and pre_synthesis_packet:
         return build_slim_synthesis_prompt(
@@ -2995,6 +3322,9 @@ Package plan:
 Deliverable atom map:
 {atom_map_text}
 
+Self-contained deliverable coverage pack:
+{coverage_pack_text}
+
 Deliverable contract:
 {format_deliverable_contract(state)}
 
@@ -3003,7 +3333,7 @@ Evidence packet prepared by the worker tier:
 
 Write the complete content for the requested deliverable(s). Follow the package plan and deliverable contract closely, including workbook sheet names, section names, issue matrices, formula tables, and source-support expectations. Be specific, structured, and use only the provided evidence. If evidence is incomplete, still produce the best work product possible and clearly identify gaps.
 
-For multi-file packages, create a top-level section for every requested filename using the exact filename as the section heading. Within each filename section, include the artifact-specific content required for that file. Use the deliverable atom map to place source facts into the correct filename section, and clearly mark source gaps when a filename has few or no mapped atoms. Repeat shared source facts, numbers, definitions, party names, and risk points inside every deliverable section that needs them; do not assume a companion memo, checklist, schedule, or workbook will carry facts for another artifact. A companion issues memorandum should not replace operative agreement text, schedule exception language, checklist rows, filing/body text, or workbook rows.
+For multi-file packages, create a top-level section for every requested filename using the exact filename as the section heading. Within each filename section, include the artifact-specific content required for that file. Use the deliverable atom map and self-contained deliverable coverage pack to place source facts into the correct filename section, and clearly mark source gaps when a filename has few or no mapped atoms. Repeat shared source facts, numbers, definitions, party names, and risk points inside every deliverable section that needs them; do not assume a companion memo, checklist, schedule, or workbook will carry facts for another artifact. A companion issues memorandum should not replace operative agreement text, schedule exception language, checklist rows, filing/body text, or workbook rows.
 
 For gap-analysis deliverables, include a summary table with columns: Priority, Issue, Evidence, Risk, Remediation, Source. Also explicitly reconcile any document ranges, exhibit ranges, checklist counts, stale-date requirements, signatures, support letters, and mismatches between draft documents and checklists.
 
@@ -3397,6 +3727,68 @@ def needs_covenant_calculation_worker(state: RunState) -> bool:
     )
 
 
+def needs_numeric_audit_worker(state: RunState) -> bool:
+    haystack = lower_task_text(state)
+    source_sample = " ".join(str(chunk.get("text", ""))[:1200] for chunk in state.chunks[:80]).lower()
+    combined = f"{haystack} {source_sample}"
+    has_numbers = bool(
+        re.search(
+            r"\$[0-9]|[0-9]+(?:\.\d+)?\s*(?:%|percent|bps|basis points|days|months|years|x\b)",
+            combined,
+        )
+    )
+    numeric_task_terms = [
+        "against",
+        "analyze",
+        "audit",
+        "benchmark",
+        "calculation",
+        "cap",
+        "compare",
+        "covenant",
+        "damages",
+        "exposure",
+        "fee",
+        "financial",
+        "markup",
+        "penalty",
+        "pricing",
+        "rate",
+        "rent",
+        "royalty",
+        "settlement",
+        "shortfall",
+        "tax",
+        "threshold",
+        "valuation",
+    ]
+    numeric_source_terms = [
+        "amount",
+        "annual",
+        "breakeven",
+        "budget",
+        "cap",
+        "change of control",
+        "cost split",
+        "delta",
+        "exposure",
+        "floor",
+        "headroom",
+        "mfn",
+        "milestone",
+        "net sales",
+        "penalty",
+        "rate",
+        "royalty",
+        "shortfall",
+        "threshold",
+        "total",
+    ]
+    if has_numbers and any(term in haystack for term in numeric_task_terms):
+        return True
+    return has_numbers and any(term in combined for term in numeric_source_terms)
+
+
 def build_covenant_calculation_worker_prompt(state: RunState) -> str:
     numeric_digest = build_numeric_fact_digest(state)
     text = "\n\n".join(
@@ -3483,7 +3875,7 @@ def build_numeric_audit_worker_prompt(state: RunState) -> str:
             for chunk in state.chunks
         ]
     )
-    return f"""You are a cheap numeric audit worker. Your only job is to preserve exact numbers from tables and compute required scenario values.
+    return f"""You are a cheap numeric audit worker. Your job is to preserve exact source numbers and compute required values before final synthesis.
 
 Task instructions:
 {state.task.question}
@@ -3493,7 +3885,15 @@ Deliverable contract:
 
 Read all source chunks and return a compact numeric checklist with source IDs. Do not draft the final report.
 
-For finance/covenant tasks, explicitly search for and preserve:
+For every task, explicitly search for and preserve:
+- exact amounts, rates, percentages, dates, deadlines, multipliers, caps, floors, thresholds, quantities, counts, and totals;
+- before/after or original/markup differences;
+- target-state versus current-state numeric mismatches;
+- per-counterparty, per-document, per-contract, per-facility, per-claim, per-request, or per-class totals;
+- internal arithmetic inconsistencies, including a stated percentage that does not match a stated dollar amount;
+- penalty, damages, exposure, rent, royalty, milestone, budget, valuation, shortfall, tax, fee, or headroom calculations.
+
+For finance/covenant tasks, also preserve:
 - all covenant thresholds and caps, including per-period caps, lifetime caps, carryforwards, basket limits, and headroom;
 - prior cumulative amounts and current-period amounts needed to compute remaining permitted capacity;
 - reported and corrected debt components;
@@ -3507,10 +3907,11 @@ For finance/covenant tasks, explicitly search for and preserve:
 
 Required output sections:
 1. Mandatory figures table: figure name, value, source chunk, why it matters.
-2. Arithmetic table: formula, substituted values, result, pass/fail.
-3. Addback audit table: addback name, claimed amount, cap, allowed amount, disallowed amount, reason.
-4. Scenario table: scenario name, EBITDA, debt, leverage, interest denominator, interest coverage, key assumptions.
-5. Omitted-risk checklist: any named amount or cap that a final answer must not omit.
+2. Comparison/delta table: target or original value, current or markup value, difference, source chunks, artifact use.
+3. Arithmetic table: formula, substituted values, result, pass/fail or risk conclusion.
+4. Addback/adjustment audit table if applicable: item name, claimed amount, cap, allowed amount, disallowed amount, reason.
+5. Scenario table if applicable: scenario name, inputs, calculated output, key assumptions.
+6. Omitted-risk checklist: any named amount, cap, formula, or numeric fact that a final answer must not omit.
 
 Rules:
 - If a row says only part of a claimed savings amount was actually realized, preserve both realized and projected amounts.
@@ -3519,6 +3920,9 @@ Rules:
 - If both Consolidated Interest Expense and Consolidated Cash Interest Expense appear, preserve both figures and identify which denominator the covenant or compliance certificate used.
 - Build a primary lender-conservative corrected EBITDA scenario by subtracting every worker-identified invalid projected saving, addback overage, and equipment/asset-sale gain from reported adjusted EBITDA.
 - Build a further-corrected scenario by also subtracting any questioned named settlement addback.
+- For penalty/exposure calculations, compute every alternative method and identify the higher, lower, or controlling result when the source rule requires it.
+- For contract markups, compute exact increases, decreases, notice-period changes, rate-tier changes, residual caps, floors, and breakeven values where inputs are present.
+- For schedules, requests, checklists, or multi-row comparisons, preserve row numbers, split/renumbered items, missing items, and count mismatches.
 - Show exact arithmetic whenever possible.
 - Prefer table values over narrative summaries when they conflict.
 
@@ -14874,26 +15278,39 @@ def needs_artifact_requirement_matrix_digest(state: RunState) -> bool:
         "review",
     ]
     artifact_terms = [
+        "agreement",
+        "answer",
         "application",
         "benchmark",
+        "brief",
         "checklist",
         "closing documents",
+        "complaint",
         "condition",
         "conditions precedent",
+        "contract",
         "form ",
         "form-",
         "form adv",
         "filing",
+        "lease",
         "log",
         "lpa",
+        "motion",
+        "order",
         "policy",
         "privilege",
         "production set",
+        "redfern",
         "regulation",
         "requirements",
+        "response",
         "relevance",
+        "request",
+        "schedule",
         "seller disclosure",
         "side letter",
+        "stipulation",
         "term sheet",
         "tracker",
     ]
