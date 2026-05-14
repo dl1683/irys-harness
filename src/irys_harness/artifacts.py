@@ -7,6 +7,9 @@ from typing import Any
 from docx import Document
 from openpyxl import Workbook
 
+ILLEGAL_XML_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+XLSX_CELL_CHAR_LIMIT = 500
+
 
 def render_deliverables(
     *,
@@ -38,13 +41,13 @@ def render_deliverables(
 
 def render_docx(path: Path, *, title: str, deliverable: str, packet: dict[str, Any]) -> None:
     doc = Document()
-    doc.add_heading(title, level=1)
-    doc.add_paragraph(f"Deliverable: {deliverable}")
+    doc.add_heading(safe_text(title), level=1)
+    doc.add_paragraph(safe_text(f"Deliverable: {deliverable}"))
     deliverable_plan = find_deliverable_plan(packet, deliverable)
     if deliverable_plan:
         doc.add_heading("Deliverable Contract", level=2)
         for section in deliverable_plan.get("required_sections", [])[:12]:
-            doc.add_paragraph(str(section), style=None)
+            doc.add_paragraph(safe_text(section), style=None)
     draft_answer = packet.get("draft_answer")
     if draft_answer:
         doc.add_heading("Draft Work Product", level=2)
@@ -52,26 +55,26 @@ def render_docx(path: Path, *, title: str, deliverable: str, packet: dict[str, A
             draft_answer = packet.get("plain_text_fallback") or packet.get("cheap_worker_summary") or ""
         for block in str(draft_answer).split("\n\n"):
             if block.strip():
-                doc.add_paragraph(block.strip())
+                doc.add_paragraph(safe_text(block.strip()))
     appendix = packet.get("artifact_appendix")
     if appendix:
         doc.add_heading("Structured Findings Appendix", level=2)
         for block in str(appendix).split("\n\n"):
             if block.strip():
-                doc.add_paragraph(block.strip())
+                doc.add_paragraph(safe_text(block.strip()))
     doc.add_heading("Candidate Evidence Packet", level=2)
     for item in packet.get("verified_evidence", []):
         claim = item.get("claim", "")
         support = item.get("raw_support", "")
         source = item.get("source", {})
-        doc.add_paragraph(f"Claim: {claim}")
-        doc.add_paragraph(f"Source: {source.get('doc_id')} / {source.get('chunk_id')}")
-        doc.add_paragraph(str(support)[:1200])
+        doc.add_paragraph(safe_text(f"Claim: {claim}"))
+        doc.add_paragraph(safe_text(f"Source: {source.get('doc_id')} / {source.get('chunk_id')}"))
+        doc.add_paragraph(safe_text(support, limit=1200))
     unresolved = packet.get("unresolved", [])
     if unresolved:
         doc.add_heading("Unresolved", level=2)
         for item in unresolved:
-            doc.add_paragraph(str(item))
+            doc.add_paragraph(safe_text(item))
     doc.save(path)
 
 
@@ -186,7 +189,7 @@ def append_evidence_rows(sheet: Any, packet: dict[str, Any], *, max_rows: int | 
                 safe_cell(item.get("claim", "")),
                 safe_cell(source.get("doc_id", "")),
                 safe_cell(source.get("chunk_id", "")),
-                safe_cell(item.get("raw_support", ""), limit=2000),
+                safe_cell(item.get("raw_support", "")),
             ]
         )
 
@@ -252,7 +255,7 @@ def append_relevant_text(sheet: Any, text: str, sheet_name: str) -> None:
     sheet.append([])
     sheet.append(["Relevant Worker Text"])
     for snippet in snippets[:8]:
-        sheet.append([safe_cell(snippet, limit=5000)])
+        sheet.append([safe_cell(snippet)])
 
 
 def relevant_snippets(text: str, sheet_name: str) -> list[str]:
@@ -300,6 +303,13 @@ def safe_sheet_title(title: str, *, used: list[str]) -> str:
     return candidate
 
 
-def safe_cell(value: Any, *, limit: int = 30000) -> str:
+def safe_text(value: Any, *, limit: int | None = None) -> str:
     text = "" if value is None else str(value)
-    return text[:limit]
+    text = ILLEGAL_XML_RE.sub("", text)
+    if limit is not None:
+        return text[:limit]
+    return text
+
+
+def safe_cell(value: Any, *, limit: int = XLSX_CELL_CHAR_LIMIT) -> str:
+    return safe_text(value, limit=limit)

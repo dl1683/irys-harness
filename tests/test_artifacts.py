@@ -94,6 +94,34 @@ class ArtifactRenderingTests(unittest.TestCase):
             self.assertIn("Structured Findings Appendix", text)
             self.assertIn("2023 Merger Guidelines threshold", text)
 
+    def test_xlsx_renderer_keeps_cells_evaluator_sized(self) -> None:
+        packet = {
+            "draft_answer": "| Issue | Finding |\n| --- | --- |\n| A | " + ("long " * 300) + " |",
+            "verified_evidence": [
+                {
+                    "claim": "A" * 800,
+                    "raw_support": "B" * 1200,
+                    "source": {"doc_id": "doc_1", "chunk_id": "chunk_1"},
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            artifacts = render_deliverables(
+                output_dir=tmp,
+                deliverables=["matrix.xlsx"],
+                title="Matrix",
+                packet=packet,
+            )
+            workbook = load_workbook(Path(artifacts[0]["path"]), read_only=True)
+            try:
+                for sheet in workbook.worksheets:
+                    for row in sheet.iter_rows(values_only=True):
+                        for value in row:
+                            if isinstance(value, str):
+                                self.assertLessEqual(len(value), 500)
+            finally:
+                workbook.close()
+
 
 if __name__ == "__main__":
     unittest.main()

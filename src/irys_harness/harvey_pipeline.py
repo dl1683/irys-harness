@@ -259,4 +259,5 @@ def run_harvey_task_pipeline(
             rubric_pass_rate=None,
             token_share_by_tier={},
             error=f"{type(exc).__name__}: {exc}",
+            status="task_error",
         )

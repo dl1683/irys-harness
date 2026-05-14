@@ -2213,7 +2213,9 @@ def extract_checklist_expert_letter_status(state: RunState) -> list[dict[str, st
         path = Path(str(doc.get("path", "")))
         if path.suffix.lower() not in {".xlsx", ".xlsm"} or "checklist" not in path.name.lower():
             continue
-        workbook = load_workbook(path, data_only=True, read_only=True)
+        workbook = load_workbook_for_digest(state, path, mode="checklist_expert_letter_status")
+        if workbook is None:
+            continue
         try:
             for sheet in workbook.worksheets:
                 for row in sheet.iter_rows(values_only=True):
@@ -2234,6 +2236,8 @@ def extract_checklist_expert_letter_status(state: RunState) -> list[dict[str, st
                                 "status": status,
                             }
                         )
+        except Exception as exc:  # noqa: BLE001 - corrupt workbook rows should not abort the task.
+            record_workbook_digest_error(state, path, mode="checklist_expert_letter_status", exc=exc)
         finally:
             workbook.close()
     return rows
@@ -3594,7 +3598,9 @@ def read_flsa_employee_records(state: RunState) -> list[dict[str, Any]]:
         path = Path(str(doc.get("path", "")))
         if path.suffix.lower() not in {".xlsx", ".xlsm"} or "employee-classification" not in path.name.lower():
             continue
-        workbook = load_workbook(path, data_only=True, read_only=True)
+        workbook = load_workbook_for_digest(state, path, mode="flsa_employee_records")
+        if workbook is None:
+            continue
         try:
             sheet = workbook["Employee Data"] if "Employee Data" in workbook.sheetnames else workbook.worksheets[0]
             rows = list(sheet.iter_rows(values_only=True))
@@ -3605,6 +3611,8 @@ def read_flsa_employee_records(state: RunState) -> list[dict[str, Any]]:
                 item = {headers[index]: row[index] if index < len(row) else None for index in range(len(headers))}
                 if item.get("Employee ID"):
                     records.append(item)
+        except Exception as exc:  # noqa: BLE001 - corrupt workbook rows should not abort the task.
+            record_workbook_digest_error(state, path, mode="flsa_employee_records", exc=exc)
         finally:
             workbook.close()
     return records
@@ -3616,7 +3624,9 @@ def read_flsa_workbook_summary(state: RunState) -> dict[str, Any]:
         path = Path(str(doc.get("path", "")))
         if path.suffix.lower() not in {".xlsx", ".xlsm"} or "employee-classification" not in path.name.lower():
             continue
-        workbook = load_workbook(path, data_only=True, read_only=True)
+        workbook = load_workbook_for_digest(state, path, mode="flsa_workbook_summary")
+        if workbook is None:
+            continue
         try:
             if "Summary Pivot" not in workbook.sheetnames:
                 continue
@@ -3637,6 +3647,8 @@ def read_flsa_workbook_summary(state: RunState) -> dict[str, Any]:
                     summary["hce_total"] = values[0]
                 elif label in {"WA", "OR", "ID"}:
                     summary.setdefault("state_counts", {})[label] = values[0]
+        except Exception as exc:  # noqa: BLE001 - corrupt workbook rows should not abort the task.
+            record_workbook_digest_error(state, path, mode="flsa_workbook_summary", exc=exc)
         finally:
             workbook.close()
     return summary
@@ -12524,7 +12536,9 @@ def read_investor_commitments(state: RunState) -> dict[str, dict[str, Any]]:
         path = Path(str(doc.get("path", "")))
         if path.suffix.lower() not in {".xlsx", ".xlsm"} or "commitment" not in path.name.lower():
             continue
-        workbook = load_workbook(path, data_only=True, read_only=True)
+        workbook = load_workbook_for_digest(state, path, mode="investor_commitments")
+        if workbook is None:
+            continue
         try:
             for sheet in workbook.worksheets:
                 rows = list(sheet.iter_rows(values_only=True))
@@ -12545,6 +12559,8 @@ def read_investor_commitments(state: RunState) -> dict[str, dict[str, Any]]:
                         "commitment": format_money(float(amount)) if isinstance(amount, (int, float)) else str(amount),
                         "commitment_value": amount,
                     }
+        except Exception as exc:  # noqa: BLE001 - corrupt workbook rows should not abort the task.
+            record_workbook_digest_error(state, path, mode="investor_commitments", exc=exc)
         finally:
             workbook.close()
     return commitments
@@ -13025,7 +13041,9 @@ def read_relevant_workbook_rows(
         path = Path(str(doc.get("path", "")))
         if path.suffix.lower() not in {".xlsx", ".xlsm"} or filename_contains not in path.name.lower():
             continue
-        workbook = load_workbook(path, data_only=True, read_only=True)
+        workbook = load_workbook_for_digest(state, path, mode=f"relevant_workbook_rows:{filename_contains}")
+        if workbook is None:
+            continue
         try:
             for sheet in workbook.worksheets:
                 for row_index, row in enumerate(sheet.iter_rows(values_only=True), 1):
@@ -13039,6 +13057,8 @@ def read_relevant_workbook_rows(
                         out.append((f"{path.name} / {sheet.title} row {row_index}", row_text))
                     if len(out) >= max_rows:
                         return out
+        except Exception as exc:  # noqa: BLE001 - corrupt workbook rows should not abort the task.
+            record_workbook_digest_error(state, path, mode=f"relevant_workbook_rows:{filename_contains}", exc=exc)
         finally:
             workbook.close()
     return out
@@ -13113,7 +13133,9 @@ def build_numeric_fact_digest(state: RunState, *, max_rows_per_workbook: int = 1
         path = Path(str(doc.get("path", "")))
         if path.suffix.lower() not in {".xlsx", ".xlsm"} or not path.exists():
             continue
-        workbook = load_workbook(path, data_only=True, read_only=True)
+        workbook = load_workbook_for_digest(state, path, mode="numeric_fact_digest")
+        if workbook is None:
+            continue
         try:
             emitted = 0
             for sheet in workbook.worksheets:
@@ -13136,6 +13158,8 @@ def build_numeric_fact_digest(state: RunState, *, max_rows_per_workbook: int = 1
                         break
                 if emitted >= max_rows_per_workbook:
                     break
+        except Exception as exc:  # noqa: BLE001 - corrupt workbook rows should not abort the task.
+            record_workbook_digest_error(state, path, mode="numeric_fact_digest", exc=exc)
         finally:
             workbook.close()
     if not rows_out:
@@ -13352,6 +13376,25 @@ def format_money(value: float | None) -> str:
     if value is None:
         return "unknown"
     return "${:,.0f}".format(value)
+
+
+def load_workbook_for_digest(state: RunState, path: Path, *, mode: str) -> Any | None:
+    try:
+        return load_workbook(path, data_only=True, read_only=True)
+    except Exception as exc:  # noqa: BLE001 - deterministic helpers must not abort a benchmark run.
+        record_workbook_digest_error(state, path, mode=mode, exc=exc)
+        return None
+
+
+def record_workbook_digest_error(state: RunState, path: Path, *, mode: str, exc: Exception) -> None:
+    state.extraction_records.append(
+        {
+            "mode": "deterministic_workbook_read_error",
+            "digest_mode": mode,
+            "path": str(path),
+            "summary": f"{type(exc).__name__}: {exc}",
+        }
+    )
 
 
 def format_digest_cell(value: Any) -> str:
