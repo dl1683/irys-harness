@@ -12,6 +12,7 @@ from irys_harness.cli import (
     compare_run_dirs,
     dedupe,
     read_task_file,
+    refresh_harvey_diagnostics,
     resolve_harvey_smoke_task_ids,
     token_share,
     write_harvey_batch_tracking,
@@ -102,6 +103,56 @@ class TraceCliTests(unittest.TestCase):
             self.assertEqual(comparison["summary"]["common_token_delta"], 20)
             self.assertEqual(comparison["top_gains"][0]["task"], "harvey_lab_sample::area/task")
             self.assertAlmostEqual(comparison["top_gains"][0]["rubric_pass_rate_delta"], 0.3)
+
+    def test_refresh_harvey_diagnostics_updates_trace_from_scores(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trace_dir = root / "traces"
+            trace_path = trace_dir / "harvey_lab_sample" / "area" / "task.json"
+            trace_path.parent.mkdir(parents=True)
+            run_id = "run\\area--task"
+            trace_path.write_text(
+                json.dumps(
+                    {
+                        "benchmark": "harvey_lab_sample",
+                        "task_id": "area/task",
+                        "scoring_result": {"details": {"run_id": run_id}, "passed": False},
+                        "failure_tags": ["wrong_computation"],
+                        "metrics": {"quality": {"rubric_passed": 1, "rubric_total": 2}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            scores_path = root / "harvey" / "results" / Path(run_id) / "scores.json"
+            scores_path.parent.mkdir(parents=True)
+            scores_path.write_text(
+                json.dumps(
+                    {
+                        "task": "area/task",
+                        "all_pass": False,
+                        "score": 0.0,
+                        "n_passed": 1,
+                        "n_criteria": 2,
+                        "run_id": run_id,
+                        "criteria_results": [
+                            {
+                                "id": "C-1",
+                                "title": "Identifies second transaction",
+                                "verdict": "fail",
+                                "reasoning": "The output focuses exclusively on one transaction and does not discuss the other deal from the source documents.",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = refresh_harvey_diagnostics(trace_dir=trace_dir, harvey_root=root / "harvey")
+            refreshed = load_trace(trace_path)
+
+            self.assertEqual(report["updated"], 1)
+            self.assertIn("distractor_confusion", refreshed["failure_tags"])
+            self.assertEqual(refreshed["diagnosis"]["suspected_module"], "final_packet_synthesizer")
 
     def test_aggregate_token_share(self) -> None:
         traces = [

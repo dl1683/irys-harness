@@ -69,6 +69,14 @@ def build_parser() -> argparse.ArgumentParser:
     attach_scores.add_argument("--scores", required=True)
     attach_scores.set_defaults(func=cmd_attach_scores)
 
+    refresh_harvey_diagnostics = sub.add_parser(
+        "refresh-harvey-diagnostics",
+        help="Refresh Harvey trace diagnosis fields from saved LAB scores.json files",
+    )
+    refresh_harvey_diagnostics.add_argument("--trace-dir", required=True)
+    refresh_harvey_diagnostics.add_argument("--harvey-root", default=None)
+    refresh_harvey_diagnostics.set_defaults(func=cmd_refresh_harvey_diagnostics)
+
     summarize = sub.add_parser("summarize", help="Summarize all traces under a run directory")
     summarize.add_argument("--run", required=True)
     summarize.set_defaults(func=cmd_summarize)
@@ -223,6 +231,60 @@ def cmd_attach_scores(args: argparse.Namespace) -> int:
     save_trace(args.trace, updated)
     print_json(trace_summary(updated))
     return 0
+
+
+def cmd_refresh_harvey_diagnostics(args: argparse.Namespace) -> int:
+    print_json(
+        refresh_harvey_diagnostics(
+            trace_dir=args.trace_dir,
+            harvey_root=args.harvey_root or default_harvey_root(),
+        )
+    )
+    return 0
+
+
+def refresh_harvey_diagnostics(*, trace_dir: str | Path, harvey_root: str | Path) -> dict[str, Any]:
+    root = Path(trace_dir)
+    harvey_results = Path(harvey_root) / "results"
+    updated: list[str] = []
+    skipped: list[dict[str, str]] = []
+    errors: list[dict[str, str]] = []
+    for trace_path in sorted(root.rglob("*.json")) if root.exists() else []:
+        if trace_path.name.startswith("summary"):
+            continue
+        try:
+            trace = load_trace(trace_path)
+            if trace.get("benchmark") != "harvey_lab_sample":
+                skipped.append({"trace": str(trace_path), "reason": "not_harvey_trace"})
+                continue
+            run_id = (
+                (trace.get("scoring_result") or {})
+                .get("details", {})
+                .get("run_id")
+            )
+            if not run_id:
+                skipped.append({"trace": str(trace_path), "reason": "missing_run_id"})
+                continue
+            scores_path = harvey_results / Path(str(run_id)) / "scores.json"
+            if not scores_path.exists():
+                skipped.append({"trace": str(trace_path), "reason": "missing_scores"})
+                continue
+            with scores_path.open("r", encoding="utf-8") as handle:
+                scores = json.load(handle)
+            save_trace(trace_path, attach_harvey_scores(trace, scores))
+            updated.append(str(trace_path))
+        except Exception as exc:  # noqa: BLE001 - report per-trace diagnosis refresh failures.
+            errors.append({"trace": str(trace_path), "error": f"{type(exc).__name__}: {exc}"})
+    return {
+        "trace_dir": str(root),
+        "harvey_root": str(harvey_root),
+        "updated": len(updated),
+        "skipped": len(skipped),
+        "errors": len(errors),
+        "updated_traces": updated,
+        "skipped_traces": skipped[:50],
+        "error_traces": errors,
+    }
 
 
 def cmd_summarize(args: argparse.Namespace) -> int:
