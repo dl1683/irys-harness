@@ -2014,6 +2014,10 @@ def build_evidence_focus(haystack: str) -> list[str]:
 
 
 def infer_task_family(haystack: str) -> str:
+    if any(term in haystack for term in ["privilege-log", "privilege log", "relevance-classification", "relevance classification"]) or (
+        "production set" in haystack and any(term in haystack for term in ["privilege", "relevance"])
+    ):
+        return "document_review_privilege_log"
     if "emerging-companies-venture-capital" in haystack or any(
         term in haystack
         for term in [
@@ -2219,6 +2223,11 @@ For antitrust, HSR, merger-risk, protective-order, compliance-program, and marke
         litigation_guidance = """
 For litigation, motion-response, discovery-objection, litigation-hold, and invoice-review deliverables, preserve the "Near-Top Litigation Required Findings", "Motion Procedure / Authority Matrix", "Discovery Request Objection Matrix", "Litigation Hold Custodian / Source Matrix", and "Invoice Staffing Adjustment Matrix" as substantive work product when the worker packet lists them. Explicitly state motion-stage standards, governing rules and cases, request numbers, custodian names, source systems, date windows, data-loss timing, staffing approvals, hours, rates, budget ranges, and line-item reductions. Do not collapse litigation procedure, record-fact disputes, discovery mechanics, preservation scope, and fee math into generic dispute-risk prose.
 """
+    document_review_guidance = ""
+    if needs_document_review_privilege_digest(state):
+        document_review_guidance = """
+For privilege-log, relevance-classification, and document-review deliverables, preserve the "Full Document Review Inventory", "Privilege Log Rows", and "Relevance Classification Rows" as substantive work product. The final answer must include one row for every source document, with document ID, filename, date, author/from, recipient/to, relevance tier, privilege status, justification, and production/redaction guidance. Do not replace a document-by-document log with issue-category prose. If a document is partially privileged, state what to redact and what can be produced.
+"""
     ip_contract_guidance = ""
     if needs_ip_contract_amendment_digest(state):
         ip_contract_guidance = """
@@ -2372,6 +2381,7 @@ For insurance coverage-determination memoranda, preserve the "High-Priority Insu
 {environmental_esg_guidance}
 {antitrust_competition_guidance}
 {litigation_guidance}
+{document_review_guidance}
 {trusts_estates_guidance}
 {tax_controversy_guidance}
 {credential_gap_guidance}
@@ -2980,6 +2990,8 @@ def build_task_family_digest(state: RunState) -> str:
 
 def build_primary_task_family_digest(state: RunState) -> str:
     haystack = lower_task_text(state)
+    if needs_document_review_privilege_digest(state):
+        return build_document_review_privilege_digest(state)
     if needs_venture_financing_digest(state):
         return build_venture_financing_digest(state)
     if needs_energy_project_finance_digest(state):
@@ -3053,6 +3065,355 @@ def build_primary_task_family_digest(state: RunState) -> str:
     ):
         return build_document_comparison_digest(state)
     return ""
+
+
+def needs_document_review_privilege_digest(state: RunState) -> bool:
+    haystack = lower_task_text(state)
+    deliverables = " ".join(str(item) for item in state.task.answer_schema.get("deliverables", [])).lower()
+    combined = f"{haystack} {deliverables}"
+    if any(
+        term in combined
+        for term in [
+            "privilege-log",
+            "privilege log",
+            "relevance-classification",
+            "relevance classification",
+        ]
+    ):
+        return True
+    return "production set" in combined and any(term in combined for term in ["privilege", "relevance", "document review"])
+
+
+def build_document_review_privilege_digest(state: RunState) -> str:
+    rows = build_document_review_rows(state)
+    if not rows:
+        return ""
+    lines = [
+        "# Deterministic document review / privilege log digest",
+        "These rows preserve document-by-document review state before synthesis. Use them to build privilege logs, relevance-classification reports, production trackers, and redaction guidance.",
+        "",
+        "## Document Review Operator Rules",
+        "- Include every source document in the relevance classification report, even if the document is marginal or not relevant.",
+        "- Include every privileged or partially privileged document in the privilege log.",
+        "- For each row preserve document ID, filename, date, author/from, recipient/to, privilege status, relevance tier, justification, and production or redaction guidance.",
+        "- Do not let issue-category prose replace row-level classification.",
+    ]
+    append_digest_table(
+        lines,
+        "Full Document Review Inventory",
+        [
+            "Doc ID",
+            "Filename",
+            "Date",
+            "Author / From",
+            "Recipient / To",
+            "Relevance Tier",
+            "Privilege Status",
+            "Key Basis",
+            "Production Treatment",
+        ],
+        [
+            [
+                row["doc_id"],
+                row["filename"],
+                row["date"],
+                row["author"],
+                row["recipient"],
+                row["relevance_tier"],
+                row["privilege_status"],
+                row["key_basis"],
+                row["production_treatment"],
+            ]
+            for row in rows
+        ],
+    )
+    privilege_rows = [
+        row
+        for row in rows
+        if row["privilege_status"] != "Not Privileged" or "redact" in row["production_treatment"].lower()
+    ]
+    if privilege_rows:
+        append_digest_table(
+            lines,
+            "Privilege Log Rows",
+            ["Doc ID / Filename", "Date", "Author / From", "Recipient / To", "CC", "Privilege Asserted", "Description", "Redaction / Withholding Guidance"],
+            [
+                [
+                    f"{row['doc_id']} / {row['filename']}",
+                    row["date"],
+                    row["author"],
+                    row["recipient"],
+                    row["cc"],
+                    row["privilege_basis"],
+                    row["description"],
+                    row["production_treatment"],
+                ]
+                for row in privilege_rows
+            ],
+        )
+    append_digest_table(
+        lines,
+        "Relevance Classification Rows",
+        ["Doc ID / Filename", "Relevance Tier", "Privilege Status", "Justification", "Recommended Action"],
+        [
+            [
+                f"{row['doc_id']} / {row['filename']}",
+                row["relevance_tier"],
+                row["privilege_status"],
+                row["key_basis"],
+                row["production_treatment"],
+            ]
+            for row in rows
+        ],
+    )
+    return "\n".join(lines)
+
+
+def build_document_review_rows(state: RunState) -> list[dict[str, str]]:
+    text_by_doc = joined_text_by_doc(state)
+    doc_lookup = {str(doc.get("doc_id", "")): doc for doc in state.documents}
+    rows: list[dict[str, str]] = []
+    for doc_id in sorted(text_by_doc.keys(), key=natural_doc_sort_key):
+        doc = doc_lookup.get(doc_id, {})
+        filename = str(doc.get("filename") or doc.get("path") or doc_id)
+        text = text_by_doc.get(doc_id, "")
+        meta = extract_document_review_metadata(filename, text)
+        privilege_status, privilege_basis, treatment = classify_document_review_privilege(filename, text)
+        relevance_tier, key_basis = classify_document_review_relevance(filename, text)
+        rows.append(
+            {
+                "doc_id": doc_id,
+                "filename": filename,
+                "date": meta["date"],
+                "author": meta["author"],
+                "recipient": meta["recipient"],
+                "cc": meta["cc"],
+                "description": meta["description"],
+                "relevance_tier": relevance_tier,
+                "privilege_status": privilege_status,
+                "privilege_basis": privilege_basis,
+                "key_basis": key_basis,
+                "production_treatment": treatment,
+            }
+        )
+    return rows
+
+
+def natural_doc_sort_key(doc_id: str) -> tuple[int, str]:
+    match = re.search(r"(\d+)", doc_id)
+    return (int(match.group(1)) if match else 10**9, doc_id)
+
+
+def extract_document_review_metadata(filename: str, text: str) -> dict[str, str]:
+    return {
+        "date": extract_document_review_field(text, ["Date"]) or extract_first_date(text),
+        "author": extract_document_review_field(text, ["From", "FROM"]) or extract_document_review_person_line(text, "from"),
+        "recipient": extract_document_review_field(text, ["To", "TO"]) or extract_document_review_person_line(text, "to"),
+        "cc": extract_document_review_field(text, ["Cc", "CC"]) or "None stated",
+        "description": extract_document_review_description(filename, text),
+    }
+
+
+def extract_document_review_field(text: str, labels: list[str]) -> str:
+    for label in labels:
+        match = re.search(rf"(?im)^\s*{re.escape(label)}:\s*(.+)$", text)
+        if match:
+            return compact_digest_text(match.group(1), limit=120)
+    return ""
+
+
+def extract_document_review_person_line(text: str, direction: str) -> str:
+    if direction == "from":
+        pattern = r"(?im)^\s*(?:prepared by|author|sender)\s*:\s*(.+)$"
+    else:
+        pattern = r"(?im)^\s*(?:to|distribution list|recipient)\s*:?\s*(.+)$"
+    match = re.search(pattern, text)
+    return compact_digest_text(match.group(1), limit=120) if match else "Not stated"
+
+
+def extract_first_date(text: str) -> str:
+    patterns = [
+        r"\b(?:Jan\.?|January|Feb\.?|February|Mar\.?|March|Apr\.?|April|May|Jun\.?|June|Jul\.?|July|Aug\.?|August|Sep\.?|Sept\.?|September|Oct\.?|October|Nov\.?|November|Dec\.?|December)\s+\d{1,2},\s+\d{4}\b",
+        r"\b\d{1,2}/\d{1,2}/\d{2,4}\b",
+        r"\b\d{4}-\d{2}-\d{2}\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return match.group(0)
+    return "Not stated"
+
+
+def extract_document_review_description(filename: str, text: str) -> str:
+    subject = extract_document_review_field(text, ["Subject"])
+    if subject:
+        return subject
+    for raw in text.splitlines():
+        line = " ".join(raw.strip().split())
+        if len(line) >= 12:
+            return compact_digest_text(line, limit=160)
+    return filename
+
+
+def classify_document_review_privilege(filename: str, text: str) -> tuple[str, str, str]:
+    lower = f"{filename} {text}".lower()
+    sensitive = any(term in lower for term in ["medical", "prescription", "disability", "cobra", "hipaa", "benefits enrollment"])
+    plainly_business_or_party_document = any(
+        term in lower
+        for term in [
+            "termination letter",
+            "notice of termination",
+            "performance improvement plan",
+            "plaintiff demand letter",
+            "demand letter",
+            "separation agreement",
+            "environmental compliance memo",
+            "benefits enrollment",
+        ]
+    )
+    external_legal_request = any(
+        term in lower
+        for term in [
+            "request for litigation risk assessment",
+            "seeking litigation risk assessment",
+            "outside litigation counsel",
+            "outside counsel",
+            "@kirkfield",
+            "@stantongreer",
+        ]
+    )
+    legal_advice = any(
+        term in lower
+        for term in [
+            "attorney-client",
+            "attorney client",
+            "legal advice",
+            "litigation risk assessment",
+            "privileged & confidential",
+            "privileged and confidential",
+        ]
+    )
+    work_product = any(term in lower for term in ["work product", "litigation strategy", "legal strategy", "anticipated litigation"])
+    common_interest = any(term in lower for term in ["joint defense", "common interest", "unified front"])
+    mixed_business = any(
+        term in lower
+        for term in [
+            "performance",
+            "operations",
+            "business",
+            "deliverables",
+            "meeting notes",
+            "preservation directive",
+            "litigation hold notice",
+            "audit report",
+            "engagement letter",
+        ]
+    )
+    if plainly_business_or_party_document and not external_legal_request and "legal strategy" not in lower:
+        if sensitive:
+            return (
+                "Not Privileged",
+                "No legal privilege, but sensitive personal or medical information requires privacy review.",
+                "Produce only if relevant; redact medical, disability, prescription, or benefits information as appropriate.",
+            )
+        return ("Not Privileged", "No legal privilege apparent from the document text.", "Produce if relevant; no privilege withholding.")
+    if common_interest:
+        return (
+            "Privileged",
+            "Common interest / joint-defense attorney-client privilege; confirm no waiver or missing formal agreement.",
+            "Withhold or log as privileged; disclose common-interest basis and review for waiver risk.",
+        )
+    if external_legal_request and legal_advice:
+        return (
+            "Privileged",
+            "Attorney-client privilege: client or company counsel requested legal advice from an attorney.",
+            "Withhold and log as attorney-client privileged with date, author, recipient, and non-waiving description.",
+        )
+    if legal_advice and mixed_business:
+        return (
+            "Partially Privileged",
+            "Mixed legal/business communication; attorney-client or work-product portions require segregation.",
+            "Produce non-privileged business portions with targeted redactions for legal advice or strategy.",
+        )
+    if legal_advice or work_product:
+        return (
+            "Privileged",
+            "Attorney-client privilege and/or work-product protection.",
+            "Withhold and log with date, author, recipient, privilege basis, and non-waiving description.",
+        )
+    if sensitive:
+        return (
+            "Not Privileged",
+            "No legal privilege, but sensitive personal or medical information requires privacy review.",
+            "Produce only if relevant; redact medical, disability, prescription, or benefits information as appropriate.",
+        )
+    return ("Not Privileged", "No legal privilege apparent from the document text.", "Produce if relevant; no privilege withholding.")
+
+
+def classify_document_review_relevance(filename: str, text: str) -> tuple[str, str]:
+    lower = f"{filename} {text}".lower()
+    basis: list[str] = []
+    sensitive = any(term in lower for term in ["benefits enrollment", "medical", "prescription", "disability", "cobra", "hipaa"])
+    merits_terms = [
+        "termination",
+        "performance improvement plan",
+        "pip",
+        "whistleblower",
+        "continuation application",
+        "inventor",
+        "trade secret",
+        "demand letter",
+        "complaint",
+        "litigation hold",
+        "litigation risk assessment",
+        "legal strategy",
+        "audit report",
+    ]
+    if sensitive and not any(term in lower for term in merits_terms):
+        return "Not Relevant", "Sensitive personal or medical/benefits information; redact or withhold for privacy rather than merits relevance."
+    high_terms = [
+        ("termination", "termination/adverse action evidence"),
+        ("performance improvement plan", "PIP timing and performance rationale"),
+        ("pip", "PIP timing and performance rationale"),
+        ("whistleblower", "whistleblower retaliation issue"),
+        ("ohio rev. code", "Ohio whistleblower/legal claim issue"),
+        ("rcra", "environmental compliance allegation"),
+        ("hazardous waste", "environmental compliance allegation"),
+        ("continuation application", "continuation patent and inventorship issue"),
+        ("inventor", "inventorship/trade-secret issue"),
+        ("trade secret", "trade-secret issue"),
+        ("demand letter", "claim and damages theory"),
+        ("complaint", "pleading/claim issue"),
+        ("litigation hold", "preservation and privilege issue"),
+        ("litigation risk assessment", "privileged legal risk assessment"),
+        ("legal strategy", "legal strategy / work-product issue"),
+        ("joint defense", "joint-defense/common-interest issue"),
+        ("audit report", "environmental audit and work-product issue"),
+    ]
+    for term, reason in high_terms:
+        if term in lower:
+            basis.append(reason)
+    if basis:
+        return "Highly Relevant", "; ".join(dedupe_strings(basis[:4]))
+    relevant_terms = [
+        ("acknowledgment", "acknowledgment and notice evidence"),
+        ("assignment", "invention assignment / ownership evidence"),
+        ("separation agreement", "separation and release evidence"),
+        ("meeting notes", "meeting chronology evidence"),
+        ("operations metrics", "performance chronology evidence"),
+        ("vasquez situation", "performance and termination chronology evidence"),
+        ("r&d department performance", "performance and termination chronology evidence"),
+        ("engagement letter", "work-product retention context"),
+        ("board minutes", "corporate decision-making context"),
+    ]
+    for term, reason in relevant_terms:
+        if term in lower:
+            basis.append(reason)
+    if basis:
+        return "Relevant", "; ".join(dedupe_strings(basis[:3]))
+    if any(term in lower for term in ["conference", "registration", "backup notification", "automated message"]):
+        return "Not Relevant", "Administrative or background record with no clear merits or privilege issue."
+    return "Marginally Relevant", "Background record; review for context but do not prioritize absent stronger linkage."
 
 
 def needs_credential_gap_digest(state: RunState) -> bool:

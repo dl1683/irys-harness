@@ -10,6 +10,7 @@ from irys_harness.benchmarks.harvey import (
     build_covenant_calculation_worker_prompt,
     build_deliverable_contract,
     build_deliverable_atom_map,
+    build_document_review_privilege_digest,
     build_synthesis_prompt,
     build_task_family_digest,
     is_encoded_artifact_answer,
@@ -20,6 +21,7 @@ from irys_harness.benchmarks.harvey import (
     build_provision_comparison_worker_prompt,
     needs_checklist_worker,
     needs_covenant_calculation_worker,
+    needs_document_review_privilege_digest,
 )
 from irys_harness.config import load_config
 from irys_harness.state import BenchmarkTask, RunState
@@ -3181,6 +3183,66 @@ class HarveyQueryTests(unittest.TestCase):
         self.assertIn("CP2 = CP1 x (A + B) / (A + C)", digest)
         self.assertIn("$0.32/share/year", digest)
         self.assertIn("Series B receives $4.00/share first", digest)
+
+    def test_document_review_privilege_digest_preserves_full_row_inventory(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="litigation-dispute-resolution/categorize-document-production-set-by-relevance-and-privilege",
+            question="Review the attached production set and prepare a privilege log and relevance classification report.",
+            answer_schema={"deliverables": ["privilege-log.docx", "relevance-classification-report.docx"]},
+            metadata={"practice_area": "litigation-dispute-resolution"},
+        )
+        state = RunState(
+            task=task,
+            config=load_config(),
+            documents=[
+                {"doc_id": "doc_0001", "filename": "gc-outside-counsel-risk-email.eml", "extension": ".eml"},
+                {"doc_id": "doc_0002", "filename": "employee-benefits-enrollment.docx", "extension": ".docx"},
+                {"doc_id": "doc_0003", "filename": "termination-letter.docx", "extension": ".docx"},
+            ],
+            chunks=[
+                {
+                    "doc_id": "doc_0001",
+                    "chunk_id": "c1",
+                    "index": 0,
+                    "text": (
+                        "From: Priya General Counsel <gc@example.com>\n"
+                        "To: Catherine Outside Counsel <law@example.com>\n"
+                        "Date: March 3, 2023\n"
+                        "Subject: Confidential Request for Litigation Risk Assessment\n\n"
+                        "Please provide legal advice on whistleblower retaliation exposure."
+                    ),
+                },
+                {
+                    "doc_id": "doc_0002",
+                    "chunk_id": "c2",
+                    "index": 0,
+                    "text": "Benefits enrollment with prescription medication and short-term disability information.",
+                },
+                {
+                    "doc_id": "doc_0003",
+                    "chunk_id": "c3",
+                    "index": 0,
+                    "text": "September 15, 2023 termination letter for failure to satisfy the performance improvement plan.",
+                },
+            ],
+        )
+        contract = build_deliverable_contract(state)
+        state.task.answer_schema["deliverable_contract"] = contract
+        digest = build_document_review_privilege_digest(state)
+        self.assertTrue(needs_document_review_privilege_digest(state))
+        self.assertEqual(contract["task_family"], "document_review_privilege_log")
+        self.assertIn("Deterministic document review / privilege log digest", digest)
+        self.assertIn("Full Document Review Inventory", digest)
+        self.assertIn("Privilege Log Rows", digest)
+        self.assertIn("Relevance Classification Rows", digest)
+        self.assertIn("doc_0001", digest)
+        self.assertIn("doc_0002", digest)
+        self.assertIn("doc_0003", digest)
+        self.assertIn("Privileged", digest)
+        self.assertIn("redact medical", digest.lower())
+        self.assertIn("termination/adverse action evidence", digest)
+        self.assertIn("Deterministic document review / privilege log digest", build_task_family_digest(state))
 
     def test_antitrust_digest_routes_hsr_and_preserves_market_hot_doc_rows(self) -> None:
         task = BenchmarkTask(
