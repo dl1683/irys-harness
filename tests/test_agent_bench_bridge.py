@@ -14,6 +14,7 @@ from irys_harness.agent_bench_bridge import (
     extract_nolima_candidate_facts,
     extract_answer_candidate,
     extract_function_names,
+    infer_docfinqa_share_repurchase_answer,
     extract_mrcr_candidate_responses,
     insert_needle_at_depth,
     nolima_jsonl_is_valid,
@@ -355,6 +356,19 @@ class AgentBenchBridgeTests(unittest.IsolatedAsyncioTestCase):
             "1,327,657 * 42.61 / 1,000,000 = $56.57 million\nRISKS: rounding."
         )
         self.assertEqual(value, "56.57")
+
+    def test_docfinqa_deterministic_share_repurchase_cash_impact(self) -> None:
+        result = infer_docfinqa_share_repurchase_answer(
+            query="how is net change in cash from financing activity affected by the share repurchase during december 2018, in millions?",
+            selected_lines=[
+                "| Period | Total Number of Shares Purchased (1) | Average Price Paid Per Share (2) | Total Number of Shares Purchased as Part of Publicly Announced Plan or Program |",
+                "| November 4, 2018 - December 1, 2018 | 650,048 | $44.49 | 623,692 | $226 |",
+                "| December 2, 2018 - December 29, 2018 | 1,327,657 | $42.61 | 1,203,690 | $175 |",
+            ],
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["answer"], "56.57")
+        self.assertEqual(result["method"], "docfinqa_share_repurchase_cash_impact")
 
     def test_citation_judge_context_selects_cited_doc_not_prefix_window(self) -> None:
         context = "[doc1] irrelevant\n\n[doc49] William Pooley died in 1629."
