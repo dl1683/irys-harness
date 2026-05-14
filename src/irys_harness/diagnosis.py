@@ -47,6 +47,33 @@ def classify_failed_criteria(failed: list[dict[str, Any]]) -> set[FailureTag]:
         if any(
             phrase in text
             for phrase in [
+                "different transaction",
+                "focuses exclusively on",
+                "focuses on the",
+                "does not contain any analysis of",
+                "does not discuss the",
+                "does not mention the",
+                "not relevant to the primary task",
+            ]
+        ) and any(
+            term in text
+            for term in [
+                "transaction",
+                "deal",
+                "entity",
+                "entities",
+                "parties",
+                "source documents",
+                "work product",
+            ]
+        ):
+            tags.add(FailureTag.DISTRACTOR_CONFUSION)
+            tags.add(FailureTag.CONTEXT_PACKING_ERROR)
+            tags.add(FailureTag.SYNTHESIS_ERROR)
+            continue
+        if any(
+            phrase in text
+            for phrase in [
                 "fails to identify the specific",
                 "does not list",
                 "does not acknowledge",
@@ -89,6 +116,8 @@ def classify_failed_criteria(failed: list[dict[str, Any]]) -> set[FailureTag]:
 
 
 def suspected_module(tags: set[FailureTag]) -> str | None:
+    if FailureTag.DISTRACTOR_CONFUSION in tags:
+        return "final_packet_synthesizer"
     if FailureTag.WRONG_COMPUTATION in tags:
         return "calculator"
     if FailureTag.SEVERITY_CALIBRATION_ERROR in tags:
@@ -103,6 +132,8 @@ def suspected_module(tags: set[FailureTag]) -> str | None:
 
 
 def suspected_actor(tags: set[FailureTag]) -> str | None:
+    if FailureTag.DISTRACTOR_CONFUSION in tags:
+        return "strong_synthesizer"
     if FailureTag.WRONG_COMPUTATION in tags:
         return "cheap_worker"
     if FailureTag.SEVERITY_CALIBRATION_ERROR in tags:
@@ -146,6 +177,13 @@ def recommended_experiment(tags: set[FailureTag]) -> dict[str, Any] | None:
             "change_type": "worker_operator",
             "target": module,
             "hypothesis": "Add formula-level cheap-worker calculation operators for covenant, numeric, and scenario tasks.",
+            "validation": ["same_task", "same_practice_area_smoke", "mixed_smoke"],
+        }
+    if FailureTag.DISTRACTOR_CONFUSION in tags:
+        return {
+            "change_type": "context_packing",
+            "target": module,
+            "hypothesis": "Add source/entity coverage controls so the final artifact cannot answer only one transaction, entity, or document family when the rubric expects several.",
             "validation": ["same_task", "same_practice_area_smoke", "mixed_smoke"],
         }
     return {

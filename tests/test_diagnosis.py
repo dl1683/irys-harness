@@ -94,6 +94,32 @@ class DiagnosisTests(unittest.TestCase):
         self.assertEqual(diagnosis["suspected_module"], "calculator")
         self.assertEqual(diagnosis["suspected_actor"], "cheap_worker")
 
+    def test_diagnose_harvey_scores_classifies_transaction_coverage_drop(self) -> None:
+        diagnosis = diagnose_harvey_scores(
+            {
+                "task": "area/task",
+                "all_pass": False,
+                "n_passed": 16,
+                "n_criteria": 66,
+                "criteria_results": [
+                    {
+                        "id": "C-8",
+                        "title": "Charlotte MSA combined share correctly calculated",
+                        "verdict": "fail",
+                        "reasoning": (
+                            "The agent's output focuses exclusively on the Pinnacle transaction. "
+                            "It does not contain any analysis of the LabVantage/Prism transaction "
+                            "from the source documents."
+                        ),
+                    }
+                ],
+            }
+        )
+        self.assertIn("distractor_confusion", diagnosis["failure_tags"])
+        self.assertIn("context_packing_error", diagnosis["failure_tags"])
+        self.assertEqual(diagnosis["suspected_module"], "final_packet_synthesizer")
+        self.assertEqual(diagnosis["suspected_actor"], "strong_synthesizer")
+
 
 if __name__ == "__main__":
     unittest.main()
