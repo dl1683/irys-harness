@@ -387,6 +387,7 @@ def compare_run_dirs(run_a: str | Path, run_b: str | Path) -> dict[str, Any]:
     before_common_tokens = sum(int(a[key].get("total_tokens") or 0) for key in common)
     after_common_tokens = sum(int(b[key].get("total_tokens") or 0) for key in common)
     scored_rows = [row for row in rows if row["rubric_pass_rate_delta"] is not None]
+    family_deltas = compare_family_deltas(scored_rows)
     top_gains = sorted(
         scored_rows,
         key=lambda item: (float(item["rubric_pass_rate_delta"]), int(item["rubric_passed_delta"] or 0)),
@@ -429,8 +430,99 @@ def compare_run_dirs(run_a: str | Path, run_b: str | Path) -> dict[str, Any]:
         },
         "top_gains": top_gains,
         "top_regressions": top_regressions,
+        "family_deltas": family_deltas,
         "tasks": rows,
     }
+
+
+def compare_family_deltas(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    families: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {
+            "tasks": 0,
+            "before_rubric_passed": 0,
+            "before_rubric_total": 0,
+            "after_rubric_passed": 0,
+            "after_rubric_total": 0,
+            "rubric_passed_delta": 0,
+            "macro_rubric_pass_rate_delta": 0.0,
+            "top_gain": None,
+            "top_regression": None,
+        }
+    )
+    for row in rows:
+        family = task_family_from_key(str(row.get("task") or ""))
+        bucket = families[family]
+        bucket["tasks"] += 1
+        bucket["before_rubric_passed"] += int(row.get("before_rubric_passed") or 0)
+        bucket["before_rubric_total"] += int(row.get("before_rubric_total") or 0)
+        bucket["after_rubric_passed"] += int(row.get("after_rubric_passed") or 0)
+        bucket["after_rubric_total"] += int(row.get("after_rubric_total") or 0)
+        bucket["rubric_passed_delta"] += int(row.get("rubric_passed_delta") or 0)
+        bucket["macro_rubric_pass_rate_delta"] += float(row.get("rubric_pass_rate_delta") or 0.0)
+        if row.get("rubric_passed_delta") is not None:
+            gain = bucket["top_gain"]
+            regression = bucket["top_regression"]
+            if gain is None or int(row["rubric_passed_delta"]) > int(gain["rubric_passed_delta"]):
+                bucket["top_gain"] = row
+            if regression is None or int(row["rubric_passed_delta"]) < int(regression["rubric_passed_delta"]):
+                bucket["top_regression"] = row
+    results = []
+    for family, bucket in families.items():
+        tasks = int(bucket["tasks"])
+        before_total = int(bucket["before_rubric_total"])
+        after_total = int(bucket["after_rubric_total"])
+        results.append(
+            {
+                "family": family,
+                "tasks": tasks,
+                "before_rubric_passed": bucket["before_rubric_passed"],
+                "before_rubric_total": before_total,
+                "after_rubric_passed": bucket["after_rubric_passed"],
+                "after_rubric_total": after_total,
+                "before_micro_rubric_pass_rate": (
+                    bucket["before_rubric_passed"] / before_total if before_total else None
+                ),
+                "after_micro_rubric_pass_rate": (
+                    bucket["after_rubric_passed"] / after_total if after_total else None
+                ),
+                "rubric_passed_delta": bucket["rubric_passed_delta"],
+                "macro_rubric_pass_rate_delta": (
+                    bucket["macro_rubric_pass_rate_delta"] / tasks if tasks else None
+                ),
+                "top_gain": bucket["top_gain"],
+                "top_regression": bucket["top_regression"],
+            }
+        )
+    return sorted(
+        results,
+        key=lambda item: (int(item["rubric_passed_delta"]), float(item["macro_rubric_pass_rate_delta"] or 0.0)),
+        reverse=True,
+    )
+
+
+def task_family_from_key(key: str) -> str:
+    task_id = key.split("::", 1)[-1]
+    parts = [part for part in task_id.split("/") if part]
+    leaf = parts[-1] if parts else ""
+    if leaf.startswith("scenario-") and len(parts) >= 2:
+        leaf = parts[-2]
+    prefixes = [
+        ("draft-", "draft/package"),
+        ("extract-", "extract"),
+        ("identify-", "identify/issues"),
+        ("compare-", "compare"),
+        ("review-", "review"),
+        ("analyze-", "analyze"),
+        ("assess-", "assess"),
+        ("summarize-", "summarize"),
+        ("synthesize-", "synthesize"),
+        ("prepare-", "prepare"),
+        ("conduct-", "conduct"),
+    ]
+    for prefix, family in prefixes:
+        if leaf.startswith(prefix):
+            return family
+    return leaf.split("-", 1)[0] if leaf else "unknown"
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:

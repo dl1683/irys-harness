@@ -103,6 +103,75 @@ class TraceCliTests(unittest.TestCase):
             self.assertEqual(comparison["summary"]["common_token_delta"], 20)
             self.assertEqual(comparison["top_gains"][0]["task"], "harvey_lab_sample::area/task")
             self.assertAlmostEqual(comparison["top_gains"][0]["rubric_pass_rate_delta"], 0.3)
+            self.assertEqual(comparison["family_deltas"][0]["family"], "task")
+            self.assertEqual(comparison["family_deltas"][0]["rubric_passed_delta"], 3)
+            self.assertAlmostEqual(comparison["family_deltas"][0]["macro_rubric_pass_rate_delta"], 0.3)
+
+    def test_compare_run_dirs_groups_task_family_deltas(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            before = root / "before" / "harvey_lab_sample" / "area"
+            after = root / "after" / "harvey_lab_sample" / "area"
+            before.mkdir(parents=True)
+            after.mkdir(parents=True)
+            before.joinpath("extract-clauses.json").write_text(
+                json_trace(
+                    task_id="area/extract-clauses/scenario-01",
+                    passed=False,
+                    rubric_passed=5,
+                    rubric_total=10,
+                    cost=1.0,
+                    tokens=100,
+                ),
+                encoding="utf-8",
+            )
+            after.joinpath("extract-clauses.json").write_text(
+                json_trace(
+                    task_id="area/extract-clauses/scenario-01",
+                    passed=False,
+                    rubric_passed=8,
+                    rubric_total=10,
+                    cost=1.0,
+                    tokens=100,
+                ),
+                encoding="utf-8",
+            )
+            before.joinpath("draft-memo.json").write_text(
+                json_trace(
+                    task_id="area/draft-memo",
+                    passed=False,
+                    rubric_passed=9,
+                    rubric_total=10,
+                    cost=1.0,
+                    tokens=100,
+                ),
+                encoding="utf-8",
+            )
+            after.joinpath("draft-memo.json").write_text(
+                json_trace(
+                    task_id="area/draft-memo",
+                    passed=False,
+                    rubric_passed=7,
+                    rubric_total=10,
+                    cost=1.0,
+                    tokens=100,
+                ),
+                encoding="utf-8",
+            )
+
+            comparison = compare_run_dirs(root / "before", root / "after")
+            families = {item["family"]: item for item in comparison["family_deltas"]}
+
+            self.assertEqual(families["extract"]["rubric_passed_delta"], 3)
+            self.assertEqual(families["draft/package"]["rubric_passed_delta"], -2)
+            self.assertEqual(
+                families["extract"]["top_gain"]["task"],
+                "harvey_lab_sample::area/extract-clauses/scenario-01",
+            )
+            self.assertEqual(
+                families["draft/package"]["top_regression"]["task"],
+                "harvey_lab_sample::area/draft-memo",
+            )
 
     def test_refresh_harvey_diagnostics_updates_trace_from_scores(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
