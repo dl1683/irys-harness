@@ -261,11 +261,31 @@ def compare_run_dirs(run_a: str | Path, run_b: str | Path) -> dict[str, Any]:
     for key in keys:
         before = a.get(key)
         after = b.get(key)
+        before_rate = before.get("rubric_pass_rate") if before else None
+        after_rate = after.get("rubric_pass_rate") if after else None
+        before_rubric_passed = before.get("rubric_passed") if before else None
+        after_rubric_passed = after.get("rubric_passed") if after else None
         rows.append(
             {
                 "task": key,
                 "before_passed": before.get("passed") if before else None,
                 "after_passed": after.get("passed") if after else None,
+                "before_rubric_pass_rate": before_rate,
+                "after_rubric_pass_rate": after_rate,
+                "rubric_pass_rate_delta": (
+                    float(after_rate) - float(before_rate)
+                    if before_rate is not None and after_rate is not None
+                    else None
+                ),
+                "before_rubric_passed": before_rubric_passed,
+                "after_rubric_passed": after_rubric_passed,
+                "rubric_passed_delta": (
+                    int(after_rubric_passed) - int(before_rubric_passed)
+                    if before_rubric_passed is not None and after_rubric_passed is not None
+                    else None
+                ),
+                "before_rubric_total": before.get("rubric_total") if before else None,
+                "after_rubric_total": after.get("rubric_total") if after else None,
                 "before_cost": before.get("estimated_cost") if before else None,
                 "after_cost": after.get("estimated_cost") if after else None,
                 "before_tokens": before.get("total_tokens") if before else None,
@@ -278,14 +298,75 @@ def compare_run_dirs(run_a: str | Path, run_b: str | Path) -> dict[str, Any]:
     after_cost = sum(float(item.get("estimated_cost") or 0.0) for item in b.values())
     before_tokens = sum(int(item.get("total_tokens") or 0) for item in a.values())
     after_tokens = sum(int(item.get("total_tokens") or 0) for item in b.values())
+    common = [key for key in keys if key in a and key in b]
+    common_scored = [
+        key
+        for key in common
+        if a[key].get("rubric_pass_rate") is not None and b[key].get("rubric_pass_rate") is not None
+    ]
+    before_common_macro = (
+        sum(float(a[key]["rubric_pass_rate"]) for key in common_scored) / len(common_scored)
+        if common_scored
+        else None
+    )
+    after_common_macro = (
+        sum(float(b[key]["rubric_pass_rate"]) for key in common_scored) / len(common_scored)
+        if common_scored
+        else None
+    )
+    before_common_rubric_passed = sum(int(a[key].get("rubric_passed") or 0) for key in common_scored)
+    before_common_rubric_total = sum(int(a[key].get("rubric_total") or 0) for key in common_scored)
+    after_common_rubric_passed = sum(int(b[key].get("rubric_passed") or 0) for key in common_scored)
+    after_common_rubric_total = sum(int(b[key].get("rubric_total") or 0) for key in common_scored)
+    before_common_passed = sum(1 for key in common if a[key].get("passed") is True)
+    after_common_passed = sum(1 for key in common if b[key].get("passed") is True)
+    before_common_cost = sum(float(a[key].get("estimated_cost") or 0.0) for key in common)
+    after_common_cost = sum(float(b[key].get("estimated_cost") or 0.0) for key in common)
+    before_common_tokens = sum(int(a[key].get("total_tokens") or 0) for key in common)
+    after_common_tokens = sum(int(b[key].get("total_tokens") or 0) for key in common)
+    scored_rows = [row for row in rows if row["rubric_pass_rate_delta"] is not None]
+    top_gains = sorted(
+        scored_rows,
+        key=lambda item: (float(item["rubric_pass_rate_delta"]), int(item["rubric_passed_delta"] or 0)),
+        reverse=True,
+    )[:20]
+    top_regressions = sorted(
+        scored_rows,
+        key=lambda item: (float(item["rubric_pass_rate_delta"]), int(item["rubric_passed_delta"] or 0)),
+    )[:20]
     return {
         "summary": {
             "before_tasks": len(a),
             "after_tasks": len(b),
+            "common_tasks": len(common),
+            "common_scored_tasks": len(common_scored),
             "passed_delta": after_passed - before_passed,
+            "before_common_passed": before_common_passed,
+            "after_common_passed": after_common_passed,
+            "common_passed_delta": after_common_passed - before_common_passed,
+            "before_common_macro_rubric_pass_rate": before_common_macro,
+            "after_common_macro_rubric_pass_rate": after_common_macro,
+            "common_macro_rubric_pass_rate_delta": (
+                after_common_macro - before_common_macro
+                if before_common_macro is not None and after_common_macro is not None
+                else None
+            ),
+            "before_common_rubric_passed": before_common_rubric_passed,
+            "before_common_rubric_total": before_common_rubric_total,
+            "after_common_rubric_passed": after_common_rubric_passed,
+            "after_common_rubric_total": after_common_rubric_total,
+            "common_rubric_passed_delta": after_common_rubric_passed - before_common_rubric_passed,
             "cost_delta": after_cost - before_cost,
+            "before_common_cost": before_common_cost,
+            "after_common_cost": after_common_cost,
+            "common_cost_delta": after_common_cost - before_common_cost,
             "token_delta": after_tokens - before_tokens,
+            "before_common_tokens": before_common_tokens,
+            "after_common_tokens": after_common_tokens,
+            "common_token_delta": after_common_tokens - before_common_tokens,
         },
+        "top_gains": top_gains,
+        "top_regressions": top_regressions,
         "tasks": rows,
     }
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,7 @@ from irys_harness.cli import main
 from irys_harness.cli import (
     aggregate_tokens_by_tier,
     build_harvey_batch_report,
+    compare_run_dirs,
     dedupe,
     read_task_file,
     resolve_harvey_smoke_task_ids,
@@ -16,6 +18,29 @@ from irys_harness.cli import (
 )
 from irys_harness.harvey_pipeline import HarveyPipelineResult, maybe_resume_harvey_task
 from irys_harness.trace import attach_harvey_scores, diagnose_trace, load_trace, trace_summary
+
+
+def json_trace(
+    *,
+    task_id: str,
+    passed: bool,
+    rubric_passed: int,
+    rubric_total: int,
+    cost: float,
+    tokens: int,
+) -> str:
+    return json.dumps(
+        {
+            "benchmark": "harvey_lab_sample",
+            "task_id": task_id,
+            "scoring_result": {"passed": passed, "score": 0.0},
+            "metrics": {
+                "quality": {"rubric_passed": rubric_passed, "rubric_total": rubric_total},
+                "estimated_cost": cost,
+                "total_tokens": tokens,
+            },
+        }
+    )
 
 
 class TraceCliTests(unittest.TestCase):
@@ -37,6 +62,46 @@ class TraceCliTests(unittest.TestCase):
         self.assertTrue(diagnosis["failed"])
         self.assertIn("trace_incomplete", diagnosis["failure_tags"])
         self.assertEqual(diagnosis["suspected_module"], "trace_writer")
+
+    def test_compare_run_dirs_reports_rubric_deltas(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            before = root / "before" / "harvey_lab_sample" / "area"
+            after = root / "after" / "harvey_lab_sample" / "area"
+            before.mkdir(parents=True)
+            after.mkdir(parents=True)
+            before.joinpath("task.json").write_text(
+                json_trace(
+                    task_id="area/task",
+                    passed=False,
+                    rubric_passed=6,
+                    rubric_total=10,
+                    cost=1.0,
+                    tokens=100,
+                ),
+                encoding="utf-8",
+            )
+            after.joinpath("task.json").write_text(
+                json_trace(
+                    task_id="area/task",
+                    passed=False,
+                    rubric_passed=9,
+                    rubric_total=10,
+                    cost=1.5,
+                    tokens=120,
+                ),
+                encoding="utf-8",
+            )
+
+            comparison = compare_run_dirs(root / "before", root / "after")
+
+            self.assertEqual(comparison["summary"]["common_scored_tasks"], 1)
+            self.assertEqual(comparison["summary"]["common_passed_delta"], 0)
+            self.assertAlmostEqual(comparison["summary"]["common_macro_rubric_pass_rate_delta"], 0.3)
+            self.assertEqual(comparison["summary"]["common_rubric_passed_delta"], 3)
+            self.assertEqual(comparison["summary"]["common_token_delta"], 20)
+            self.assertEqual(comparison["top_gains"][0]["task"], "harvey_lab_sample::area/task")
+            self.assertAlmostEqual(comparison["top_gains"][0]["rubric_pass_rate_delta"], 0.3)
 
     def test_aggregate_token_share(self) -> None:
         traces = [
