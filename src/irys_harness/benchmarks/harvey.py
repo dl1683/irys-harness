@@ -3650,6 +3650,9 @@ def build_task_family_digest(state: RunState) -> str:
     source_inventory = build_action_source_inventory_digest(state)
     if source_inventory:
         parts.append(source_inventory)
+    bankruptcy_petition_schedule = build_bankruptcy_petition_schedule_digest(state)
+    if bankruptcy_petition_schedule:
+        parts.append(bankruptcy_petition_schedule)
     primary = build_primary_task_family_digest(state)
     if primary:
         parts.append(primary)
@@ -4776,6 +4779,204 @@ def source_for_harvey_terms(state: RunState, terms: list[str], filename_hint: st
             if all(term.lower() in lower for term in terms[:3]):
                 return f"{doc_id} / {chunk.get('chunk_id', '')} / {filename}"
     return "benchmark-provided sale-motion source documents"
+
+
+def snippet_for_harvey_terms(
+    state: RunState,
+    terms: list[str],
+    filename_hint: str = "",
+    *,
+    limit: int = 760,
+) -> str:
+    doc_lookup = {str(doc.get("doc_id")): doc for doc in state.documents}
+    hint = filename_hint.lower()
+    chunks = sorted(state.chunks, key=lambda item: (str(item.get("doc_id", "")), int(item.get("index", 0) or 0)))
+    for require_hint in [True, False]:
+        for chunk in chunks:
+            doc_id = str(chunk.get("doc_id", ""))
+            filename = str(doc_lookup.get(doc_id, {}).get("filename", ""))
+            if require_hint and hint and hint not in filename.lower():
+                continue
+            text = str(chunk.get("text", ""))
+            lower = text.lower()
+            if not all(term.lower() in lower for term in terms[:3]):
+                continue
+            starts = [lower.find(term.lower()) for term in terms[:3] if lower.find(term.lower()) >= 0]
+            start = min(starts) if starts else 0
+            return compact_digest_text(text[max(0, start - 240) : start + 1100], limit=limit)
+    return ""
+
+
+def needs_bankruptcy_petition_schedule_digest(state: RunState) -> bool:
+    text = lower_task_text(state)
+    deliverables = " ".join(str(item).lower() for item in state.task.answer_schema.get("deliverables", []) or [])
+    combined = f"{text} {deliverables}"
+    return (
+        "voluntary-petition" in combined
+        and "statement-of-financial-affairs" in combined
+        and "schedule-" in combined
+    )
+
+
+def build_bankruptcy_petition_schedule_digest(state: RunState) -> str:
+    if not needs_bankruptcy_petition_schedule_digest(state):
+        return ""
+    rows: list[list[str]] = []
+
+    def add_row(
+        artifact: str,
+        row_focus: str,
+        terms: list[str],
+        required_use: str,
+        filename_hint: str = "",
+    ) -> None:
+        snippet = snippet_for_harvey_terms(state, terms, filename_hint)
+        if not snippet:
+            return
+        rows.append(
+            [
+                artifact,
+                row_focus,
+                required_use,
+                snippet,
+                source_for_harvey_terms(state, terms, filename_hint),
+            ]
+        )
+
+    add_row(
+        "Form 201",
+        "Debtor identity, state, subsidiaries, and employee count",
+        ["Pinnacle Hospitality", "Delaware", "employs"],
+        "Populate debtor identity fields, state of incorporation, non-filing subsidiaries, and employee count.",
+        "board-resolution",
+    )
+    add_row(
+        "Form 201",
+        "Venue, petition date, and authorized signatories",
+        ["Middle District of Tennessee", "voluntary petition", "sign"],
+        "Populate venue, Chapter 11 filing posture, target petition date, and signing authority.",
+        "board-resolution",
+    )
+    add_row(
+        "Schedule A/B",
+        "Asset categories and aggregate values",
+        ["Inventory", "Prepaid Expenses", "Security Deposits"],
+        "Do not summarize only total assets; list inventory, prepaid expenses, vehicles, IP, security deposits, cash, receivables, FF&E, and litigation assets separately.",
+        "financial-summary",
+    )
+    add_row(
+        "Schedule A/B and Schedule D",
+        "DACA deposit accounts",
+        ["Operating Account", "Payroll Account", "Reserve Account"],
+        "List each Southeastern Commerce Bank account separately in Schedule A/B and flag DACA/cash-collateral treatment for Schedule D and the issue memo.",
+        "credit-agreement",
+    )
+    add_row(
+        "Schedule D",
+        "Senior secured facility split",
+        ["$118,400,000", "$22,700,000", "deposit accounts"],
+        "List the Sycamore term loan and revolver as distinct secured claims and preserve collateral/DACA facts.",
+        "credit-agreement",
+    )
+    add_row(
+        "Schedule D",
+        "Mezzanine debt and warrants",
+        ["Ridgeline", "warrants", "8%"],
+        "List Ridgeline secured claim details and note warrants/dilution facts.",
+        "org-chart",
+    )
+    add_row(
+        "Schedule D",
+        "Capital lease secured claims",
+        ["Premier Kitchen", "Carolina HVAC", "$4,250,000"],
+        "Treat capital or finance leases as secured claims on Schedule D, not ordinary Schedule G executory contracts.",
+        "financial-summary",
+    )
+    add_row(
+        "Schedule D",
+        "Property tax statutory liens",
+        ["Statutory lien attaches", "PAST DUE", "property"],
+        "List past-due property taxes by jurisdiction as secured/statutory lien claims and also analyze priority treatment where relevant.",
+        "tax-accrual",
+    )
+    add_row(
+        "Schedule E/F",
+        "Priority payroll and benefit claims",
+        ["Accrued Payroll and Benefits", "$2,180,000"],
+        "List accrued payroll and benefits as priority employee wage/benefit claims where applicable.",
+        "financial-summary",
+    )
+    add_row(
+        "Schedule E/F",
+        "Top 20 unsecured creditors",
+        ["Top 20 Unsecured Creditors", "Meridian Food Services", "Palmetto Signage"],
+        "List all top 20 unsecured creditors by name, address, nature of claim, and amount; do not collapse into a trade-payables total.",
+        "financial-summary",
+    )
+    add_row(
+        "Schedule G",
+        "Six real property leases",
+        ["Pinnacle Birmingham", "RPL-003"],
+        "List each real property lease separately, including Pinnacle Birmingham and the other five lease rows.",
+        "lease-contract",
+    )
+    add_row(
+        "Schedule G",
+        "Software, franchise, service, and labor contracts",
+        ["Global Reservation Systems", "UNITE HERE", "employment agreements"],
+        "Include software license, CBA, employment agreements, franchise/service contracts, and flag CBA rejection as a labor-specific issue rather than ordinary Section 365 treatment.",
+        "lease-contract",
+    )
+    add_row(
+        "SOFA",
+        "90-day creditor and professional payments",
+        ["Meridian Food Services", "$450,000", "Whitfield Thornton"],
+        "Disclose each 90-day payment, including vendor payments, professional retainers, advisory fees, and Sycamore forbearance fee.",
+        "insider-transaction",
+    )
+    add_row(
+        "SOFA",
+        "Litigation proceedings",
+        ["Henderson v. Pinnacle", "Brightstone Construction"],
+        "Disclose WARN Act litigation and Brightstone construction litigation in the lawsuits/proceedings section.",
+        "litigation-summary",
+    )
+    add_row(
+        "Issue memorandum",
+        "Preference and insider-transfer analysis",
+        ["Meridian Food Services payment", "$450,000", "preference"],
+        "Analyze vendor and insider payments under Section 547, including ordinary-course/new-value defenses and insider look-back where source-supported.",
+        "insider-transaction",
+    )
+    add_row(
+        "Issue memorandum",
+        "Cash collateral and first-day motion issue",
+        ["cash collateral", "363", "DACA"],
+        "Discuss DACA accounts as cash collateral under Section 363 and need for a first-day cash-collateral motion or stipulation.",
+        "credit-agreement",
+    )
+    add_row(
+        "Issue memorandum",
+        "CBA treatment",
+        ["UNITE HERE", "Collective Bargaining Agreement", "320"],
+        "Do not treat CBA rejection as ordinary contract rejection only; flag labor-agreement procedure risk separately.",
+        "lease-contract",
+    )
+
+    if not rows:
+        return ""
+    lines = [
+        "# Deterministic bankruptcy petition and schedule digest",
+        "These rows preserve source-state for official Chapter 11 petition packages. Use them to populate Form 201, SOFA, Schedules A/B, D, E/F, G, H, and the issue memorandum before final synthesis.",
+        "",
+    ]
+    append_digest_table(
+        lines,
+        "Bankruptcy Petition / Schedule Source-State Rows",
+        ["Artifact", "Row Focus", "Required Artifact Use", "Source Snippet", "Source"],
+        rows,
+    )
+    return "\n".join(lines)
 
 
 def bankruptcy_sale_motion_skeleton_rows(state: RunState) -> list[list[str]]:

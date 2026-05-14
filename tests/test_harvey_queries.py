@@ -686,6 +686,54 @@ class HarveyQueryTests(unittest.TestCase):
         self.assertNotIn("Operative agreement title", roles["schedule-g-executory-contracts.docx"]["required_sections"])
         self.assertNotIn("Tax issue matrix", str(contract))
 
+    def test_bankruptcy_petition_schedule_digest_curates_form_rows(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="bankruptcy-restructuring/draft-voluntary-chapter-11-petition-and-schedules",
+            question="Draft a voluntary petition, statement of financial affairs, and schedules.",
+            context_files=[],
+            answer_schema={
+                "deliverables": [
+                    "voluntary-petition-form-201.docx",
+                    "statement-of-financial-affairs.docx",
+                    "schedule-ab-property.docx",
+                    "schedule-d-secured-claims.docx",
+                    "schedule-ef-unsecured-claims.docx",
+                    "schedule-g-executory-contracts.docx",
+                    "schedule-h-codebtors.docx",
+                ]
+            },
+            metadata={"practice_area": "bankruptcy-restructuring"},
+        )
+        state = RunState(
+            task=task,
+            config=load_config(),
+            documents=[
+                {"doc_id": "doc_1", "filename": "credit-agreement-summary.docx"},
+                {"doc_id": "doc_2", "filename": "financial-summary-memo.docx"},
+            ],
+            chunks=[
+                {
+                    "doc_id": "doc_1",
+                    "chunk_id": "c1",
+                    "index": 0,
+                    "text": "Operating Account XXXX-4821 $2,180,000; Payroll Account XXXX-7693 $890,000; Reserve Account XXXX-3105 $350,000.",
+                },
+                {
+                    "doc_id": "doc_2",
+                    "chunk_id": "c2",
+                    "index": 0,
+                    "text": "Inventory $1,340,000; Prepaid Expenses $890,000; Security Deposits $2,150,000.",
+                },
+            ],
+        )
+        digest = build_task_family_digest(state)
+        self.assertIn("Deterministic bankruptcy petition and schedule digest", digest)
+        self.assertIn("DACA deposit accounts", digest)
+        self.assertIn("Operating Account", digest)
+        self.assertIn("Asset categories and aggregate values", digest)
+        self.assertIn("Prepaid Expenses", digest)
+
     def test_synthesis_prompt_includes_package_plan_and_filename_headings(self) -> None:
         task = BenchmarkTask(
             benchmark="harvey_lab_sample",
