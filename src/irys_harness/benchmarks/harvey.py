@@ -1115,11 +1115,19 @@ def build_deliverable_atom_keywords(filename: str, plan: dict[str, Any]) -> list
         keywords.extend(["consent", "landlord", "lease"])
     elif artifact_role == "data_room_mapping":
         keywords.extend(["data room", "mapping", "source document"])
+    elif artifact_role == "bankruptcy_petition_form":
+        keywords.extend(["voluntary petition", "form 201", "chapter 11", "debtor", "assets", "liabilities", "creditors"])
+    elif artifact_role == "bankruptcy_statement_of_financial_affairs":
+        keywords.extend(["statement of financial affairs", "sofa", "transfers", "payments", "litigation", "business operations"])
+    elif artifact_role == "bankruptcy_schedule":
+        keywords.extend(build_bankruptcy_schedule_keywords(filename))
     return dedupe_strings([keyword for keyword in keywords if len(keyword) >= 4])
 
 
 def infer_package_kind(roles: list[str], haystack: str, *, deliverable_count: int) -> str:
     role_set = set(roles)
+    if any(role.startswith("bankruptcy_") for role in role_set):
+        return "bankruptcy_petition_and_schedule_package" if deliverable_count > 1 else "bankruptcy_form_or_schedule"
     if any(role.startswith("disclosure_schedule") for role in role_set):
         return "disclosure_schedule_package"
     if "limited_partnership_agreement" in role_set and "checklist_tracker" in role_set:
@@ -1183,6 +1191,12 @@ def infer_artifact_role(filename: str, haystack: str) -> str:
         return "consent_letter"
     if "outstanding-items" in stem or ("outstanding" in stem and ("items" in stem or "memo" in stem)):
         return "outstanding_items_memo"
+    if is_bankruptcy_petition_form_filename(stem):
+        return "bankruptcy_petition_form"
+    if is_bankruptcy_statement_of_financial_affairs_filename(stem):
+        return "bankruptcy_statement_of_financial_affairs"
+    if is_bankruptcy_schedule_filename(stem, haystack):
+        return "bankruptcy_schedule"
     if is_regulated_filing_filename(stem):
         return "regulated_form_or_filing"
     if "motion" in stem:
@@ -1235,6 +1249,51 @@ def is_regulated_filing_filename(stem: str) -> bool:
     )
 
 
+def is_bankruptcy_petition_form_filename(stem: str) -> bool:
+    normalized = stem.lower().replace("_", "-")
+    return "voluntary-petition" in normalized or "petition-form-201" in normalized or normalized.endswith("form-201")
+
+
+def is_bankruptcy_statement_of_financial_affairs_filename(stem: str) -> bool:
+    normalized = stem.lower().replace("_", "-")
+    return "statement-of-financial-affairs" in normalized or normalized in {"sofa", "statement-financial-affairs"}
+
+
+def is_bankruptcy_schedule_filename(stem: str, haystack: str) -> bool:
+    normalized = stem.lower().replace("_", "-")
+    if not normalized.startswith("schedule-"):
+        return False
+    bankruptcy_context = any(
+        term in haystack
+        for term in [
+            "bankruptcy",
+            "chapter 11",
+            "chapter-11",
+            "debtor",
+            "secured claims",
+            "unsecured claims",
+            "executory contracts",
+            "codebtors",
+        ]
+    )
+    bankruptcy_schedule_terms = [
+        "schedule-ab",
+        "schedule-a-b",
+        "property",
+        "schedule-d",
+        "secured-claims",
+        "schedule-ef",
+        "schedule-e-f",
+        "unsecured-claims",
+        "schedule-g",
+        "executory-contracts",
+        "schedule-h",
+        "codebtors",
+        "co-debtors",
+    ]
+    return bankruptcy_context and any(term in normalized for term in bankruptcy_schedule_terms)
+
+
 def infer_drafting_mode(artifact_role: str, suffix: str) -> str:
     if suffix == ".xlsx" or artifact_role.endswith("_workbook"):
         return "structured_workbook_rows"
@@ -1252,6 +1311,12 @@ def infer_drafting_mode(artifact_role: str, suffix: str) -> str:
         return "issue_analysis"
     if artifact_role == "court_motion":
         return "court_filing_drafting"
+    if artifact_role in {
+        "bankruptcy_petition_form",
+        "bankruptcy_schedule",
+        "bankruptcy_statement_of_financial_affairs",
+    }:
+        return "official_form_drafting"
     if artifact_role.startswith("disclosure_schedule"):
         return "schedule_exception_drafting"
     if artifact_role in {
@@ -1286,6 +1351,9 @@ def build_artifact_goal(filename: str, artifact_role: str) -> str:
         "transfer_pricing_memo": "Analyze transfer-pricing facts, intercompany transactions, tax periods, methods, exposure, and recommendations.",
         "consent_letter": "Draft the requested consent letter with parties, contract reference, consent grant, conditions, effective date, and signature mechanics.",
         "outstanding_items_memo": "List open package items with owner, blocker, source document, deadline, and next action.",
+        "bankruptcy_petition_form": "Draft the voluntary petition as an official Chapter 11 petition form with debtor identity, filing posture, asset/liability ranges, creditor counts, and signatures.",
+        "bankruptcy_schedule": "Draft the requested bankruptcy schedule as form-style rows, not an issue memo or contract analysis.",
+        "bankruptcy_statement_of_financial_affairs": "Draft the statement of financial affairs as form-style disclosures covering transfers, payments, litigation, business operations, and source support.",
     }
     if artifact_role.endswith("_workbook"):
         return "Populate workbook rows with source inputs, calculations or comparisons, conclusions, and support."
@@ -1946,6 +2014,12 @@ def build_artifact_required_sections(filename: str, haystack: str) -> list[str]:
         sections = build_regulated_filing_sections(filename, haystack)
         if sections:
             return sections
+    if role in {
+        "bankruptcy_petition_form",
+        "bankruptcy_schedule",
+        "bankruptcy_statement_of_financial_affairs",
+    }:
+        return build_bankruptcy_form_sections(filename, role)
     if role == "issues_memo":
         return [
             "Executive summary",
@@ -2236,6 +2310,97 @@ def build_regulated_filing_sections(filename: str, haystack: str) -> list[str]:
         "Source-supported narrative disclosure",
         "Exhibits, schedules, signatures, and filing mechanics",
         "Open drafting notes and unresolved source inconsistencies",
+    ]
+
+
+def build_bankruptcy_schedule_keywords(filename: str) -> list[str]:
+    normalized = Path(filename.lower()).stem.replace("_", "-")
+    if "schedule-ab" in normalized or "schedule-a-b" in normalized or "property" in normalized:
+        return ["schedule a/b", "schedule ab", "property", "real property", "personal property", "asset value"]
+    if "schedule-ef" in normalized or "schedule-e-f" in normalized or "unsecured-claims" in normalized:
+        return ["schedule e/f", "unsecured claims", "priority unsecured", "nonpriority unsecured", "claim amount"]
+    if "schedule-d" in normalized or "secured-claims" in normalized:
+        return ["schedule d", "secured claims", "secured creditor", "collateral", "lien", "claim amount"]
+    if "schedule-g" in normalized or "executory-contracts" in normalized:
+        return ["schedule g", "executory contracts", "unexpired leases", "counterparty", "cure", "assumption"]
+    if "schedule-h" in normalized or "codebtors" in normalized or "co-debtors" in normalized:
+        return ["schedule h", "codebtors", "co-debtors", "creditor", "relationship", "obligation"]
+    return ["bankruptcy schedule", "debtor", "creditor", "claim", "asset", "source support"]
+
+
+def build_bankruptcy_form_sections(filename: str, role: str) -> list[str]:
+    normalized = Path(filename.lower()).stem.replace("_", "-")
+    if role == "bankruptcy_petition_form":
+        return [
+            "Official Form 201 voluntary petition heading",
+            "Debtor name, EIN, address, and prior names",
+            "Chapter 11 filing posture and venue",
+            "Debtor type, business description, and affiliate information",
+            "Estimated assets, liabilities, creditors, and equity interests",
+            "Related cases, pending bankruptcies, and case-management facts",
+            "Filing fee, requested relief, and first-day package cross-references",
+            "Debtor declaration, attorney certification, signatures, and date",
+            "Source citations",
+        ]
+    if role == "bankruptcy_statement_of_financial_affairs":
+        return [
+            "Statement of Financial Affairs heading",
+            "Income, business operations, and accounting records",
+            "Payments to creditors and insiders",
+            "Transfers, repossessions, assignments, and gifts",
+            "Lawsuits, administrative proceedings, executions, and attachments",
+            "Setoffs, safe-deposit boxes, environmental, and regulatory disclosures",
+            "Business ownership, officers, financial accounts, and bookkeepers",
+            "Source citations",
+        ]
+    if "schedule-ab" in normalized or "schedule-a-b" in normalized or "property" in normalized:
+        return [
+            "Schedule A/B property heading",
+            "Real property rows with address, ownership interest, value, and liens",
+            "Cash, bank accounts, deposits, receivables, inventory, equipment, IP, and other personal property rows",
+            "Book value, estimated value, and source document support for each asset category",
+            "Unknown, contingent, or disputed property notes",
+            "Source citations",
+        ]
+    if "schedule-ef" in normalized or "schedule-e-f" in normalized or "unsecured-claims" in normalized:
+        return [
+            "Schedule E/F unsecured claims heading",
+            "Priority unsecured claims with statutory priority category",
+            "Nonpriority unsecured claims by creditor and basis",
+            "Claim amount and disputed, contingent, or unliquidated status",
+            "Insider, trade, tax, litigation, lease, and contract claim notes",
+            "Source citations",
+        ]
+    if "schedule-d" in normalized or "secured-claims" in normalized:
+        return [
+            "Schedule D secured claims heading",
+            "Creditor name and notice address",
+            "Collateral description and lien/security interest basis",
+            "Claim amount, secured portion, unsecured portion, and priority if stated",
+            "Disputed, contingent, or unliquidated status",
+            "Source citations",
+        ]
+    if "schedule-g" in normalized or "executory-contracts" in normalized:
+        return [
+            "Schedule G executory contracts and unexpired leases heading",
+            "Counterparty name and notice address",
+            "Contract or lease description, date, and debtor party",
+            "Cure amount, arrears, assignment, assumption, rejection, and critical-vendor notes if source-supported",
+            "Source citations",
+        ]
+    if "schedule-h" in normalized or "codebtors" in normalized or "co-debtors" in normalized:
+        return [
+            "Schedule H codebtors heading",
+            "Codebtor name and notice address",
+            "Creditor and claim or obligation tied to the codebtor",
+            "Relationship to debtor and guarantee, joint-obligation, or indemnity status",
+            "Source citations",
+        ]
+    return [
+        "Bankruptcy schedule heading",
+        "Form-style row inventory",
+        "Source-supported debtor, creditor, property, contract, claim, and status fields",
+        "Open gaps and source citations",
     ]
 
 

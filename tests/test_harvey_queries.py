@@ -645,6 +645,47 @@ class HarveyQueryTests(unittest.TestCase):
         self.assertIn("Requested consent grant", roles["landlord-consent-letter.docx"]["required_sections"])
         self.assertIn("Outstanding item tracker", roles["outstanding-items-memo.docx"]["required_sections"])
 
+    def test_bankruptcy_petition_package_uses_form_and_schedule_artifact_roles(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="bankruptcy-restructuring/draft-voluntary-chapter-11-petition-and-schedules",
+            question="Draft a voluntary Chapter 11 petition, statement of financial affairs, and related bankruptcy schedules.",
+            context_files=[],
+            answer_schema={
+                "deliverables": [
+                    "issue-memorandum.docx",
+                    "schedule-ab-property.docx",
+                    "schedule-d-secured-claims.docx",
+                    "schedule-ef-unsecured-claims.docx",
+                    "schedule-g-executory-contracts.docx",
+                    "schedule-h-codebtors.docx",
+                    "statement-of-financial-affairs.docx",
+                    "voluntary-petition-form-201.docx",
+                ]
+            },
+            metadata={"practice_area": "bankruptcy-restructuring"},
+        )
+        state = RunState(task=task, config=load_config(), documents=[])
+        contract = build_deliverable_contract(state)
+        roles = {item["filename"]: item for item in contract["deliverables"]}
+
+        self.assertEqual(contract["package_plan"]["package_kind"], "bankruptcy_petition_and_schedule_package")
+        self.assertEqual(roles["issue-memorandum.docx"]["artifact_role"], "analysis_memo")
+        self.assertEqual(roles["voluntary-petition-form-201.docx"]["artifact_role"], "bankruptcy_petition_form")
+        self.assertEqual(roles["statement-of-financial-affairs.docx"]["artifact_role"], "bankruptcy_statement_of_financial_affairs")
+        self.assertEqual(roles["schedule-ab-property.docx"]["artifact_role"], "bankruptcy_schedule")
+        self.assertEqual(roles["schedule-d-secured-claims.docx"]["artifact_role"], "bankruptcy_schedule")
+        self.assertEqual(roles["schedule-ef-unsecured-claims.docx"]["artifact_role"], "bankruptcy_schedule")
+        self.assertEqual(roles["schedule-g-executory-contracts.docx"]["artifact_role"], "bankruptcy_schedule")
+        self.assertEqual(roles["schedule-h-codebtors.docx"]["artifact_role"], "bankruptcy_schedule")
+        self.assertIn("Official Form 201 voluntary petition heading", roles["voluntary-petition-form-201.docx"]["required_sections"])
+        self.assertIn("Schedule D secured claims heading", roles["schedule-d-secured-claims.docx"]["required_sections"])
+        self.assertIn("Schedule E/F unsecured claims heading", roles["schedule-ef-unsecured-claims.docx"]["required_sections"])
+        self.assertIn("Schedule G executory contracts and unexpired leases heading", roles["schedule-g-executory-contracts.docx"]["required_sections"])
+        self.assertNotIn("Schedule D secured claims heading", roles["schedule-ef-unsecured-claims.docx"]["required_sections"])
+        self.assertNotIn("Operative agreement title", roles["schedule-g-executory-contracts.docx"]["required_sections"])
+        self.assertNotIn("Tax issue matrix", str(contract))
+
     def test_synthesis_prompt_includes_package_plan_and_filename_headings(self) -> None:
         task = BenchmarkTask(
             benchmark="harvey_lab_sample",
