@@ -10,7 +10,12 @@ from typing import Any
 from openpyxl import load_workbook
 
 from irys_harness.agents import build_final_packet, extract_evidence_from_retrieval
-from irys_harness.artifacts import apply_deliverable_coverage_audit, render_deliverables
+from irys_harness.artifacts import (
+    apply_deliverable_coverage_audit,
+    deliverable_keywords,
+    render_deliverables,
+    safe_text,
+)
 from irys_harness.benchmarks.base import BenchmarkAdapter
 from irys_harness.events import EventLogger
 from irys_harness.indexing import load_documents, retrieve_chunks
@@ -400,6 +405,18 @@ class HarveyLabAdapter(BenchmarkAdapter):
             )
             if appendix:
                 state.final_packet["artifact_appendix"] = appendix
+            atom_map = build_deliverable_atom_map(
+                deliverable_contract,
+                "\n\n".join([combined_worker_summary, appendix]),
+            )
+            if atom_map:
+                state.final_packet["deliverable_atom_map"] = atom_map
+                state.extraction_records.append(
+                    {
+                        "mode": "deterministic_deliverable_atom_map",
+                        "summary": atom_map,
+                    }
+                )
 
             prompt = build_synthesis_prompt(state)
             result = router.generate(
@@ -683,6 +700,118 @@ def build_package_plan(deliverable_plans: list[dict[str, Any]], haystack: str) -
             "Use filename-level headings during synthesis so package coverage can be inspected in the trace and rendered artifacts.",
         ],
     }
+
+
+def build_deliverable_atom_map(
+    deliverable_contract: dict[str, Any],
+    source_text: str,
+) -> dict[str, Any]:
+    deliverables = list(deliverable_contract.get("deliverables", []) or [])
+    package_plan = deliverable_contract.get("package_plan", {}) or {}
+    if len(deliverables) <= 1 and not package_plan.get("requires_file_by_file_allocation"):
+        return {}
+    if len(deliverables) <= 2 or len(deliverables) > 12:
+        return {}
+    max_atoms = 3 if len(deliverables) > 20 else 5
+    mapped: dict[str, Any] = {}
+    for plan in deliverables:
+        filename = str(plan.get("filename") or "")
+        if not filename:
+            continue
+        atoms = select_deliverable_atoms(filename, plan, source_text, max_atoms=max_atoms)
+        mapped[filename] = {
+            "artifact_role": plan.get("artifact_role"),
+            "drafting_mode": plan.get("drafting_mode"),
+            "required_sections": list(plan.get("required_sections", []) or [])[:12],
+            "atom_count": len(atoms),
+            "coverage_risk": "high" if not atoms else "medium" if len(atoms) < 2 else "low",
+            "atoms": atoms,
+        }
+    if not mapped:
+        return {}
+    return {
+        "version": 1,
+        "source": "deterministic_keyword_allocation_from_worker_packet",
+        "max_atoms_per_deliverable": max_atoms,
+        "deliverables": mapped,
+    }
+
+
+def select_deliverable_atoms(
+    filename: str,
+    plan: dict[str, Any],
+    source_text: str,
+    *,
+    max_atoms: int,
+) -> list[dict[str, Any]]:
+    keywords = build_deliverable_atom_keywords(filename, plan)
+    if not keywords:
+        return []
+    candidates: list[tuple[int, int, dict[str, Any]]] = []
+    for index, raw_line in enumerate(source_text.splitlines()):
+        line = " ".join(raw_line.strip().split())
+        if len(line) < 32:
+            continue
+        lower_line = line.lower()
+        matched = [keyword for keyword in keywords if keyword in lower_line]
+        if not matched:
+            continue
+        candidates.append(
+            (
+                len(matched),
+                index,
+                {
+                    "text": safe_text(line, limit=420),
+                    "matched_terms": matched[:8],
+                },
+            )
+        )
+    ranked = sorted(candidates, key=lambda item: (-item[0], item[1]))[:max_atoms]
+    return [item[2] for item in ranked]
+
+
+def build_deliverable_atom_keywords(filename: str, plan: dict[str, Any]) -> list[str]:
+    noisy_terms = {
+        "schedule",
+        "schedules",
+        "disclosure",
+        "exception",
+        "exceptions",
+        "facts",
+        "supporting",
+        "heading",
+        "representation",
+        "reference",
+        "cross",
+        "open",
+        "items",
+        "required",
+        "follow",
+        "citations",
+    }
+    keywords = [keyword for keyword in deliverable_keywords(filename, plan) if keyword not in noisy_terms]
+    schedule_number = infer_schedule_number(Path(filename.lower()).stem)
+    if schedule_number:
+        keywords.extend(
+            [
+                schedule_number,
+                f"schedule {schedule_number}",
+                f"schedule-{schedule_number.replace('.', '-')}",
+                f"schedule {schedule_number.replace('.', ' ')}",
+            ]
+        )
+    artifact_role = str(plan.get("artifact_role") or "")
+    if artifact_role == "seller_certificate":
+        keywords.extend(["seller certificate", "bringdown", "representations", "warranties"])
+    elif artifact_role == "mac_certificate":
+        keywords.extend(["mac", "material adverse", "no-mac"])
+    elif artifact_role == "transfer_pricing_memo":
+        keywords.extend(["transfer pricing", "intercompany", "nexus", "tax exposure"])
+    elif artifact_role == "consent_letter":
+        keywords.extend(["consent", "landlord", "lease"])
+    elif artifact_role == "data_room_mapping":
+        keywords.extend(["data room", "mapping", "source document"])
+    return dedupe_strings([keyword for keyword in keywords if len(keyword) >= 4])
 
 
 def infer_package_kind(roles: list[str], haystack: str, *, deliverable_count: int) -> str:
@@ -1986,6 +2115,8 @@ def build_synthesis_prompt(state: RunState) -> str:
     deliverables = ", ".join(state.task.answer_schema.get("deliverables", []))
     package_plan = packet.get("package_plan") or (state.task.answer_schema.get("deliverable_contract") or {}).get("package_plan", {})
     package_plan_text = json.dumps(package_plan, indent=2, sort_keys=True)
+    atom_map = packet.get("deliverable_atom_map") or {}
+    atom_map_text = json.dumps(atom_map, indent=2, sort_keys=True)
     prenuptial_guidance = ""
     if needs_prenuptial_asset_rights_digest(state):
         prenuptial_guidance = """
@@ -2099,6 +2230,9 @@ Required deliverables:
 Package plan:
 {package_plan_text}
 
+Deliverable atom map:
+{atom_map_text}
+
 Deliverable contract:
 {format_deliverable_contract(state)}
 
@@ -2107,7 +2241,7 @@ Evidence packet prepared by the worker tier:
 
 Write the complete content for the requested deliverable(s). Follow the package plan and deliverable contract closely, including workbook sheet names, section names, issue matrices, formula tables, and source-support expectations. Be specific, structured, and use only the provided evidence. If evidence is incomplete, still produce the best work product possible and clearly identify gaps.
 
-For multi-file packages, create a top-level section for every requested filename using the exact filename as the section heading. Within each filename section, include the artifact-specific content required for that file. Repeat shared source facts, numbers, definitions, party names, and risk points inside every deliverable section that needs them; do not assume a companion memo, checklist, schedule, or workbook will carry facts for another artifact. A companion issues memorandum should not replace operative agreement text, schedule exception language, checklist rows, filing/body text, or workbook rows.
+For multi-file packages, create a top-level section for every requested filename using the exact filename as the section heading. Within each filename section, include the artifact-specific content required for that file. Use the deliverable atom map to place source facts into the correct filename section, and clearly mark source gaps when a filename has few or no mapped atoms. Repeat shared source facts, numbers, definitions, party names, and risk points inside every deliverable section that needs them; do not assume a companion memo, checklist, schedule, or workbook will carry facts for another artifact. A companion issues memorandum should not replace operative agreement text, schedule exception language, checklist rows, filing/body text, or workbook rows.
 
 For gap-analysis deliverables, include a summary table with columns: Priority, Issue, Evidence, Risk, Remediation, Source. Also explicitly reconcile any document ranges, exhibit ranges, checklist counts, stale-date requirements, signatures, support letters, and mismatches between draft documents and checklists.
 

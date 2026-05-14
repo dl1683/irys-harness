@@ -9,6 +9,7 @@ from irys_harness.benchmarks.harvey import (
     build_numeric_fact_digest,
     build_covenant_calculation_worker_prompt,
     build_deliverable_contract,
+    build_deliverable_atom_map,
     build_synthesis_prompt,
     build_task_family_digest,
     is_encoded_artifact_answer,
@@ -369,19 +370,64 @@ class HarveyQueryTests(unittest.TestCase):
         )
         state = RunState(task=task, config=load_config(), documents=[])
         contract = build_deliverable_contract(state)
+        atom_map = build_deliverable_atom_map(
+            contract,
+            "\n".join(
+                [
+                    "Fund IV LPA should use an 8% preferred return and 20% carry.",
+                    "Side letter checklist should track MFN and LPAC seat requests.",
+                ]
+            ),
+        )
         state.task.answer_schema["deliverable_contract"] = contract
         state.final_packet = {
             "deliverable_contract": contract,
             "package_plan": contract["package_plan"],
+            "deliverable_atom_map": atom_map,
             "cheap_worker_summary": "Fund IV has a 2.0% management fee and side-letter MFN issues.",
             "verified_evidence": [],
         }
         prompt = build_synthesis_prompt(state)
         self.assertIn("Package plan", prompt)
+        self.assertIn("Deliverable atom map", prompt)
         self.assertIn("fund_formation_lpa_package", prompt)
+        self.assertIn("Side letter checklist should track MFN", prompt)
         self.assertIn("top-level section for every requested filename", prompt)
         self.assertIn("lpa-draft.docx", prompt)
         self.assertIn("side-letter-checklist.docx", prompt)
+
+    def test_deliverable_atom_map_allocates_package_source_lines(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="corporate-ma/draft-disclosure-schedule-preparation",
+            question="Prepare disclosure schedules and ancillary closing deliverables.",
+            context_files=[],
+            answer_schema={
+                "deliverables": [
+                    "schedule-3-13.docx",
+                    "seller-certificate.docx",
+                    "transfer-pricing-memo.docx",
+                ]
+            },
+            metadata={"practice_area": "corporate-ma"},
+        )
+        state = RunState(task=task, config=load_config(), documents=[])
+        contract = build_deliverable_contract(state)
+        atom_map = build_deliverable_atom_map(
+            contract,
+            "\n".join(
+                [
+                    "Schedule 3.13: ISO 9001 certificate expires January 21, 2025 and renewal audit is pending.",
+                    "Seller certificate should bring down representations and warranties subject to disclosure schedule exceptions.",
+                    "Transfer pricing memo should cover intercompany services, Texas nexus, and tax exposure.",
+                ]
+            ),
+        )
+        mapped = atom_map["deliverables"]
+        self.assertEqual(mapped["schedule-3-13.docx"]["atom_count"], 1)
+        self.assertIn("ISO 9001", mapped["schedule-3-13.docx"]["atoms"][0]["text"])
+        self.assertIn("Seller certificate", mapped["seller-certificate.docx"]["atoms"][0]["text"])
+        self.assertIn("Transfer pricing", mapped["transfer-pricing-memo.docx"]["atoms"][0]["text"])
 
     def test_funds_route_does_not_match_unrelated_stipulation_text(self) -> None:
         task = BenchmarkTask(
