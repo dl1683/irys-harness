@@ -39,19 +39,27 @@ class HarveyLabAdapter(BenchmarkAdapter):
     def __init__(
         self,
         root: str | Path | None = None,
-        sample_per_area: int = 5,
+        sample_per_area: int | None = None,
+        sample_size: int = 250,
         live_synthesis: bool = False,
     ) -> None:
         self.root = Path(root) if root else default_harvey_root()
         self.sample_per_area = sample_per_area
+        self.sample_size = sample_size
         self.live_synthesis = live_synthesis
 
     def list_tasks(self, split: str = "sample") -> list[HarveyTaskRef]:
         refs = discover_tasks(self.root)
         if split == "all":
             return refs
-        if split != "sample":
+        if split == "sample120":
+            return balanced_harvey_sample(refs, 120)
+        if split == "sample500":
+            return balanced_harvey_sample(refs, 500)
+        if split != "sample" and split != "sample250":
             raise ValueError(f"Unknown Harvey split: {split}")
+        if self.sample_per_area is None:
+            return balanced_harvey_sample(refs, self.sample_size)
         by_area: dict[str, list[HarveyTaskRef]] = {}
         for ref in refs:
             by_area.setdefault(ref.practice_area, []).append(ref)
@@ -538,6 +546,39 @@ class HarveyLabAdapter(BenchmarkAdapter):
             if ref.task_id == task_id:
                 return ref
         raise FileNotFoundError(f"Harvey LAB task not found: {task_id}")
+
+
+def balanced_harvey_sample(refs: list[HarveyTaskRef], target_size: int) -> list[HarveyTaskRef]:
+    if target_size <= 0:
+        return []
+    by_area: dict[str, list[HarveyTaskRef]] = {}
+    for ref in refs:
+        by_area.setdefault(ref.practice_area, []).append(ref)
+    for area, area_refs in by_area.items():
+        by_area[area] = sorted(area_refs, key=lambda item: item.task_id)
+
+    sample: list[HarveyTaskRef] = []
+    emitted: set[str] = set()
+    areas = sorted(by_area)
+    depth = 0
+    while len(sample) < target_size:
+        added = False
+        for area in areas:
+            area_refs = by_area[area]
+            if depth >= len(area_refs):
+                continue
+            ref = area_refs[depth]
+            if ref.task_id in emitted:
+                continue
+            sample.append(ref)
+            emitted.add(ref.task_id)
+            added = True
+            if len(sample) >= target_size:
+                break
+        if not added:
+            break
+        depth += 1
+    return sample
 
 
 def default_harvey_root() -> Path:

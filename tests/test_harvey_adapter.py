@@ -63,6 +63,37 @@ class HarveyAdapterTests(unittest.TestCase):
             self.assertEqual(task.answer_schema["deliverables"], ["memo.docx"])
             self.assertEqual(len(task.context_files), 1)
 
+    def test_sample_split_uses_balanced_target_size(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for area in ["area-a", "area-b", "area-c"]:
+                for index in range(4):
+                    task_dir = root / "tasks" / area / f"task-{index}"
+                    task_dir.mkdir(parents=True)
+                    (task_dir / "task.json").write_text(
+                        json.dumps(
+                            {
+                                "title": f"{area} {index}",
+                                "instructions": "Make the thing. Output: `memo.docx`.",
+                                "criteria": [{"id": "C-001", "title": "Deliverable exists"}],
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+
+            refs = HarveyLabAdapter(root=root, sample_size=5).list_tasks("sample")
+            self.assertEqual(
+                [ref.task_id for ref in refs],
+                [
+                    "area-a/task-0",
+                    "area-b/task-0",
+                    "area-c/task-0",
+                    "area-a/task-1",
+                    "area-b/task-1",
+                ],
+            )
+            self.assertEqual(len(HarveyLabAdapter(root=root).list_tasks("sample500")), 12)
+
 
 if __name__ == "__main__":
     unittest.main()
