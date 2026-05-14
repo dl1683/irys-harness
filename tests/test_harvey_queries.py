@@ -1342,6 +1342,86 @@ class HarveyQueryTests(unittest.TestCase):
         underwriting_state.task.answer_schema["deliverable_contract"] = build_deliverable_contract(underwriting_state)
         self.assertFalse(needs_regulated_filing_guidance(underwriting_state))
 
+    def test_capital_markets_digest_preserves_item_level_filing_rows(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="capital-markets/draft-current-report-on-form-8",
+            question="Draft a Form 8-K for the acquisition closing and a cover memo.",
+            answer_schema={"deliverables": ["cover-memo.docx", "form-8k-draft.docx"]},
+            metadata={"practice_area": "capital-markets"},
+        )
+        state = RunState(
+            task=task,
+            config=load_config(),
+            documents=[{"doc_id": "doc_1", "filename": "credit-agreement-term-sheet.docx"}],
+            chunks=[
+                {
+                    "doc_id": "doc_1",
+                    "chunk_id": "c1",
+                    "index": 0,
+                    "text": (
+                        "The Term SOFR margin grid ranges from 175 bps to 275 bps based on total net leverage. "
+                        "All existing and future domestic subsidiaries, including Saxonbrook Robotics Solutions, "
+                        "LLC, will guarantee the facilities. Excess cash flow mandatory prepayments apply."
+                    ),
+                }
+            ],
+        )
+        digest = build_task_family_digest(state)
+        self.assertIn("Deterministic capital markets drafting digest", digest)
+        self.assertIn("Item 2.03", digest)
+        self.assertIn("interest-rate grid", digest)
+        self.assertIn("Term SOFR", digest)
+
+    def test_capital_markets_digest_does_not_contaminate_solved_charter_comparison(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="capital-markets/compare-charter-against-offering",
+            question="Compare current charter against underwriting agreement and prospectus for IPO.",
+            answer_schema={"deliverables": ["charter-offering-deviation-report.docx"]},
+            metadata={"practice_area": "capital-markets"},
+        )
+        state = RunState(
+            task=task,
+            config=load_config(),
+            documents=[{"doc_id": "doc_1", "filename": "underwriting-agreement.docx"}],
+            chunks=[
+                {
+                    "doc_id": "doc_1",
+                    "chunk_id": "c1",
+                    "index": 0,
+                    "text": "The IPO charter must prohibit written consent and include a federal forum provision.",
+                }
+            ],
+        )
+        digest = build_task_family_digest(state)
+        self.assertIn("Deterministic IPO charter comparison digest", digest)
+        self.assertNotIn("Deterministic capital markets drafting digest", digest)
+
+    def test_capital_markets_digest_does_not_override_notes_indenture_route(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="capital-markets/draft-indenture-for-senior-secured-notes-offering",
+            question="Draft an indenture for a senior secured notes offering and an issues memorandum.",
+            answer_schema={"deliverables": ["indenture-draft.docx", "issues-memorandum.docx"]},
+            metadata={"practice_area": "capital-markets"},
+        )
+        state = RunState(
+            task=task,
+            config=load_config(),
+            documents=[{"doc_id": "doc_1", "filename": "final-term-sheet.docx"}],
+            chunks=[
+                {
+                    "doc_id": "doc_1",
+                    "chunk_id": "c1",
+                    "index": 0,
+                    "text": "The senior secured notes indenture includes an equity clawback and after-acquired real property covenant.",
+                }
+            ],
+        )
+        digest = build_task_family_digest(state)
+        self.assertNotIn("Deterministic capital markets drafting digest", digest)
+
     def test_bankruptcy_distribution_digest_preserves_class_and_calculation_rows(self) -> None:
         task = BenchmarkTask(
             benchmark="harvey_lab_sample",

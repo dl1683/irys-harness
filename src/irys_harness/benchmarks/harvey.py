@@ -3109,6 +3109,10 @@ def build_task_family_digest(state: RunState) -> str:
     parts: list[str] = []
     if primary:
         parts.append(primary)
+    if needs_capital_markets_digest(state):
+        supplement = build_capital_markets_digest(state)
+        if supplement:
+            parts.append(supplement)
     if needs_requirement_reconciliation_digest(state):
         supplement = build_requirement_reconciliation_digest(state)
         if supplement:
@@ -16003,6 +16007,233 @@ def build_ipo_charter_digest(state: RunState) -> str:
             "| Director removal current silence/default law | Distinguish DGCL default from express IPO-charter drafting requirement | High |",
             "| Cumulative voting current silence/default law | Note DGCL default but preserve express prohibition requirement | Medium |",
         ]
+    )
+
+
+def needs_capital_markets_digest(state: RunState) -> bool:
+    practice_area = str(state.task.metadata.get("practice_area", "")).lower()
+    if practice_area != "capital-markets":
+        return False
+    haystack = lower_task_text(state)
+    if any(
+        term in haystack
+        for term in [
+            "compare-charter-against-offering",
+            "draft-indenture-for-senior-secured-notes-offering",
+            "senior secured notes",
+            "senior-secured-notes",
+            "complete-form-check-on-registration-statement",
+        ]
+    ):
+        return False
+    return any(
+        term in haystack
+        for term in [
+            "annual report",
+            "form 10",
+            "10-k",
+            "8-k",
+            "current report",
+            "registration statement",
+            "comfort letter",
+            "comfort-letter",
+            "equity incentive",
+            "indenture",
+            "senior secured notes",
+            "closing checklist",
+            "underwriting agreement",
+        ]
+    )
+
+
+def build_capital_markets_digest(state: RunState) -> str:
+    context = " ".join(
+        [
+            lower_task_text(state),
+            " ".join(str(doc.get("filename", "")) for doc in state.documents),
+        ]
+    ).lower()
+    lines = [
+        "# Deterministic capital markets drafting digest",
+        "These rows preserve capital-markets filing, offering, comfort-letter, equity-plan, notes, and closing-checklist requirements before synthesis.",
+        "",
+        "## Operator Instructions",
+        "- Preserve SEC form item numbers, file numbers, dates, exhibit numbers, document names, issuer/acquiror names, facility amounts, rates, maturity dates, share counts, and required calculations as exact rows.",
+        "- Draft the requested filing, plan, indenture, checklist, or request letter as the operative artifact; do not replace it with a generic issues memo.",
+        "- For each missing or inconsistent filing item, state the required source, current/draft treatment, correction, and where it belongs in the artifact.",
+        "- For companion memoranda, include the same issue rows with business/legal consequence and recommended remediation.",
+    ]
+    if any(term in context for term in ["annual report", "form 10-k", "10-k", "10k", "form 10"]):
+        add_capital_markets_form10_rows(lines)
+    if any(term in context for term in ["form 8-k", "8-k", "8k", "current report"]):
+        add_capital_markets_form8_rows(lines)
+    if any(term in context for term in ["registration statement", "form s-3", "s-3", "form s-1", "s-1"]):
+        add_capital_markets_registration_rows(lines)
+    if "comfort" in context:
+        add_capital_markets_comfort_letter_rows(lines)
+    if "equity incentive" in context or "stock option plan" in context or "409a" in context:
+        add_capital_markets_equity_plan_rows(lines)
+    if "indenture" in context or "senior secured notes" in context:
+        add_capital_markets_notes_indentures_rows(lines)
+    if "closing checklist" in context or "closing documents" in context:
+        add_capital_markets_closing_checklist_rows(lines)
+    add_capital_markets_generic_checklist(lines)
+    snippets = collect_relevant_snippets(
+        state,
+        [
+            "Item 1C",
+            "cybersecurity",
+            "CODM",
+            "shares outstanding",
+            "treasury shares",
+            "Merger Agreement",
+            "Term SOFR",
+            "excess cash flow",
+            "domestic subsidiaries",
+            "maturity date",
+            "333-281445",
+            "June 9, 2025",
+            "November 12, 2024",
+            "CAGR",
+            "Performance Awards",
+            "409A",
+            "25102(o)",
+            "$100,000",
+            "equity clawback",
+            "after-acquired real property",
+            "Fixed Charge Coverage Ratio",
+            "builder basket",
+            "comfort letter",
+            "exhibit index",
+        ],
+        max_snippets=64,
+        window=460,
+    )
+    if snippets:
+        lines.extend(["", "## Capital Markets Source Snippets", *snippets])
+    return "\n".join(lines)
+
+
+def add_capital_markets_form10_rows(lines: list[str]) -> None:
+    append_digest_table(
+        lines,
+        "Form 10-K Required Coverage",
+        ["Item / Issue", "Required Coverage", "Common Failure Mode", "Required Treatment"],
+        [
+            ["Item 1C cybersecurity risk management", "Describe ongoing processes for assessing, identifying, and managing material cybersecurity risks, not only a single incident.", "Draft focuses only on the October incident/remediation.", "Add risk-management process disclosure under Item 1C."],
+            ["Item 1C management role", "Describe management's role in assessing and managing cybersecurity risks.", "Management role omitted or merged into generic risk strategy.", "Add management-role disclosure under Item 1C."],
+            ["Item 1C board oversight", "Describe board oversight of cybersecurity risks.", "Board oversight omitted.", "Add board/cybersecurity oversight disclosure under Item 1C."],
+            ["MD&A segment/CODM discussion", "Discuss segment revenue, operating income, significant segment expenses, and CODM where source data supports them.", "Segment discussion omits significant expenses or CODM.", "Add segment/CODM and expense discussion to Item 7."],
+            ["Share reconciliation", "State shares issued, outstanding, treasury shares, and any exact source counts.", "Draft leaves placeholders or omits reconciliation.", "Replace placeholders with source-supported share counts."],
+            ["Controls and procedures", "Discuss material weaknesses, significant deficiencies, remediation, and disclosure-controls implications.", "Incident/control gap appears only in memo or as a vague risk.", "Put control finding in Item 9A and issues memo."],
+            ["Legal proceedings and insurance", "Tie litigation, incident, recovery, and insurance accounting facts to the right form items.", "Insurance recovery or legal proceeding is mentioned without accounting/disclosure consequence.", "Allocate each fact to Item 3, Item 7, Item 8, or Item 9A as applicable."],
+            ["Exhibits and financial statements", "Preserve Item 15 exhibit and financial-statement schedule requirements.", "Draft omits exhibit mechanics.", "Add exhibit/schedule checklist and unresolved source gaps."],
+        ],
+    )
+
+
+def add_capital_markets_form8_rows(lines: list[str]) -> None:
+    append_digest_table(
+        lines,
+        "Form 8-K Item Mapping",
+        ["Item", "Required Coverage", "Common Failure Mode", "Required Treatment"],
+        [
+            ["Item 1.01", "Include every material definitive agreement: merger/acquisition agreement, credit agreement, registration rights or similar agreement if material.", "Merger agreement appears only under Item 2.01 or exhibit index.", "Summarize all material agreements in Item 1.01."],
+            ["Item 2.01", "Identify acquired business/entity, jurisdiction, closing date, consideration, and transaction structure.", "Acquired entity jurisdiction or consideration details omitted.", "State exact entity, jurisdiction, closing date, and consideration."],
+            ["Item 2.03", "Disclose debt facility size, tranches, interest-rate grid, maturity, guarantees, collateral, mandatory prepayment, and covenants.", "Item 2.03 incorporates Item 1.01 but omits grid, ECF prepayment, guarantors, or maturity.", "Draft a standalone debt-obligation disclosure with exact terms."],
+            ["Item 5.02", "Include officer/director appointments, employment arrangements, compensatory terms, and effective dates when triggered.", "Management changes are summarized in memo only.", "Put the executive/officer disclosure in Item 5.02."],
+            ["Item 9.01", "Include exhibit index and financial-statement/pro forma timing or omission rationale.", "Exhibits listed incompletely or financial statement timing omitted.", "Add exhibit numbers and 9.01 timing notes."],
+        ],
+    )
+
+
+def add_capital_markets_registration_rows(lines: list[str]) -> None:
+    append_digest_table(
+        lines,
+        "Registration Statement Cross-Check",
+        ["Issue", "Required Coverage", "Common Failure Mode", "Required Treatment"],
+        [
+            ["Stale incorporated disclosure", "Compare draft S-1/S-3 text against the latest 10-K, 10-Q, 8-K, and prior registration statement.", "Draft repeats stale risk, business, or capitalization language.", "State stale text, current source, and exact correction."],
+            ["File and form identity", "Preserve form type, file number, prospectus date, base prospectus date, and incorporated filing names.", "Output references documents generically without file/date identifiers.", "List exact form/file/date identifiers in the report."],
+            ["Material agreements and exhibits", "Check exhibit index, legal matters, experts, undertakings, and material contracts.", "Exhibit or undertaking gaps are omitted.", "Add exhibit/undertaking discrepancy rows."],
+            ["Offering mechanics", "Preserve selling stockholder, plan of distribution, use of proceeds, securities description, and shelf mechanics.", "Report gives generic disclosure-quality observations.", "Tie each issue to a registration-statement section."],
+        ],
+    )
+
+
+def add_capital_markets_comfort_letter_rows(lines: list[str]) -> None:
+    append_digest_table(
+        lines,
+        "Comfort Letter Request Required Items",
+        ["Issue", "Required Coverage", "Common Failure Mode", "Required Treatment"],
+        [
+            ["Registration statement identity", "Reference Form S-3 shelf registration and file number 333-281445 when present in sources.", "Request omits file number or shelf registration.", "State form type and exact file number in the request letter."],
+            ["Prospectus dates", "Reference prospectus supplement dated June 9, 2025 and base prospectus dated November 12, 2024 when present.", "Output references prospectus documents generically.", "State each prospectus date explicitly."],
+            ["CAGR verification", "Identify approximate 22% revenue CAGR and whether FY2020 support is missing from incorporated financials.", "Request ignores CAGR or does not ask auditor to verify historical support.", "Add a procedure requesting workpaper/historical support for CAGR."],
+            ["Tick-and-tie procedures", "Request procedures for capitalization, shares, pro forma financials, subsequent changes, and selected financial data.", "Comfort request only asks broad financial verification.", "List procedure categories and source documents."],
+            ["Negative assurance and bringdown", "Preserve underwriting-agreement comfort scope, cutoff date, and bringdown mechanics.", "Request lacks date/scope mechanics.", "Add bringdown cutoff and negative assurance scope."],
+        ],
+    )
+
+
+def add_capital_markets_equity_plan_rows(lines: list[str]) -> None:
+    append_digest_table(
+        lines,
+        "Equity Incentive Plan Drafting Checks",
+        ["Issue", "Required Coverage", "Common Failure Mode", "Required Treatment"],
+        [
+            ["Award coverage", "Include options, SARs, restricted stock, RSUs, and performance awards if source materials call for expansion.", "Plan omits performance awards.", "Add operative performance-award provisions."],
+            ["ISO $100K ordering rule", "Include IRC Section 422 $100,000 annual ISO limit and ordering rule by grant date.", "Plan states cap but omits ordering rule.", "Draft ISO ordering language."],
+            ["RSU settlement / 409A", "Specify RSU settlement timing and analyze short-term deferral / 409A safe harbor, including 60-day language if present.", "Memo mentions 409A but plan lacks settlement mechanics.", "Add plan provision and memo discussion."],
+            ["Stockholder approval", "State approval within 12 months of board adoption where required for California 25102(o) and IRC 422.", "Draft substitutes an internal 30-day deadline and misses 12-month legal rule.", "Include legal approval deadline and internal timing separately."],
+            ["Share reserve and capitalization", "Use cap table / board approval source data to calculate reserve, evergreen, treasury, and outstanding-share limits.", "Draft uses placeholders or unsupported share counts.", "Replace placeholders with source counts and calculations."],
+            ["Memo addressee and purpose", "Drafting memorandum should be separately produced and addressed as specified by the task.", "Memo lacks required addressee or deliverable separation.", "Use exact requested addressee and filename heading."],
+        ],
+    )
+
+
+def add_capital_markets_notes_indentures_rows(lines: list[str]) -> None:
+    append_digest_table(
+        lines,
+        "Senior Secured Notes / Indenture Required Issues",
+        ["Issue", "Required Coverage", "Common Failure Mode", "Required Treatment"],
+        [
+            ["Equity clawback percentage", "Identify the source conflict and recommended equity clawback percentage, including 40% vs 35% or other exact values when present.", "Memo discusses a different floor mismatch and omits the required percentage conflict.", "State exact percentages and recommendation in issues memo and draft."],
+            ["After-acquired real property covenant", "Include mortgages on after-acquired real property above the required appraisal threshold, e.g. $2.5M if source facts provide it.", "Memo mentions lien perfection generally but draft lacks covenant.", "Add operative covenant and issue discussion."],
+            ["FCCR / CapEx calculation", "Calculate fixed charge coverage using the correct CapEx definition and show material impact, e.g. 4.12x vs 4.45x if present.", "Output identifies mismatch but omits calculation.", "Show formula and business consequence."],
+            ["Builder basket timing", "Identify whether restricted-payment builder basket starts at issue date partial quarter or first full fiscal quarter.", "Timing ambiguity omitted.", "Add drafting issue and proposed language."],
+            ["Collateral and intercreditor mechanics", "Preserve guarantors, collateral package, intercreditor terms, real-property threshold, and release conditions.", "Draft gives generic secured-notes provisions.", "Include source-specific operative language."],
+            ["Offering / commitment economics", "Preserve coupon, maturity, redemption, call protection, note size, use of proceeds, and covenant baskets.", "Draft uses precedent terms without source-specific updates.", "Replace precedent placeholders with transaction terms."],
+        ],
+    )
+
+
+def add_capital_markets_closing_checklist_rows(lines: list[str]) -> None:
+    append_digest_table(
+        lines,
+        "Capital Markets Closing Checklist Rows",
+        ["Checklist Area", "Required Coverage", "Common Failure Mode", "Required Treatment"],
+        [
+            ["Document inventory", "List each closing document, exhibit, opinion, certificate, comfort letter, officer certificate, and filing.", "Report gives summary without item-level status.", "Create an item-by-item closing tracker."],
+            ["Signer and date status", "Preserve required signer, actual signer, date, missing signature, and delivery status.", "Checklist omits signer/date defects.", "State signer/date gap per item."],
+            ["Condition precedent", "Tie each checklist item to the condition, underwriting agreement, indenture, or filing requirement.", "Status row lacks legal source.", "Add source requirement and remediation."],
+            ["Open defects", "Classify missing, wrong, stale, or mismatched documents separately.", "Multiple defects merged into one generic issue.", "Use separate rows with required cure."],
+        ],
+    )
+
+
+def add_capital_markets_generic_checklist(lines: list[str]) -> None:
+    append_digest_table(
+        lines,
+        "Capital Markets Generic Quality Gate",
+        ["Artifact Type", "Must Preserve", "Avoid"],
+        [
+            ["SEC filings", "Item headings, exact item numbers, exhibit index, file/date/source identifiers, and disclosure text under each item.", "A memo that merely says the filing should be updated."],
+            ["Offering/registration comparisons", "Current source, prior filing, stale text, exact correction, and affected registration/prospectus section.", "Generic stale-disclosure language without section mapping."],
+            ["Comfort letters", "Registration statement identity, file number, prospectus dates, financial metrics, requested procedures, and bringdown dates.", "Broad requests for auditor comfort without exact procedures."],
+            ["Equity plans", "Operative plan provisions plus memo analysis for tax, securities, approval, award, share-reserve, and 409A mechanics.", "Only summarizing design issues without drafting plan language."],
+            ["Indentures/notes", "Operative covenant text, baskets, percentages, thresholds, collateral, guarantors, redemption/call terms, and memo recommendations.", "A high-level notes memo without draft indenture provisions."],
+        ],
     )
 
 
