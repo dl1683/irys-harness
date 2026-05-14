@@ -47,7 +47,6 @@ FULL_CONTEXT_DIRECT_BENCHMARK_REASONS = {
     "longbench_v2": "long-context multiple choice usually benefits from preserving the full adapted context.",
     "facts_grounding": "grounding/refusal tasks are best scored from direct source-context adherence.",
     "mrcr": "conversation-position retrieval is damaged by intermediate summarization.",
-    "l_citeeval": "citation tasks need answer-bearing source labels preserved through rendering.",
     "fanoutqa": "fan-out lookup needs broad source coverage before aggregation.",
     "nocha": "narrative verification needs direct access to the available narrative context.",
     "locomo": "conversation-memory questions are sensitive to exact turns and temporal details.",

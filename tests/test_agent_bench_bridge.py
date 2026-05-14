@@ -444,6 +444,24 @@ class AgentBenchBridgeTests(unittest.IsolatedAsyncioTestCase):
             trace_text = next(Path(temp).rglob("*.json")).read_text(encoding="utf-8")
             self.assertIn('"selected_pipeline": "three-tier"', trace_text)
 
+    async def test_adaptive_backend_keeps_lciteeval_on_three_tier_route(self) -> None:
+        config = bridge_test_config()
+        router = FakeRouter(config)
+        with tempfile.TemporaryDirectory() as temp:
+            backend = IrysAgentBenchBackend(
+                config=config,
+                benchmark="l_citeeval",
+                split="test",
+                mode="adaptive",
+                trace_dir=temp,
+                router=router,  # type: ignore[arg-type]
+            )
+            result = await backend.run(query="Which entity is supported? Cite sources.", context="[doc1] B is supported.")
+            self.assertEqual(result.answer, "B")
+            self.assertEqual(router.calls, ["extraction", "critic", "synthesis"])
+            trace_text = next(Path(temp).rglob("*.json")).read_text(encoding="utf-8")
+            self.assertIn('"selected_pipeline": "three-tier"', trace_text)
+
     async def test_adaptive_backend_keeps_docfinqa_on_three_tier_numeric_path(self) -> None:
         config = bridge_test_config()
         router = FakeRouter(config)
