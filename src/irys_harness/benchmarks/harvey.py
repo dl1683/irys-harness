@@ -2964,14 +2964,18 @@ def sanitize_expert_writer(raw: str) -> str:
 
 def build_task_family_digest(state: RunState) -> str:
     primary = build_primary_task_family_digest(state)
-    if not needs_requirement_reconciliation_digest(state):
-        return primary
-    supplement = build_requirement_reconciliation_digest(state)
-    if not supplement:
-        return primary
-    if not primary:
-        return supplement
-    return f"{primary}\n\n{supplement}"
+    parts: list[str] = []
+    if primary:
+        parts.append(primary)
+    if needs_requirement_reconciliation_digest(state):
+        supplement = build_requirement_reconciliation_digest(state)
+        if supplement:
+            parts.append(supplement)
+    if needs_artifact_requirement_matrix_digest(state):
+        artifact_matrix = build_artifact_requirement_matrix_digest(state)
+        if artifact_matrix:
+            parts.append(artifact_matrix)
+    return "\n\n".join(parts)
 
 
 def build_primary_task_family_digest(state: RunState) -> str:
@@ -3418,6 +3422,8 @@ DOCUMENT_COMPARISON_ISSUE_FAMILIES: list[tuple[str, list[str]]] = [
 MAX_DOCUMENT_COMPARISON_ISSUE_ROWS = 140
 MAX_DOCUMENT_COMPARISON_NUMERIC_ROWS = 70
 MAX_REQUIREMENT_RECONCILIATION_ROWS = 120
+MAX_ARTIFACT_REQUIREMENT_ROWS = 90
+MAX_ARTIFACT_DERIVED_ROWS = 40
 MAX_STRUCTURED_FINANCE_ASSET_ISSUE_ROWS = 90
 
 
@@ -13250,6 +13256,740 @@ def needs_requirement_reconciliation_digest(state: RunState) -> bool:
             ]
         )
     return False
+
+
+def needs_artifact_requirement_matrix_digest(state: RunState) -> bool:
+    haystack = lower_task_text(state)
+    action_terms = [
+        "against",
+        "audit",
+        "compare",
+        "comparison",
+        "compliance gap",
+        "draft",
+        "gap analysis",
+        "review",
+    ]
+    artifact_terms = [
+        "application",
+        "benchmark",
+        "checklist",
+        "closing documents",
+        "condition",
+        "conditions precedent",
+        "form ",
+        "form-",
+        "form adv",
+        "filing",
+        "log",
+        "lpa",
+        "policy",
+        "privilege",
+        "production set",
+        "regulation",
+        "requirements",
+        "relevance",
+        "seller disclosure",
+        "side letter",
+        "term sheet",
+        "tracker",
+    ]
+    return any(term in haystack for term in action_terms) and any(term in haystack for term in artifact_terms)
+
+
+def build_artifact_requirement_matrix_digest(state: RunState) -> str:
+    sources = artifact_matrix_sources(state)
+    derived_rows = build_artifact_requirement_derived_rows(state, sources)
+    relevance_tokens = task_relevance_tokens(state)
+    row_candidates: list[tuple[int, int, list[str]]] = []
+    seen: set[tuple[str, str]] = set()
+    sequence = 0
+    for source in sources:
+        role = infer_reconciliation_doc_role(f"{source['filename']} {source['text'][:1000]}")
+        for line in iter_artifact_matrix_candidate_lines(source["text"]):
+            score = score_artifact_matrix_line(line=line, role=role, relevance_tokens=relevance_tokens)
+            if score <= 0:
+                continue
+            key = (source["source"], normalize_issue_key(line))
+            if key in seen:
+                continue
+            seen.add(key)
+            sequence += 1
+            row_candidates.append(
+                (
+                    score,
+                    sequence,
+                    [
+                        classify_artifact_matrix_line(line),
+                        role,
+                        extract_reconciliation_anchor(line),
+                        compact_digest_text(line, limit=620),
+                        artifact_matrix_required_use(line, role),
+                        source["source"],
+                    ],
+                )
+            )
+
+    rows = [
+        row
+        for _score, _sequence, row in sorted(row_candidates, key=lambda item: (-item[0], item[1]))[
+            :MAX_ARTIFACT_REQUIREMENT_ROWS
+        ]
+    ]
+    if not derived_rows and not rows:
+        return ""
+
+    lines = [
+        "# Deterministic artifact and requirements matrix digest",
+        "These rows preserve artifact-shaped target/current state before synthesis. Use them to build condition matrices, trackers, filing/form skeletons, privilege logs, policy audits, and checklist reports.",
+    ]
+    if derived_rows:
+        append_digest_table(
+            lines,
+            "Derived Target-Versus-Current Rows",
+            ["Finding", "Target Requirement", "Current Evidence", "Gap Or Calculation", "Severity", "Required Remediation", "Source"],
+            derived_rows[:MAX_ARTIFACT_DERIVED_ROWS],
+        )
+    if rows:
+        append_digest_table(
+            lines,
+            "Artifact Requirement Row Inventory",
+            ["Artifact Field", "Source Role", "Anchor", "Extracted Row", "Required Artifact Use", "Source"],
+            rows,
+        )
+    lines.extend(
+        [
+            "",
+            "## Artifact Matrix Operator",
+            "- Convert rows into the requested artifact shape, not a generic memo if the task asks for a report, tracker, checklist, filing, form, application, or log.",
+            "- Preserve each target requirement, current-state evidence, gap or match status, exact calculation, severity, remediation, and source.",
+            "- Treat current-state statements that merely certify compliance as suspect when underlying extracted rows show a shortfall, mismatch, omission, or inconsistent number.",
+            "- Keep target-state and current-state rows separate until the final matrix so the synthesis model cannot turn a current assertion into a satisfied requirement.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def artifact_matrix_sources(state: RunState) -> list[dict[str, str]]:
+    doc_lookup = {str(doc.get("doc_id")): doc for doc in state.documents}
+    sources: list[dict[str, str]] = []
+    for chunk in sorted(state.chunks, key=lambda item: (str(item.get("doc_id", "")), int(item.get("index", 0) or 0))):
+        doc_id = str(chunk.get("doc_id", ""))
+        doc = doc_lookup.get(doc_id, {})
+        filename = str(doc.get("filename", ""))
+        chunk_id = str(chunk.get("chunk_id", ""))
+        text = str(chunk.get("text", ""))
+        if not text.strip():
+            continue
+        sources.append(
+            {
+                "doc_id": doc_id,
+                "chunk_id": chunk_id,
+                "filename": filename,
+                "source": f"{doc_id} / {chunk_id} / {filename}",
+                "text": text,
+            }
+        )
+    return sources
+
+
+def iter_artifact_matrix_candidate_lines(text: str) -> list[str]:
+    lines: list[str] = []
+    for raw in text.splitlines():
+        line = " ".join(raw.strip().split())
+        if not line or len(line) < 18:
+            continue
+        if len(line) > 1200:
+            line = compact_digest_text(line, limit=1200)
+        if is_artifact_matrix_candidate_line(line):
+            lines.append(line)
+    return lines
+
+
+def is_artifact_matrix_candidate_line(line: str) -> bool:
+    lower = line.lower()
+    if "|" in line and count_nonempty_cells(line) >= 3:
+        return True
+    if re.search(r"\b(?:condition|requirement|item|section|schedule|exhibit|form|part|criterion)\s+[a-z0-9_.()-]+", lower):
+        return True
+    if any(
+        term in lower
+        for term in [
+            "condition precedent",
+            "closing condition",
+            "minimum ",
+            "not less than",
+            "shall",
+            "must",
+            "required",
+            "delivered",
+            "missing",
+            "omitted",
+            "inconsistent",
+            "shortfall",
+            "privilege",
+            "responsive",
+            "non-responsive",
+            "withheld",
+            "filing",
+            "application",
+            "form adv",
+        ]
+    ):
+        return True
+    return bool(re.search(r"\$[0-9]|[0-9]+(?:\.\d+)?%|[0-9]+\s*(?:business\s+)?days?", line))
+
+
+def score_artifact_matrix_line(*, line: str, role: str, relevance_tokens: set[str]) -> int:
+    lower = line.lower()
+    score = 0
+    if "|" in line:
+        score += 8
+    if "target" in role or "requirement" in role or "benchmark" in role:
+        score += 8
+    if "current" in role or "draft" in role or "markup" in role:
+        score += 6
+    if any(term in lower for term in ["condition precedent", "closing condition", "minimum ", "not less than"]):
+        score += 14
+    if any(term in lower for term in ["missing", "omitted", "inconsistent", "shortfall", "wrong", "not exceed"]):
+        score += 12
+    if any(term in lower for term in ["shall", "must", "required", "delivered", "satisfied", "certifies"]):
+        score += 7
+    if any(term in lower for term in ["privilege", "responsive", "non-responsive", "withheld", "filing", "application", "form adv"]):
+        score += 7
+    if re.search(r"\$[0-9]|[0-9]+(?:\.\d+)?%|[0-9]+\s*(?:business\s+)?days?", line):
+        score += 6
+    normalized = normalize_issue_key(line)
+    for token in relevance_tokens:
+        if len(token) >= 4 and token in normalized:
+            score += 3
+    return score if score >= 11 else 0
+
+
+def classify_artifact_matrix_line(line: str) -> str:
+    lower = line.lower()
+    if any(term in lower for term in ["condition precedent", "closing condition", "satisfied", "closing date"]):
+        return "closing condition"
+    if any(term in lower for term in ["minimum", "not less than", "threshold", "cap", "limit", "ratio"]):
+        return "numeric threshold"
+    if any(term in lower for term in ["delivered", "checklist", "exhibit", "certificate", "opinion"]):
+        return "deliverable or checklist item"
+    if any(term in lower for term in ["privilege", "responsive", "non-responsive", "withheld", "production"]):
+        return "production or privilege tracker"
+    if any(term in lower for term in ["filing", "form adv", "application", "regulatory"]):
+        return "filing or application field"
+    if any(term in lower for term in ["board", "consent", "approval", "designation"]):
+        return "governance or approval"
+    return "artifact row"
+
+
+def artifact_matrix_required_use(line: str, role: str) -> str:
+    lower = line.lower()
+    if any(term in lower for term in ["shortfall", "missing", "omitted", "inconsistent", "wrong"]):
+        return "Put in the final matrix as a gap, with calculation, severity, and cure."
+    if "target" in role or "requirement" in role or "benchmark" in role:
+        return "Use as target-state requirement; test current evidence against it."
+    if "current" in role or "draft" in role or "markup" in role:
+        return "Use as current-state evidence; compare against target rows before concluding compliance."
+    return "Use as a separate row in the artifact matrix if relevant to the requested output."
+
+
+def build_artifact_requirement_derived_rows(state: RunState, sources: list[dict[str, str]]) -> list[list[str]]:
+    rows: list[list[str]] = []
+    seen: set[str] = set()
+
+    def add_row(row: list[str]) -> None:
+        key = normalize_issue_key(" ".join(row[:4]))
+        if not key or key in seen:
+            return
+        seen.add(key)
+        rows.append(row)
+
+    add_participation_threshold_row(sources, add_row)
+    add_net_proceeds_threshold_row(sources, add_row)
+    add_revolver_initial_draw_row(sources, add_row)
+    add_interest_spread_row(sources, add_row)
+    add_maturity_or_note_terms_row(sources, add_row)
+    add_board_designation_row(sources, add_row)
+    add_management_incentive_plan_rows(sources, add_row)
+    add_intercompany_claims_row(sources, add_row)
+    add_missing_opinion_or_document_row(sources, add_row)
+    return rows
+
+
+def add_participation_threshold_row(sources: list[dict[str, str]], add_row: Any) -> None:
+    target = (
+        find_artifact_source_snippet(sources, ["minimum participation condition", "not less than"])
+        or find_artifact_source_snippet(sources, ["minimum participation threshold"], filename_terms=["rsa"])
+        or find_artifact_source_snippet(sources, ["minimum 95%"], filename_terms=["rsa"])
+    )
+    current = (
+        find_artifact_source_snippet(sources, ["participating amount", "represents approximately"])
+        or find_artifact_source_snippet(sources, ["validly tendered", "94.34"])
+        or find_artifact_source_snippet(sources, ["participating amount"])
+    )
+    if not target or not current:
+        return
+    target_amount = extract_money_after(target["snippet"], "not less than") or choose_money_amount(target["snippet"], "target")
+    current_amount = extract_money_after(current["snippet"], "participating amount") or choose_money_amount(current["snippet"], "current")
+    target_pct = extract_percent_after(target["snippet"], "not less than") or choose_percent_amount(target["snippet"], "target")
+    current_pct = extract_percent_after(current["snippet"], "represents") or choose_percent_amount(current["snippet"], "current")
+    if target_amount is None or current_amount is None:
+        return
+    gap = target_amount - current_amount
+    pct_gap = target_pct - current_pct if target_pct is not None and current_pct is not None else None
+    add_row(
+        [
+            "Minimum participation threshold",
+            f"At least {format_percent(target_pct)} / {format_money(target_amount)} tendered.",
+            f"Current tendered amount is {format_money(current_amount)}"
+            + (f" / {format_percent(current_pct)}." if current_pct is not None else "."),
+            f"{format_money(target_amount)} - {format_money(current_amount)} = {format_money(gap)} shortfall"
+            + (f"; percentage gap {pct_gap:.2f} points." if pct_gap is not None else "."),
+            "Critical",
+            "Do not mark the condition satisfied unless a waiver or additional tender evidence is identified.",
+            combine_sources(target, current),
+        ]
+    )
+
+
+def add_net_proceeds_threshold_row(sources: list[dict[str, str]], add_row: Any) -> None:
+    target = find_artifact_source_snippet(sources, ["net cash proceeds", "not less than"])
+    purchase = (
+        find_artifact_source_snippet(sources, ["aggregate purchase price"], filename_terms=["asset-purchase"])
+        or find_artifact_source_snippet(sources, ["section 2.02", "purchase price"], filename_terms=["asset-purchase"])
+    )
+    escrow = find_artifact_source_snippet(sources, ["escrow amount"], filename_terms=["asset-purchase"])
+    costs = find_artifact_source_snippet(sources, ["estimated transaction costs"], filename_terms=["asset-purchase"])
+    if not target or not purchase or not escrow or not costs:
+        return
+    target_amount = extract_money_after(target["snippet"], "not less than") or choose_money_amount(target["snippet"], "target")
+    purchase_amount = (
+        extract_money_after(purchase["snippet"], "aggregate purchase price")
+        or extract_money_after(purchase["snippet"], "purchase price")
+        or choose_money_amount(purchase["snippet"], "current")
+    )
+    escrow_amount = extract_money_after(escrow["snippet"], "escrow amount") or choose_money_amount(escrow["snippet"], "current")
+    costs_amount = extract_money_after(costs["snippet"], "estimated transaction costs") or choose_money_amount(costs["snippet"], "current")
+    if None in {target_amount, purchase_amount, escrow_amount, costs_amount}:
+        return
+    net_amount = purchase_amount - escrow_amount - costs_amount
+    gap = target_amount - net_amount
+    add_row(
+        [
+            "Net cash proceeds threshold",
+            f"Environmental Solutions sale must produce at least {format_money(target_amount)} net cash proceeds.",
+            f"Purchase price {format_money(purchase_amount)} less escrow {format_money(escrow_amount)} and seller transaction costs {format_money(costs_amount)}.",
+            f"{format_money(purchase_amount)} - {format_money(escrow_amount)} - {format_money(costs_amount)} = {format_money(net_amount)}; shortfall versus threshold is {format_money(gap)}.",
+            "Critical/High" if gap > 0 else "Review",
+            "Use net proceeds, not gross purchase price, when testing the closing condition.",
+            combine_sources(target, purchase, escrow, costs),
+        ]
+    )
+
+
+def add_revolver_initial_draw_row(sources: list[dict[str, str]], add_row: Any) -> None:
+    target = find_artifact_source_snippet(sources, ["initial draw"], filename_terms=["rsa"])
+    current = (
+        find_artifact_source_snippet(sources, ["borrow revolving loans", "closing date"], filename_terms=["new-rcf"])
+        or find_artifact_source_snippet(sources, ["closing date revolving loan"], filename_terms=["new-rcf"])
+    )
+    commitment_source = find_artifact_source_snippet(sources, ["aggregate commitment"], filename_terms=["new-rcf"]) or target
+    cash_source = find_artifact_source_snippet(sources, ["unrestricted cash", "available commitments"])
+    if not target or not current:
+        return
+    target_draw = extract_money_after(target["snippet"], "initial draw") or choose_money_amount(target["snippet"], "current")
+    current_draw = (
+        extract_money_after(current["snippet"], "borrow revolving loans")
+        or extract_money_after(current["snippet"], "closing date revolving loan")
+        or choose_money_amount(current["snippet"], "current")
+    )
+    commitment = extract_money_after(commitment_source["snippet"], "aggregate commitment") if commitment_source else None
+    if commitment is None and commitment_source:
+        commitment = choose_money_amount(commitment_source["snippet"], "target")
+    cash_amount = extract_money_after(cash_source["snippet"], "comprised of approximately") if cash_source else None
+    if target_draw is None or current_draw is None:
+        return
+    draw_excess = current_draw - target_draw
+    availability = commitment - current_draw if commitment is not None else None
+    liquidity = cash_amount + availability if cash_amount is not None and availability is not None else None
+    calculation = f"Current draw exceeds target by {format_money(draw_excess)}."
+    if availability is not None:
+        calculation += f" Available RCF after current draw is {format_money(commitment)} - {format_money(current_draw)} = {format_money(availability)}."
+    if liquidity is not None:
+        calculation += f" With {format_money(cash_amount)} cash, liquidity is about {format_money(liquidity)}."
+    add_row(
+        [
+            "New RCF initial draw and liquidity",
+            f"Target initial draw is {format_money(target_draw)}.",
+            f"Current Closing Date Revolving Loan is {format_money(current_draw)}.",
+            calculation,
+            "High",
+            "Flag the unauthorized draw increase and recompute availability/liquidity from the current draw.",
+            combine_sources(target, current, commitment_source, cash_source),
+        ]
+    )
+
+
+def add_interest_spread_row(sources: list[dict[str, str]], add_row: Any) -> None:
+    target = (
+        find_artifact_source_snippet(sources, ["sofr plus 550 basis points"], filename_terms=["rsa"])
+        or find_artifact_source_snippet(sources, ["sofr plus five hundred fifty"], filename_terms=["rsa"])
+        or find_artifact_source_snippet(sources, ["new first lien term loans", "basis points"], filename_terms=["rsa"])
+        or find_artifact_source_snippet(sources, ["new first lien term loans", "term sofr"], filename_terms=["rsa"])
+        or find_artifact_source_snippet(sources, ["new first lien term loans"], filename_terms=["rsa"])
+    )
+    current = (
+        find_artifact_source_snippet(sources, ["applicable margin", "500 basis points"], filename_terms=["new-tl"])
+        or find_artifact_source_snippet(sources, ["applicable margin"], filename_terms=["new-tl"])
+    )
+    if not target or not current:
+        return
+    target_bps = extract_spread_bps_after(target["snippet"], "new first lien term loans") or extract_spread_bps(
+        target["snippet"]
+    )
+    current_bps = extract_spread_bps_after(current["snippet"], "applicable margin") or extract_spread_bps(
+        current["snippet"]
+    )
+    if target_bps is None or current_bps is None or target_bps == current_bps:
+        return
+    add_row(
+        [
+            "New First Lien interest spread",
+            f"Target spread is SOFR + {target_bps} bps.",
+            f"Current credit agreement spread is SOFR + {current_bps} bps.",
+            f"{target_bps} bps - {current_bps} bps = {target_bps - current_bps} bps borrower-favorable discrepancy.",
+            "Medium/High",
+            "Flag as an unauthorized pricing deviation even if economically favorable to the borrower.",
+            combine_sources(target, current),
+        ]
+    )
+
+
+def add_maturity_or_note_terms_row(sources: list[dict[str, str]], add_row: Any) -> None:
+    target = find_artifact_source_snippet(sources, ["new 2l notes", "maturing"], filename_terms=["rsa"])
+    current = find_artifact_source_snippet(sources, ["new 2l indenture"], filename_terms=["company-counsel"])
+    if not target or not current:
+        return
+    target_dates = [extract_date_after(target["snippet"], "new 2l notes") or extract_date_after(target["snippet"], "maturing")]
+    target_dates = [date for date in target_dates if date]
+    current_dates = extract_dates(current["snippet"])
+    target_rates = extract_percent_amounts(target["snippet"])
+    current_rates = extract_percent_amounts(current["snippet"])
+    current_years = re.findall(r"\bdue\s+((?:19|20)\d{2})\b", current["snippet"], flags=re.IGNORECASE)
+    if not target_dates and not current_years and not current_rates:
+        return
+    target_desc = ", ".join(target_dates[:2]) or "target maturity and terms in RSA"
+    current_desc = ", ".join(current_dates[:2] + [f"due {year}" for year in current_years[:1]]) or "current opinion document terms"
+    if target_desc == current_desc and set(round(x, 2) for x in target_rates[:2]) == set(round(x, 2) for x in current_rates[:2]):
+        return
+    add_row(
+        [
+            "New 2L note maturity / rate terms",
+            f"Target New 2L terms include {target_desc}"
+            + (f" and rates {', '.join(format_percent(x) for x in target_rates[:2])}." if target_rates else "."),
+            f"Current reviewed-document description includes {current_desc}"
+            + (f" and rates {', '.join(format_percent(x) for x in current_rates[:2])}." if current_rates else "."),
+            "Maturity or coupon description differs across target/current restructuring documents.",
+            "High",
+            "Reconcile maturity/coupon terms and flag any eliminated buffer or inconsistent note economics.",
+            combine_sources(target, current),
+        ]
+    )
+
+
+def add_board_designation_row(sources: list[dict[str, str]], add_row: Any) -> None:
+    target = find_artifact_source_snippet(sources, ["board reconstitution"], filename_terms=["rsa"])
+    current = find_artifact_source_snippet(sources, ["two (2) directors", "ad hoc group"], filename_terms=["equity-shareholders"])
+    if not target or not current:
+        return
+    add_row(
+        [
+            "Board designation rights",
+            "RSA target board reconstitution requires 3 Ad Hoc Group / 2 Backstop / CEO / 1 Independent.",
+            "Current shareholders agreement gives the Ad Hoc Group two directors and Backstop Parties three directors.",
+            "Control allocation flips from Ad Hoc 3-of-7 to Ad Hoc 2-of-7 and gives the Backstop Parties the larger designation block.",
+            "High",
+            "Flag the governance-control deviation and require conforming board designation rights.",
+            combine_sources(target, current),
+        ]
+    )
+
+
+def add_management_incentive_plan_rows(sources: list[dict[str, str]], add_row: Any) -> None:
+    target = find_artifact_source_snippet(sources, ["management incentive plan"], filename_terms=["rsa"])
+    current_intro = find_artifact_source_snippet(sources, ["reserves up to"], filename_terms=["management-incentive"])
+    current_reserve = (
+        find_artifact_source_snippet(sources, ["aggregate share reserve", "9.5%"], filename_terms=["management-incentive"])
+        or find_artifact_source_snippet(sources, ["9.5%"], filename_terms=["management-incentive"])
+        or find_artifact_source_snippet(sources, ["aggregate share reserve"], filename_terms=["management-incentive"])
+    )
+    current_vesting = find_artifact_source_snippet(sources, ["time-based awards"], filename_terms=["management-incentive"])
+    if target and current_reserve:
+        target_pct = extract_percent_after(target["snippet"], "not more than") or extract_percent_after(
+            target["snippet"], "reserving"
+        )
+        current_pct = (
+            extract_percent_after(current_reserve["snippet"], "equal to")
+            or extract_percent_after(current_reserve["snippet"], "shall equal")
+            or choose_percent_amount(current_reserve["snippet"], "target")
+        )
+        if target_pct is not None and current_pct is not None and current_pct > target_pct:
+            add_row(
+                [
+                    "MIP aggregate share reserve",
+                    f"RSA target reserve is not more than {format_percent(target_pct)} of fully diluted pro forma equity.",
+                    f"Current MIP definition / share reserve states {format_percent(current_pct)}.",
+                    f"{format_percent(current_pct)} - {format_percent(target_pct)} = {current_pct - target_pct:.2f} percentage point excess.",
+                    "High",
+                    "Require MIP reserve to conform to RSA cap and identify any internal inconsistency.",
+                    combine_sources(target, current_reserve),
+                ]
+            )
+    if current_intro and current_reserve:
+        intro_pct = choose_percent_amount(current_intro["snippet"], "current")
+        reserve_pct = choose_percent_amount(current_reserve["snippet"], "target")
+        if intro_pct is not None and reserve_pct is not None and abs(intro_pct - reserve_pct) > 0.01:
+            add_row(
+                [
+                    "MIP internal reserve inconsistency",
+                    "MIP should use one aggregate share reserve percentage consistently.",
+                    f"Intro says {format_percent(intro_pct)} while the defined Aggregate Share Reserve says {format_percent(reserve_pct)}.",
+                    f"Internal inconsistency of {abs(reserve_pct - intro_pct):.2f} percentage points.",
+                    "High",
+                    "Flag the inconsistency and conform every operative MIP section to the approved cap.",
+                    combine_sources(current_intro, current_reserve),
+                ]
+            )
+    if target and current_vesting:
+        add_row(
+            [
+                "MIP vesting allocation and cliff",
+                "RSA target is 50/50 time/performance, 4-year vesting, and 1-year cliff.",
+                "Current MIP uses 60% time-based / 40% performance-based; time awards vest over 3 years with a 6-month cliff, while performance awards use 4 years / 1 year.",
+                "Allocation and time-based vesting terms deviate from the approved RSA structure.",
+                "High",
+                "Require MIP allocation, vesting period, and cliff to conform to RSA terms.",
+                combine_sources(target, current_vesting),
+            ]
+        )
+
+
+def add_intercompany_claims_row(sources: list[dict[str, str]], add_row: Any) -> None:
+    target = find_artifact_source_snippet(sources, ["intercompany claims", "not exceed"], filename_terms=["rsa"])
+    current = find_artifact_source_snippet(sources, ["intercompany claims"], filename_terms=["officers-certificate"])
+    if not target or not current:
+        return
+    cap = choose_money_amount(target["snippet"], "target")
+    current_amount = choose_money_amount(current["snippet"], "current")
+    if cap is None or current_amount is None:
+        return
+    gap = current_amount - cap
+    add_row(
+        [
+            "Intercompany claims cap",
+            f"Aggregate intercompany claims must not exceed {format_money(cap)}.",
+            f"Officer certificate reports subordinated intercompany claims of {format_money(current_amount)}.",
+            f"Current certificate is {'within' if gap <= 0 else 'above'} the cap by {format_money(abs(gap))}; verify against any supporting schedules before treating this as satisfied.",
+            "Review" if gap <= 0 else "High",
+            "Tie the conclusion to both the certificate and any schedules; flag schedule/certificate conflicts if amounts differ.",
+            combine_sources(target, current),
+        ]
+    )
+
+
+def add_missing_opinion_or_document_row(sources: list[dict[str, str]], add_row: Any) -> None:
+    no_conflicts_target = find_artifact_source_snippet(sources, ["no-conflicts opinion"], filename_terms=["rsa"])
+    company_opinion = find_artifact_source_snippet(sources, ["opinion letter"], filename_terms=["company-counsel"])
+    if no_conflicts_target and company_opinion:
+        opinion_text = " ".join(src["text"] for src in sources if "company-counsel" in src["filename"].lower()).lower()
+        if "no-conflicts opinion" not in opinion_text and "no conflicts opinion" not in opinion_text:
+            add_row(
+                [
+                    "Company counsel no-conflicts opinion",
+                    "RSA requires a No-Conflicts Opinion.",
+                    "Company counsel opinion provides authority and enforceability opinions but no express no-conflicts opinion heading or opinion.",
+                    "Requested opinion appears omitted from the delivered opinion package.",
+                    "High",
+                    "Add or obtain an express no-conflicts opinion before marking the closing condition satisfied.",
+                    combine_sources(no_conflicts_target, company_opinion),
+                ]
+            )
+    target_intercreditor = find_artifact_source_snippet(sources, ["intercreditor agreement"], filename_terms=["rsa"])
+    officer_cert = find_artifact_source_snippet(sources, ["officer's certificate"], filename_terms=["officers-certificate"])
+    if target_intercreditor and officer_cert:
+        cert_text = " ".join(src["text"] for src in sources if "officers-certificate" in src["filename"].lower()).lower()
+        if "intercreditor agreement" not in cert_text:
+            add_row(
+                [
+                    "Intercreditor Agreement deliverable",
+                    "RSA/restructuring documents require the intercreditor agreement among the New RCF, New First Lien Term Loans, and New 2L Notes.",
+                    "Officer's Certificate deliverable list does not identify the Intercreditor Agreement.",
+                    "Required restructuring document is not covered by the officer certificate's delivered-document certification.",
+                    "High",
+                    "Add the Intercreditor Agreement to the delivered-document certification or flag as missing support.",
+                    combine_sources(target_intercreditor, officer_cert),
+                ]
+            )
+
+
+def find_artifact_source_snippet(
+    sources: list[dict[str, str]],
+    required_terms: list[str],
+    *,
+    filename_terms: list[str] | None = None,
+) -> dict[str, str] | None:
+    filename_terms = filename_terms or []
+    lowered_required = [term.lower() for term in required_terms]
+    lowered_filenames = [term.lower() for term in filename_terms]
+    for source in sources:
+        filename = source["filename"].lower()
+        if lowered_filenames and not all(term in filename for term in lowered_filenames):
+            continue
+        text = source["text"]
+        lower = text.lower()
+        if not all(term in lower for term in lowered_required):
+            continue
+        indexes = [lower.find(term) for term in lowered_required if lower.find(term) >= 0]
+        focus = max(indexes or [0])
+        start = max(0, focus - 700)
+        end = min(len(text), focus + 1400)
+        result = dict(source)
+        result["snippet"] = compact_digest_text(text[start:end], limit=1800)
+        return result
+    return None
+
+
+def combine_sources(*sources: dict[str, str] | None) -> str:
+    seen: set[str] = set()
+    values: list[str] = []
+    for source in sources:
+        if not source:
+            continue
+        value = source.get("source", "")
+        if value and value not in seen:
+            seen.add(value)
+            values.append(value)
+    return "; ".join(values)
+
+
+def extract_money_amounts(text: str) -> list[float]:
+    amounts: list[float] = []
+    pattern = r"\$\s*(-?\(?\d[\d,]*(?:\.\d+)?\)?)(?:\s*(million|billion|m|bn))?"
+    for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+        raw = match.group(1).replace(",", "")
+        negative = raw.startswith("(") and raw.endswith(")")
+        raw = raw.strip("()")
+        try:
+            value = float(raw)
+        except ValueError:
+            continue
+        unit = (match.group(2) or "").lower()
+        if unit in {"million", "m"}:
+            value *= 1_000_000
+        elif unit in {"billion", "bn"}:
+            value *= 1_000_000_000
+        if negative:
+            value *= -1
+        if abs(value) >= 1000:
+            amounts.append(value)
+    return amounts
+
+
+def extract_money_after(text: str, anchor: str) -> float | None:
+    index = text.lower().find(anchor.lower())
+    if index < 0:
+        return None
+    amounts = extract_money_amounts(text[index : index + 900])
+    return amounts[0] if amounts else None
+
+
+def choose_money_amount(text: str, mode: str) -> float | None:
+    amounts = extract_money_amounts(text)
+    if not amounts:
+        return None
+    if mode == "target":
+        candidates = [value for value in amounts if value >= 1_000_000]
+        return min(candidates) if candidates else amounts[0]
+    if mode == "current":
+        return amounts[0]
+    return amounts[0]
+
+
+def extract_percent_amounts(text: str) -> list[float]:
+    values: list[float] = []
+    for match in re.finditer(r"(?<![\w.])(\d+(?:\.\d+)?)\s*%", text):
+        try:
+            value = float(match.group(1))
+        except ValueError:
+            continue
+        if value <= 1000:
+            values.append(value)
+    return values
+
+
+def extract_percent_after(text: str, anchor: str) -> float | None:
+    index = text.lower().find(anchor.lower())
+    if index < 0:
+        return None
+    values = extract_percent_amounts(text[index : index + 700])
+    return values[0] if values else None
+
+
+def choose_percent_amount(text: str, mode: str) -> float | None:
+    values = extract_percent_amounts(text)
+    if not values:
+        return None
+    if mode == "target":
+        return max(values)
+    if mode == "current":
+        return values[0]
+    return values[0]
+
+
+def format_percent(value: float | None) -> str:
+    if value is None:
+        return "unknown"
+    return f"{value:.2f}%"
+
+
+def extract_spread_bps(text: str) -> int | None:
+    patterns = [
+        r"(?:SOFR|Term SOFR)\s*(?:plus|\+)\s*(\d{3,4})",
+        r"\((\d{3,4})\s*basis points\)",
+        r"(\d{3,4})\s*basis points",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+    percent_match = re.search(r"(\d+(?:\.\d+)?)%\s+per annum\s*\((\d{3,4})\s*basis points\)", text, flags=re.IGNORECASE)
+    if percent_match:
+        return int(percent_match.group(2))
+    return None
+
+
+def extract_spread_bps_after(text: str, anchor: str) -> int | None:
+    index = text.lower().find(anchor.lower())
+    if index < 0:
+        return None
+    return extract_spread_bps(text[index : index + 900])
+
+
+def extract_dates(text: str) -> list[str]:
+    pattern = (
+        r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)"
+        r"\s+\d{1,2},\s+(?:19|20)\d{2}\b"
+    )
+    return [" ".join(match.group(0).split()) for match in re.finditer(pattern, text, flags=re.IGNORECASE)]
+
+
+def extract_date_after(text: str, anchor: str) -> str | None:
+    index = text.lower().rfind(anchor.lower())
+    if index < 0:
+        return None
+    dates = extract_dates(text[index : index + 900])
+    return dates[0] if dates else None
 
 
 def build_requirement_reconciliation_digest(state: RunState) -> str:

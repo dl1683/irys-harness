@@ -117,6 +117,103 @@ class HarveyQueryTests(unittest.TestCase):
         self.assertIn("30 days", digest)
         self.assertIn("counterparty/current markup", digest)
         self.assertIn("Cross-Document Issue Inventory", build_task_family_digest(state))
+        self.assertNotIn("Deterministic artifact and requirements matrix digest", build_task_family_digest(state))
+
+    def test_artifact_requirement_matrix_computes_condition_shortfalls(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="banking-finance/compare-closing-documents-against-restructuring-conditions",
+            question="Review closing documents against the RSA and term sheet and flag all discrepancies.",
+            context_files=[],
+            answer_schema={"deliverables": ["compliance-gap-report.docx"]},
+            metadata={"practice_area": "banking-finance"},
+        )
+        state = RunState(
+            task=task,
+            config=load_config(),
+            documents=[
+                {"doc_id": "rsa", "filename": "rsa-and-term-sheet.docx", "extension": ".docx"},
+                {"doc_id": "exchange", "filename": "exchange-agreement.docx", "extension": ".docx"},
+                {"doc_id": "apa", "filename": "es-asset-purchase-agreement.docx", "extension": ".docx"},
+                {"doc_id": "rcf", "filename": "new-rcf-credit-agreement.docx", "extension": ".docx"},
+                {"doc_id": "tl", "filename": "new-tl-credit-agreement.docx", "extension": ".docx"},
+                {"doc_id": "mip", "filename": "management-incentive-plan.docx", "extension": ".docx"},
+            ],
+            chunks=[
+                {
+                    "doc_id": "rsa",
+                    "chunk_id": "r1",
+                    "index": 0,
+                    "text": (
+                        'The "Minimum Participation Condition" requires valid tender of not less than '
+                        "ninety-five percent (95%) of Existing Term Loans, i.e. not less than $449,350,000. "
+                        "New First Lien Term Loans bear interest at SOFR plus 550 basis points. "
+                        "New RCF has an Initial Draw of $40,000,000. "
+                        "Management Incentive Plan reserves not more than 8% of fully diluted equity, "
+                        "with 50% time-based and 50% performance-based vesting over four years with a one-year cliff."
+                    ),
+                },
+                {
+                    "doc_id": "exchange",
+                    "chunk_id": "e1",
+                    "index": 0,
+                    "text": (
+                        "The Participating Amount was $446,200,000 and represents approximately 94.34% "
+                        "of the $473,000,000 outstanding Existing Term Loans."
+                    ),
+                },
+                {
+                    "doc_id": "apa",
+                    "chunk_id": "a1",
+                    "index": 0,
+                    "text": (
+                        "RSA requires net cash proceeds of not less than $55,000,000. "
+                        "Section 2.02 aggregate purchase price is $58,000,000. "
+                        "Escrow Amount is $4,200,000. Estimated Transaction Costs are $1,100,000."
+                    ),
+                },
+                {
+                    "doc_id": "rcf",
+                    "chunk_id": "c1",
+                    "index": 0,
+                    "text": (
+                        "The New RCF aggregate commitment is $85,000,000. "
+                        "On the Closing Date, the Borrower shall borrow Revolving Loans in the aggregate principal amount of $47,000,000."
+                    ),
+                },
+                {
+                    "doc_id": "tl",
+                    "chunk_id": "t1",
+                    "index": 0,
+                    "text": (
+                        "Applicable Margin means, with respect to any Term Loan, 5.00% per annum "
+                        "(500 basis points). Liquidity is comprised of approximately $22,000,000 cash and available commitments."
+                    ),
+                },
+                {
+                    "doc_id": "mip",
+                    "chunk_id": "m1",
+                    "index": 0,
+                    "text": (
+                        "The Plan reserves up to 8% of fully diluted equity. "
+                        'Section 2.1 "Aggregate Share Reserve" means shares equal to 9.5% of total issued shares. '
+                        "Time-Based Awards constitute 60% and vest over a three year period with no vesting before six months. "
+                        "Performance-Based Awards constitute 40% and vest over four years with a one year cliff."
+                    ),
+                },
+            ],
+        )
+        digest = build_task_family_digest(state)
+        self.assertIn("Deterministic artifact and requirements matrix digest", digest)
+        self.assertIn("Minimum participation threshold", digest)
+        self.assertIn("$3,150,000 shortfall", digest)
+        self.assertIn("$52,700,000", digest)
+        self.assertIn("$2,300,000", digest)
+        self.assertIn("Current Closing Date Revolving Loan is $47,000,000", digest)
+        self.assertIn("SOFR + 550 bps", digest)
+        self.assertIn("SOFR + 500 bps", digest)
+        self.assertIn("MIP aggregate share reserve", digest)
+        self.assertIn("9.50% - 8.00%", digest)
 
     def test_covenant_worker_routes_and_requests_formula_workbook(self) -> None:
         task = BenchmarkTask(
