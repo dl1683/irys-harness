@@ -436,6 +436,113 @@ class HarveyQueryTests(unittest.TestCase):
         self.assertIn("PPM LPA Discrepancy Log", sheet_names)
         self.assertIn("Fund IV to V Comparison", sheet_names)
 
+    def test_contract_portfolio_tracker_uses_renewal_tabs_not_staffing_tabs(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="intellectual-property/extract-renewal-and-termination-dates-from-contract-portfolio",
+            question="Build a contract portfolio tracker with renewal and termination deadlines.",
+            answer_schema={"deliverables": ["contract-portfolio-tracker.xlsx", "portfolio-audit-memo.docx"]},
+            metadata={"practice_area": "intellectual-property"},
+        )
+        state = RunState(
+            task=task,
+            config=load_config(),
+            documents=[{"doc_id": "doc_1", "filename": "verdana-staffing-agreement.docx"}],
+        )
+        contract = build_deliverable_contract(state)
+        tracker = contract["deliverables"][0]
+        sheet_names = [sheet["name"] for sheet in tracker["workbook_sheets"]]
+        self.assertIn("Contract Portfolio", sheet_names)
+        self.assertIn("Renewal Non-Renewal Deadlines", sheet_names)
+        self.assertIn("Termination Rights And Fees", sheet_names)
+        self.assertNotIn("Staffing Analysis", sheet_names)
+
+    def test_action_source_inventory_preserves_extract_task_rows(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="tax/extract-key-terms-from-intercompany-agreements",
+            question="Review intercompany agreements and extract all transfer pricing terms into structured tables.",
+            answer_schema={"deliverables": ["tp-extraction-summary.docx"]},
+            metadata={"practice_area": "tax", "work_type": "analyze"},
+        )
+        state = RunState(
+            task=task,
+            config=load_config(),
+            documents=[
+                {"doc_id": "doc_1", "filename": "german-toll-manufacturing-agreement.docx", "extension": ".docx"},
+                {"doc_id": "doc_2", "filename": "rd-services-agreement-uk.docx", "extension": ".docx"},
+            ],
+            chunks=[
+                {
+                    "doc_id": "doc_1",
+                    "chunk_id": "c1",
+                    "index": 0,
+                    "text": (
+                        "Section 2.1 German Toll Manufacturing. Effective Date: January 1, 2019. "
+                        "Cost base is EUR 188.0M, markup is 5%, and total charge is EUR 197.4M."
+                    ),
+                },
+                {
+                    "doc_id": "doc_2",
+                    "chunk_id": "c2",
+                    "index": 0,
+                    "text": (
+                        "UK R&D Services Agreement has a fixed 5-year term ending June 30, 2025, "
+                        "cost-plus 12%, cost base GBP 38.0M, and total charge GBP 42.56M."
+                    ),
+                },
+            ],
+        )
+        digest = build_task_family_digest(state)
+        self.assertIn("Deterministic source inventory digest", digest)
+        self.assertIn("Document Coverage Map", digest)
+        self.assertIn("High-Recall Source Row Inventory", digest)
+        self.assertIn("German Toll Manufacturing", digest)
+        self.assertIn("EUR 188.0M", digest)
+        self.assertIn("cost-plus 12%", digest)
+        self.assertIn("June 30, 2025", digest)
+
+    def test_fiduciary_lpac_charter_does_not_route_to_ipo_charter(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="corporate-governance/extract-fiduciary-duty-provisions/scenario-02",
+            question=(
+                "Review governing documents and map fiduciary, exculpation, "
+                "indemnification, and LPAC charter provisions."
+            ),
+            answer_schema={"deliverables": ["fiduciary-duty-memorandum.docx"]},
+            metadata={"practice_area": "corporate-governance", "work_type": "analyze"},
+        )
+        state = RunState(
+            task=task,
+            config=load_config(),
+            documents=[
+                {"doc_id": "doc_1", "filename": "fund-ii-lpac-charter.docx", "extension": ".docx"},
+                {"doc_id": "doc_2", "filename": "tov-lpa.docx", "extension": ".docx"},
+            ],
+            chunks=[
+                {
+                    "doc_id": "doc_1",
+                    "chunk_id": "c1",
+                    "index": 0,
+                    "text": "Section 4.02 requires complete and accurate information reasonably necessary for LPAC functions.",
+                },
+                {
+                    "doc_id": "doc_2",
+                    "chunk_id": "c2",
+                    "index": 0,
+                    "text": "Section 7.01(a) invokes DLLCA Section 18-1101(c) to modify fiduciary duties.",
+                },
+            ],
+        )
+        contract = build_deliverable_contract(state)
+        digest = build_task_family_digest(state)
+        self.assertNotEqual(contract["task_family"], "ipo_charter_comparison")
+        self.assertIn("Deterministic source inventory digest", digest)
+        self.assertIn("Section 4.02", digest)
+        self.assertIn("Section 7.01(a)", digest)
+        self.assertNotIn("IPO Charter Deviation Matrix Inputs", digest)
+
     def test_package_plan_allocates_fee_letter_and_issues_memo(self) -> None:
         task = BenchmarkTask(
             benchmark="harvey_lab_sample",

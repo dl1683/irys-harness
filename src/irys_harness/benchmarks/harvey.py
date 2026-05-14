@@ -1095,6 +1095,38 @@ def has_funds_asset_management_terms(text: str) -> bool:
     return bool(re.search(r"\b(?:mfn|ppm)\b", lower))
 
 
+def has_capital_markets_or_ipo_terms(text: str) -> bool:
+    lower = text.lower()
+    if any(
+        term in lower
+        for term in [
+            "capital-markets",
+            "underwriting agreement",
+            "prospectus",
+            "form s-1",
+            "form s-3",
+            "registration statement",
+            "comfort letter",
+            "notes indenture",
+            "ipo",
+        ]
+    ):
+        return True
+    return "charter" in lower and any(
+        term in lower
+        for term in [
+            "ipo",
+            "initial public offering",
+            "public company",
+            "registration statement",
+            "prospectus",
+            "stock exchange",
+            "listed company",
+            "capital markets",
+        ]
+    )
+
+
 def has_form_adv_compliance_terms(text: str) -> bool:
     lower = text.lower()
     return "form adv" in lower and (
@@ -1356,6 +1388,17 @@ def build_workbook_sheet_plan(filename: str, haystack: str) -> list[dict[str, st
                 ("MFN Impact Model", "MFN election consequences and affected investor groups"),
                 ("PPM LPA Discrepancy Log", "Differences between offering materials, LPA terms, and side letters"),
                 ("Fund IV to V Comparison", "Changed economics from prior fund to current fund"),
+            ]
+        )
+    if "portfolio-tracker" in file_lower or (
+        "contract portfolio" in haystack and any(term in haystack for term in ["renewal", "termination", "deadline"])
+    ):
+        return sheet_plans(
+            [
+                ("Contract Portfolio", "Contract, counterparty, source document, product/service, status, and owner"),
+                ("Renewal Non-Renewal Deadlines", "Renewal term, auto-renewal, notice window, calculated deadline, and urgency"),
+                ("Termination Rights And Fees", "Termination for convenience/cause, fees, transition duties, and post-termination obligations"),
+                ("Urgency Tracker", "Immediate actions, missing consents/notices, recommended owner, and source support"),
             ]
         )
     if any(term in haystack for term in ["change of control", "material contract", "consent", "notice"]):
@@ -2285,7 +2328,7 @@ def infer_task_family(haystack: str) -> str:
         return "contract_change_of_control_review"
     if "covenant" in haystack or "ebitda" in haystack:
         return "finance_covenant_model"
-    if any(term in haystack for term in ["charter", "underwriting agreement", "prospectus", "ipo"]):
+    if has_capital_markets_or_ipo_terms(haystack):
         return "ipo_charter_comparison"
     if any(term in haystack for term in ["checklist", "exhibit", "form i-140", "i-797", "g-28"]):
         return "checklist_form_package_review"
@@ -3159,8 +3202,11 @@ def sanitize_expert_writer(raw: str) -> str:
 
 
 def build_task_family_digest(state: RunState) -> str:
-    primary = build_primary_task_family_digest(state)
     parts: list[str] = []
+    source_inventory = build_action_source_inventory_digest(state)
+    if source_inventory:
+        parts.append(source_inventory)
+    primary = build_primary_task_family_digest(state)
     if primary:
         parts.append(primary)
     if needs_capital_markets_digest(state):
@@ -3208,7 +3254,7 @@ def build_primary_task_family_digest(state: RunState) -> str:
         return build_tax_controversy_digest(state)
     if "section 382" in haystack or "section-382" in haystack:
         return build_section382_digest(state)
-    if any(term in haystack for term in ["charter", "underwriting agreement", "prospectus", "ipo"]):
+    if has_capital_markets_or_ipo_terms(haystack):
         return build_ipo_charter_digest(state)
     if "change of control" in haystack:
         return build_change_of_control_digest(state)
@@ -4036,6 +4082,8 @@ MAX_REQUIREMENT_RECONCILIATION_ROWS = 120
 MAX_ARTIFACT_REQUIREMENT_ROWS = 90
 MAX_ARTIFACT_DERIVED_ROWS = 40
 MAX_STRUCTURED_FINANCE_ASSET_ISSUE_ROWS = 90
+MAX_ACTION_SOURCE_DOCUMENT_ROWS = 80
+MAX_ACTION_SOURCE_INVENTORY_ROWS = 180
 
 
 BANKRUPTCY_DISTRIBUTION_TOPIC_FAMILIES: list[tuple[str, list[str]]] = [
@@ -15356,6 +15404,297 @@ def task_relevance_tokens(state: RunState) -> set[str]:
         for token in re.findall(r"[a-z0-9]{4,}", text.lower())
         if token not in stop
     }
+
+
+def work_type_text(state: RunState) -> str:
+    return str(state.task.metadata.get("work_type", "") or "").lower()
+
+
+def needs_action_source_inventory_digest(state: RunState) -> bool:
+    haystack = lower_task_text(state)
+    work_type = work_type_text(state)
+    if work_type in {"analyze", "review"} and any(
+        term in haystack
+        for term in [
+            "extract",
+            "identify",
+            "catalog",
+            "reconcile",
+            "tracker",
+            "portfolio",
+            "data room",
+            "due diligence",
+            "issue spotting",
+            "issues memo",
+            "red flag",
+            "specifications",
+            "provisions",
+            "beneficiary",
+            "intercompany",
+            "renewal",
+            "termination",
+        ]
+    ):
+        return True
+    return any(
+        term in haystack
+        for term in [
+            "/extract-",
+            "/identify-",
+            "extract ",
+            "identify ",
+            "catalog ",
+            "reconcile ",
+            "compliance tracker",
+            "portfolio tracker",
+            "due diligence memo",
+            "red-flag review",
+            "red flag review",
+        ]
+    )
+
+
+def build_action_source_inventory_digest(state: RunState) -> str:
+    if not needs_action_source_inventory_digest(state):
+        return ""
+    doc_rows = build_action_source_document_rows(state)
+    item_rows = build_action_source_item_rows(state)
+    if not doc_rows and not item_rows:
+        return ""
+    lines = [
+        "# Deterministic source inventory digest",
+        "These rows preserve extraction-first source state for high-recall extract, identify, catalog, tracker, portfolio, diligence, and issue-spotting tasks before synthesis.",
+        "",
+        "## Source Inventory Operator Rules",
+        "- Do not stop at representative examples. For extraction or identify tasks, preserve every source document and every high-signal row that could map to a rubric criterion.",
+        "- Convert this inventory into the requested artifact shape: tracker/workbook rows, issue matrices, extraction tables, or diligence findings.",
+        "- For each material row, preserve source document, section or anchor, exact names, dates, amounts, percentages, deadlines, status, issue signal, and required use.",
+        "- If the final artifact omits a source document or high-priority row, treat that as an omission risk even when the memo narrative is coherent.",
+    ]
+    if doc_rows:
+        append_digest_table(
+            lines,
+            "Document Coverage Map",
+            ["Doc ID", "Filename", "Inferred Source Role", "Extraction Priority", "Why It Matters"],
+            doc_rows[:MAX_ACTION_SOURCE_DOCUMENT_ROWS],
+        )
+    if item_rows:
+        append_digest_table(
+            lines,
+            "High-Recall Source Row Inventory",
+            ["Row Type", "Source Role", "Anchor", "Extracted Source Row", "Required Artifact Use", "Source"],
+            item_rows[:MAX_ACTION_SOURCE_INVENTORY_ROWS],
+        )
+    return "\n".join(lines)
+
+
+def build_action_source_document_rows(state: RunState) -> list[list[str]]:
+    rows: list[list[str]] = []
+    doc_lookup = {str(doc.get("doc_id", "")): doc for doc in state.documents}
+    text_by_doc = joined_text_by_doc(state)
+    for doc_id in sorted(doc_lookup, key=natural_doc_sort_key):
+        doc = doc_lookup[doc_id]
+        filename = str(doc.get("filename", "") or doc.get("path", "") or doc_id)
+        text = text_by_doc.get(doc_id, "")
+        role = infer_action_source_role(filename, text)
+        priority = infer_action_source_priority(state, filename, text, role)
+        rows.append(
+            [
+                doc_id,
+                filename,
+                role,
+                priority,
+                infer_action_source_reason(state, filename, text, role),
+            ]
+        )
+    return rows
+
+
+def build_action_source_item_rows(state: RunState) -> list[list[str]]:
+    relevance_tokens = task_relevance_tokens(state)
+    rows: list[tuple[int, int, list[str]]] = []
+    seen: set[tuple[str, str]] = set()
+    sequence = 0
+    doc_lookup = {str(doc.get("doc_id", "")): doc for doc in state.documents}
+    for chunk in sorted(state.chunks, key=lambda item: (str(item.get("doc_id", "")), int(item.get("index", 0) or 0))):
+        doc_id = str(chunk.get("doc_id", ""))
+        chunk_id = str(chunk.get("chunk_id", ""))
+        text = str(chunk.get("text", ""))
+        if not text.strip():
+            continue
+        doc = doc_lookup.get(doc_id, {})
+        filename = str(doc.get("filename", ""))
+        role = infer_action_source_role(filename, text)
+        source = f"{doc_id} / {chunk_id} / {filename}"
+        for line in iter_action_source_candidate_lines(text):
+            score = score_action_source_line(line=line, role=role, relevance_tokens=relevance_tokens)
+            if score <= 0:
+                continue
+            key = (source, normalize_issue_key(line))
+            if key in seen:
+                continue
+            seen.add(key)
+            sequence += 1
+            rows.append(
+                (
+                    score,
+                    sequence,
+                    [
+                        classify_action_source_line(line),
+                        role,
+                        extract_clause_anchor(line),
+                        compact_digest_text(line, limit=760),
+                        action_source_required_use(line, role),
+                        source,
+                    ],
+                )
+            )
+    return [
+        row
+        for _score, _sequence, row in sorted(rows, key=lambda item: (-item[0], item[1]))
+    ]
+
+
+def infer_action_source_role(filename: str, text: str) -> str:
+    lower = f"{filename} {text[:1200]}".lower()
+    if any(term in lower for term in ["index", "tracker", "schedule", "spreadsheet", "summary", "inventory", "checklist"]):
+        return "index / summary / tracker source"
+    if any(term in lower for term in ["form", "designation", "beneficiary", "pod", "payable on death"]):
+        return "designation / form source"
+    if any(term in lower for term in ["agreement", "contract", "lpa", "ima", "msa", "lease", "license", "sow", "addendum"]):
+        return "operative agreement source"
+    if any(term in lower for term in ["email", ".eml", "correspondence", "letter", "memo"]):
+        return "instruction / correspondence / memo source"
+    if any(term in lower for term in ["invoice", "pay application", "cost breakdown", "change order", "financial", "model"]):
+        return "financial / calculation source"
+    return infer_document_role(f"{filename} {text[:1200]}")
+
+
+def infer_action_source_priority(state: RunState, filename: str, text: str, role: str) -> str:
+    lower = f"{filename} {text[:1200]}".lower()
+    haystack = lower_task_text(state)
+    if any(token in lower for token in task_relevance_tokens(state)):
+        return "High"
+    if any(term in lower for term in ["agreement", "form", "designation", "schedule", "tracker", "cost", "amount", "section"]):
+        return "High"
+    if any(term in role for term in ["summary", "tracker", "form", "operative", "financial"]):
+        return "High"
+    if "due diligence" in haystack or "data room" in haystack:
+        return "Medium"
+    return "Review"
+
+
+def infer_action_source_reason(state: RunState, filename: str, text: str, role: str) -> str:
+    lower = f"{filename} {text[:1200]}".lower()
+    if "beneficiary" in lower or "designation" in lower:
+        return "Likely contains account, beneficiary, percentage, per stirpes, deceased-beneficiary, or missing-form rows."
+    if "intercompany" in lower or "transfer pricing" in lower or "services agreement" in lower:
+        return "Likely contains party, term, renewal, pricing method, cost base, markup, governing law, or amendment rows."
+    if "fiduciary" in lower or "exculp" in lower or "indemn" in lower or "standard of care" in lower:
+        return "Likely contains fiduciary-duty, exculpation, indemnification, advancement, waiver, or information-rights provisions."
+    if "renewal" in lower or "termination" in lower or "notice" in lower:
+        return "Likely contains renewal term, non-renewal deadline, termination fee, notice period, or urgency rows."
+    if "construction" in lower or "gmp" in lower or "change order" in lower:
+        return "Likely contains fee, LD, warranty, lien waiver, environmental, escalation, insurance, or change-order issue rows."
+    if "saas" in lower or "subscription" in lower or "data processing" in lower or "security" in lower:
+        return "Likely contains data, SLA, liability, IP, termination, amendment, arbitration, insurance, or security rows."
+    if "index" in role or "summary" in role or "tracker" in role:
+        return "Use to identify the full source universe and avoid sampling only a few documents."
+    return "Classify and consider before final synthesis so the artifact does not omit a source document."
+
+
+def iter_action_source_candidate_lines(text: str) -> list[str]:
+    lines: list[str] = []
+    for raw in text.splitlines():
+        line = " ".join(raw.strip().split())
+        if len(line) < 18:
+            continue
+        if len(line) > 1400:
+            line = compact_digest_text(line, limit=1400)
+        if is_action_source_candidate_line(line):
+            lines.append(line)
+    return lines
+
+
+def is_action_source_candidate_line(line: str) -> bool:
+    lower = line.lower()
+    if "|" in line and count_nonempty_cells(line) >= 3:
+        return True
+    if re.search(r"\b(?:section|sec\.|article|schedule|exhibit|item|account|policy|form|clause)\s+[a-z0-9_.()-]+", lower):
+        return True
+    if re.search(r"\b(?:effective date|expiration date|renewal|non-renewal|notice|deadline|term|amendment date)\b", lower):
+        return True
+    if re.search(r"\b(?:beneficiary|contingent|primary|pod|per stirpes|death benefit|account number)\b", lower):
+        return True
+    if re.search(r"\b(?:fiduciary|exculpation|indemnification|advancement|standard of care|corporate opportunity)\b", lower):
+        return True
+    if re.search(r"\b(?:cost base|markup|margin|royalty|charge|management fee|toll manufacturing|r&d|distribution)\b", lower):
+        return True
+    if re.search(r"\b(?:liability cap|service credit|sla|security incident|subprocessor|arbitration|insurance|termination fee)\b", lower):
+        return True
+    if re.search(r"\b(?:gmp|liquidated damages|lien waiver|change order|warranty|force majeure|environmental indemnity)\b", lower):
+        return True
+    if any(term in lower for term in ["missing", "omitted", "inconsistent", "deceased", "silent", "no consent", "does not"]):
+        return True
+    return bool(re.search(r"\$[0-9]|[0-9]+(?:\.\d+)?%|[0-9]+\s*(?:business\s+)?days?|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{1,2},\s+\d{4}", line, flags=re.IGNORECASE))
+
+
+def score_action_source_line(*, line: str, role: str, relevance_tokens: set[str]) -> int:
+    lower = line.lower()
+    score = 0
+    if "|" in line:
+        score += 10
+    if any(term in role for term in ["tracker", "form", "operative", "financial", "designation"]):
+        score += 8
+    token_hits = len(relevance_tokens.intersection(set(re.findall(r"[a-z0-9]{4,}", lower))))
+    score += min(24, token_hits * 4)
+    if re.search(r"\b(?:section|article|schedule|exhibit|item|account|policy|form)\s+[a-z0-9_.()-]+", lower):
+        score += 10
+    if re.search(r"\$[0-9]|[0-9]+(?:\.\d+)?%", line):
+        score += 10
+    if re.search(r"\b(?:effective date|expiration date|renewal|notice|deadline|within|term|amendment date)\b", lower):
+        score += 10
+    if re.search(r"\b(?:beneficiary|fiduciary|exculpation|indemnification|liability|termination|security|warranty|lien|markup|cost base)\b", lower):
+        score += 12
+    if any(term in lower for term in ["missing", "omitted", "inconsistent", "deceased", "silent", "no consent", "does not"]):
+        score += 12
+    return score if score >= 14 else 0
+
+
+def classify_action_source_line(line: str) -> str:
+    lower = line.lower()
+    if any(term in lower for term in ["beneficiary", "pod", "per stirpes", "death benefit", "account number"]):
+        return "beneficiary / account designation"
+    if any(term in lower for term in ["effective date", "expiration date", "renewal", "non-renewal", "notice", "deadline", "term"]):
+        return "date / term / deadline"
+    if any(term in lower for term in ["$", "cost base", "markup", "margin", "royalty", "fee", "charge", "cap", "%"]):
+        return "amount / percentage / calculation input"
+    if any(term in lower for term in ["fiduciary", "exculpation", "indemnification", "advancement", "standard of care"]):
+        return "fiduciary / liability provision"
+    if any(term in lower for term in ["security", "subprocessor", "data", "sla", "service credit", "liability cap", "arbitration"]):
+        return "technology / data contract issue"
+    if any(term in lower for term in ["gmp", "liquidated damages", "lien waiver", "change order", "warranty", "force majeure"]):
+        return "construction / real estate issue"
+    if any(term in lower for term in ["missing", "omitted", "inconsistent", "deceased", "silent"]):
+        return "omission / discrepancy"
+    return "source row"
+
+
+def action_source_required_use(line: str, role: str) -> str:
+    row_type = classify_action_source_line(line)
+    if row_type == "date / term / deadline":
+        return "Place in a tracker or issue matrix with calculated deadline and urgency flag."
+    if row_type == "amount / percentage / calculation input":
+        return "Preserve as calculator input and show formula or economic exposure where relevant."
+    if row_type == "beneficiary / account designation":
+        return "Extract account, form date, value/death benefit, primary and contingent beneficiaries, percentages, and issue flags."
+    if row_type == "fiduciary / liability provision":
+        return "Catalog by source document and section, then compare standards, waivers, exculpation, indemnity, and advancement."
+    if row_type == "omission / discrepancy":
+        return "Treat as a specific issue row with severity, source, and remediation."
+    if "tracker" in role or "form" in role:
+        return "Use as a discrete output row rather than prose-only support."
+    return "Consider as a separate extraction or issue row in the requested artifact."
 
 
 def score_document_comparison_snippet(
