@@ -1086,6 +1086,15 @@ def has_funds_asset_management_terms(text: str) -> bool:
     return bool(re.search(r"\b(?:mfn|ppm)\b", lower))
 
 
+def has_form_adv_compliance_terms(text: str) -> bool:
+    lower = text.lower()
+    return "form adv" in lower and (
+        "compliance manual" in lower
+        or "compliance-manual" in lower
+        or "compliance_manual" in lower
+    )
+
+
 def has_real_estate_terms(text: str) -> bool:
     lower = text.lower()
     if "real-estate" in lower or "real estate" in lower:
@@ -1323,6 +1332,14 @@ def build_workbook_sheet_plan(filename: str, haystack: str) -> list[dict[str, st
                 ("NOL Credit Utilization Impact", "NOL and credit utilization impact by period or attribute"),
             ]
         )
+    if has_form_adv_compliance_terms(haystack):
+        return sheet_plans(
+            [
+                ("ADV Item Crosswalk", "ADV item, current ADV disclosure, manual/supporting fact, gap, severity, and remediation"),
+                ("Amendment Tracker", "ADV Part/Schedule, required amendment, deadline, delivery obligation, and urgency"),
+                ("Non-Actionable Items", "Surface discrepancies that do not require ADV amendment and why"),
+            ]
+        )
     if has_funds_asset_management_terms(haystack):
         return sheet_plans(
             [
@@ -1525,6 +1542,16 @@ def build_required_sections(
             "Energy-specific legal and regulatory risks",
             "Provision-by-provision changes",
             "Recommended negotiation positions",
+            "Source citations",
+        ]
+    if has_form_adv_compliance_terms(haystack):
+        return [
+            "Executive summary",
+            "ADV item-by-item discrepancy table",
+            "Critical and high-priority disclosure gaps",
+            "Rule references and amendment obligations",
+            "Remediation timeline and March 31 annual amendment deadline",
+            "Non-actionable apparent discrepancies",
             "Source citations",
         ]
     if has_funds_asset_management_terms(haystack):
@@ -1922,7 +1949,17 @@ def build_evidence_focus(haystack: str) -> list[str]:
     ]
     if "section 382" in haystack or "section-382" in haystack:
         focus.extend(["5-percent shareholders", "testing dates", "ownership shifts", "NOLs and credits"])
-    if has_funds_asset_management_terms(haystack):
+    if has_form_adv_compliance_terms(haystack):
+        focus.extend(
+            [
+                "Form ADV Part 1A, Part 2A, Part 2B, Schedule D, and Appendix 1 item numbers",
+                "Compliance Manual sections that conflict with current ADV disclosures",
+                "soft dollar, proxy voting, custody, fee, minimum account, disciplinary, CCO conflict, side-by-side, wrap fee, and valuation gaps",
+                "required Advisers Act rules and amendment / delivery deadlines",
+                "non-actionable apparent discrepancies that do not require ADV updates",
+            ]
+        )
+    elif has_funds_asset_management_terms(haystack):
         focus.extend(
             [
                 "LP names",
@@ -2370,7 +2407,12 @@ For employment, labor, ADA/FMLA, termination, executive-employment, worker-class
 """
     funds_asset_management_guidance = ""
     if needs_funds_asset_management_digest(state):
-        funds_asset_management_guidance = """
+        if has_form_adv_compliance_terms(lower_task_text(state)):
+            funds_asset_management_guidance = """
+For Form ADV, compliance-manual, and registered-investment-adviser disclosure gap memoranda, preserve the "ADV Item Crosswalk Required Findings", "ADV Remediation And Timing Tracker", and "Non-Actionable Apparent Discrepancies" as substantive work product. Organize the memo by ADV Item number. For every issue, state current ADV disclosure, manual/supporting-document fact, severity, rule reference when applicable, and exact remediation. Do not replace the ADV item crosswalk with generic funds negotiation or investment-advisory agreement issues.
+"""
+        else:
+            funds_asset_management_guidance = """
 For funds and asset-management deliverables, preserve the "Near-Top Funds Required Findings", "Funds Issue Matrix", "Economic and Threshold Calculations", "Policy / LPA / Playbook Conflict Matrix", and "Accept / Reject / Counter Recommendations" as substantive work product. Explicitly state LP commitments, fee rates, bps deltas, carry percentages, preferred-return hurdles, compounding, waterfall type, MFN carve-outs, co-investment rights, reporting rights, transfer rights, clawback escrow percentage and duration, survival periods, cooperation burdens, sovereign-immunity / FOIA issues, and fee/liquidated-damages math when the worker packet lists them. Do not collapse fund terms into generic negotiation prose.
 """
     healthcare_life_sciences_guidance = ""
@@ -15050,6 +15092,8 @@ def funds_asset_management_context_text(state: RunState) -> str:
 
 def funds_asset_management_digest_modes(state: RunState, context: str) -> set[str]:
     task_text = lower_task_text(state)
+    if has_form_adv_compliance_terms(f"{task_text} {context}"):
+        return {"form_adv_compliance"}
     if "investment-advisory-agreement" in task_text or "investment advisory agreement" in task_text:
         return {"investment_advisory"}
     if "limited-partnership-interest-transfer" in task_text or "interest transfer agreement" in task_text:
@@ -15088,6 +15132,8 @@ def build_funds_asset_management_digest(state: RunState) -> str:
         "- Analyze MFN and side-letter terms as propagation systems: fee, carry, LPAC, co-investment, reporting, transfer, regulatory, and tax carve-outs can cascade across investors.",
         "- For public pension or state-instrumentality terms, separate legal/regulatory accommodation from overbroad economic or governance rights.",
     ]
+    if "form_adv_compliance" in modes:
+        add_funds_form_adv_compliance_rows(lines)
     if "investment_advisory" in modes:
         add_funds_investment_advisory_rows(lines)
     if "lpa_markup" in modes:
@@ -15136,6 +15182,49 @@ def build_funds_asset_management_digest(state: RunState) -> str:
     if snippets:
         lines.extend(["", "## Funds Source Snippets", *snippets])
     return "\n".join(lines)
+
+
+def add_funds_form_adv_compliance_rows(lines: list[str]) -> None:
+    append_digest_table(
+        lines,
+        "ADV Item Crosswalk Required Findings",
+        ["ADV Item", "Source Gap", "Severity", "Required Remediation"],
+        [
+            ["Part 2A Item 5 - Fees and Compensation", "Form ADV Part 2A discloses SMA fees of 1.00% / 0.85% / 0.70%; Compliance Manual Section 5.1 reflects reduced fees of 0.95% / 0.80% / 0.65% effective October 1, 2024.", "Medium", "Amend Form ADV Part 2A Item 5 to reflect the current fee schedule."],
+            ["Part 2A Item 5 - Minimum Account Size", "ADV states a $1,000,000 minimum account size; Compliance Manual Section 5.2 states $500,000.", "Medium or Low", "Update ADV fee/account-size disclosure or reconcile manual language."],
+            ["Part 2A Item 12 - Brokerage Practices", "ADV says the firm does not use soft dollar arrangements; Compliance Manual Section 6.3 describes active Section 28(e) soft dollar arrangements with Pendleton Securities, Graystone Execution Services, and Hallmark Brokerage Corp. beginning August 2024.", "Critical or High", "Promptly amend ADV Part 2A Item 12; reference Exchange Act Section 28(e) and Advisers Act Section 206 antifraud risk."],
+            ["Part 2A Item 17 - Proxy Voting", "ADV says the firm does not vote proxies; Compliance Manual Section 7.1 says proxy voting for private fund investors commenced in July 2024 and is overseen by a proxy voting committee.", "Critical or High", "Promptly amend ADV Part 2A Item 17 and reference Advisers Act Rule 206(4)-6."],
+            ["Part 1A Item 9 - Custody", "ADV discloses custody through general partner/private fund relationships but omits fee deduction authority from client accounts at First Continental Trust Company; Compliance Manual identifies both custody bases.", "High", "Update Form ADV Part 1A Item 9 to disclose fee deduction authority and reference Rule 206(4)-2."],
+            ["Part 2A Item 11 - Code of Ethics / Personal Trading", "ADV states quarterly transaction reports are due within 10 business days; Compliance Manual states 30 calendar days after quarter-end, making actual practice less restrictive than the ADV.", "High", "Reconcile reporting timeline and note Rule 204A-1."],
+            ["Part 2A Item 11 - Annual Holdings Currency", "ADV includes the 45-day currency requirement for annual holdings reports, but the Compliance Manual omits the requirement that holdings be current as of a date no more than 45 days before submission.", "High", "Add the 45-day current-as-of requirement to the manual or align both documents under Rule 204A-1."],
+            ["Part 2B / Part 1A Item 11 - Disciplinary Information", "Jonathan Weeks' Form U4 was amended on September 16, 2024 to disclose a 2017 supervisory failure warning at Maple Ridge Financial Services, but his Part 2B brochure supplement and potentially Part 1A Item 11 remain stale.", "Critical or High", "Update Part 2B promptly and assess Part 1A Item 11 reporting."],
+            ["Part 2A Item 10 - Other Financial Industry Activities / Conflicts", "Jonathan Weeks serves as CCO, General Counsel, and AML Officer while managing approximately $18 million in client accounts; the manual acknowledges dual CCO/GC role but does not address the client-account management conflict, and ADV Item 10 is inadequate.", "High", "Add ADV Item 10 conflict disclosure and enhance manual controls for the CCO portfolio-management conflict."],
+            ["Part 2A Item 6 - Performance-Based Fees and Side-by-Side Management", "Compliance Manual describes side-by-side management procedures, including allocation procedures for IPOs/new issues, for private funds and SMAs; ADV Item 6 does not disclose the specific conflicts or mitigation procedures.", "High", "Update ADV Part 2A Item 6 with side-by-side conflict and allocation-mitigation disclosure."],
+            ["Part 2A / Appendix 1 / Part 1A Schedule D Section 5.I - Wrap Fee Program", "ADV states the firm does not participate in wrap fee programs; Compliance Manual Section 5.4 and the Fieldstone sub-advisory summary describe a Fieldstone Wealth Advisors wrap program sub-advisory arrangement effective September 1, 2024, with about $62 million in wrap program assets.", "Critical or High", "Amend ADV, evaluate Part 2A Appendix 1 wrap fee brochure, and update Schedule D Section 5.I."],
+            ["Part 2A Valuation Disclosure", "ADV says assets are valued using market prices from independent pricing services; Compliance Manual Section 9 describes a fair value committee and three-tier valuation hierarchy for illiquid Credit Opportunities Fund holdings.", "Medium or High", "Update valuation disclosure to describe fair-value committee and hierarchy for illiquid holdings."],
+        ],
+    )
+    append_digest_table(
+        lines,
+        "ADV Remediation And Timing Tracker",
+        ["Issue", "Timing / Rule Hook", "Required Treatment"],
+        [
+            ["Annual amendment deadline", "Form ADV annual amendment deadline is March 31, 2025.", "Include remediation timeline keyed to March 31, 2025."],
+            ["Other-than-annual amendment", "Material misstatements such as soft dollars, proxy voting, wrap fee participation, custody, and disciplinary disclosure may require prompt or interim amendment rather than waiting for the annual amendment.", "Distinguish urgent amendments from annual-update cleanup."],
+            ["Part 2B delivery", "Weeks' U4 was updated in September 2024 and the review occurs in February 2025.", "Flag potential failure to promptly deliver updated brochure supplements under Rule 204-3(b)(4) / brochure delivery obligations."],
+            ["Summary table", "The requested memo must be organized by ADV Item number and include severity and remediation for each issue.", "Use ADV item number as the primary organizing principle and include a consolidated table."],
+        ],
+    )
+    append_digest_table(
+        lines,
+        "Non-Actionable Apparent Discrepancies",
+        ["Surface Item", "Why It May Not Require ADV Amendment", "How To Present"],
+        [
+            ["Business continuity plan", "The Compliance Manual may contain BCP procedures that are not independently required as detailed Form ADV brochure disclosures.", "Explain as a non-actionable manual-only operational policy unless it creates a disclosed service commitment."],
+            ["Cybersecurity procedures", "Detailed cybersecurity controls in the manual are not necessarily ADV item discrepancies absent a specific brochure representation.", "List as apparent but non-actionable unless current ADV cybersecurity or privacy language is inconsistent."],
+            ["Privacy notice timing", "Privacy procedures may be handled through privacy notices rather than Form ADV line-item disclosure.", "State why no ADV amendment is required if the privacy notice process itself is current."],
+        ],
+    )
 
 
 def add_funds_lpa_markup_rows(lines: list[str]) -> None:

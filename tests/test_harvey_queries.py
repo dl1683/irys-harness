@@ -645,6 +645,63 @@ class HarveyQueryTests(unittest.TestCase):
         self.assertNotEqual(contract["task_family"], "funds_asset_management_review")
         self.assertNotIn("Near-top funds required findings", contract["deliverables"][0]["required_sections"])
 
+    def test_form_adv_digest_uses_adv_item_crosswalk_not_advisory_markup_rows(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="funds-asset-management/compare-form-adv-against-compliance-manual",
+            question="Compare the Form ADV against the compliance manual and supporting documents by ADV Item number.",
+            context_files=[],
+            answer_schema={"deliverables": ["gap-analysis-memorandum.docx"]},
+            metadata={"practice_area": "funds-asset-management"},
+        )
+        state = RunState(
+            task=task,
+            config=load_config(),
+            documents=[
+                {"filename": "compliance-manual-ridgeline-capital.docx"},
+                {"filename": "form-adv-ridgeline-capital.docx"},
+            ],
+        )
+        contract = build_deliverable_contract(state)
+        digest = build_task_family_digest(state)
+        self.assertEqual(contract["task_family"], "funds_asset_management_review")
+        self.assertIn("ADV item-by-item discrepancy table", contract["deliverables"][0]["required_sections"])
+        self.assertIn("ADV Item Crosswalk Required Findings", digest)
+        self.assertIn("Part 2A Item 12 - Brokerage Practices", digest)
+        self.assertIn("Rule 204A-1", digest)
+        self.assertIn("March 31, 2025", digest)
+        self.assertNotIn("Sovereign immunity", digest)
+
+    def test_investment_advisory_form_adv_reference_does_not_trigger_adv_compliance_crosswalk(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="funds-asset-management/analyze-counterparty-markup-of-investment-advisory-agreement",
+            question=(
+                "Analyze the counterparty markup of the investment advisory agreement against "
+                "the standard form, negotiation playbook, and relevant Form ADV Part 2A excerpts."
+            ),
+            context_files=[],
+            answer_schema={"deliverables": ["redline-review-memorandum.docx"]},
+            metadata={"practice_area": "funds-asset-management"},
+        )
+        state = RunState(
+            task=task,
+            config=load_config(),
+            documents=[
+                {"filename": "investment-advisory-agreement-redline.docx"},
+                {"filename": "negotiation-playbook.docx"},
+                {"filename": "form-adv-part-2a-excerpts.docx"},
+            ],
+        )
+        contract = build_deliverable_contract(state)
+        digest = build_task_family_digest(state)
+        self.assertEqual(contract["task_family"], "funds_asset_management_review")
+        self.assertIn("Near-top funds required findings", contract["deliverables"][0]["required_sections"])
+        self.assertIn("Near-Top Investment Advisory Required Findings", digest)
+        self.assertIn("Sovereign immunity", digest)
+        self.assertNotIn("ADV Item Crosswalk Required Findings", digest)
+        self.assertNotIn("ADV item-by-item discrepancy table", contract["deliverables"][0]["required_sections"])
+
     def test_real_estate_digest_routes_and_preserves_lease_issue_rows(self) -> None:
         task = BenchmarkTask(
             benchmark="harvey_lab_sample",
