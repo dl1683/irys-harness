@@ -94,6 +94,64 @@ class DiagnosisTests(unittest.TestCase):
         self.assertEqual(diagnosis["suspected_module"], "calculator")
         self.assertEqual(diagnosis["suspected_actor"], "cheap_worker")
 
+    def test_diagnose_harvey_scores_classifies_request_list_coverage_drop(self) -> None:
+        diagnosis = diagnose_harvey_scores(
+            {
+                "task": "area/task",
+                "all_pass": False,
+                "n_passed": 41,
+                "n_criteria": 69,
+                "criteria_results": [
+                    {
+                        "id": "C-24",
+                        "title": "Requests all SOC 2 reports",
+                        "verdict": "fail",
+                        "reasoning": (
+                            "The agent's output does not include a specific request for all "
+                            "SOC 2 Type II reports in its due diligence request list."
+                        ),
+                    },
+                    {
+                        "id": "C-63",
+                        "title": "Addresses Atlanta HQ lease assignment consent requirement",
+                        "verdict": "fail",
+                        "reasoning": (
+                            "The output fails to include a specific request for landlord "
+                            "consent even though the lease threshold is material."
+                        ),
+                    },
+                ],
+            }
+        )
+        self.assertIn("synthesis_error", diagnosis["failure_tags"])
+        self.assertIn("context_packing_error", diagnosis["failure_tags"])
+        self.assertEqual(diagnosis["suspected_module"], "final_packet_synthesizer")
+        self.assertEqual(diagnosis["suspected_actor"], "strong_synthesizer")
+
+    def test_diagnose_harvey_scores_prioritizes_artifact_coverage_over_numeric_wording(self) -> None:
+        diagnosis = diagnose_harvey_scores(
+            {
+                "task": "area/task",
+                "all_pass": False,
+                "n_passed": 24,
+                "n_criteria": 48,
+                "criteria_results": [
+                    {
+                        "id": "C-19",
+                        "title": "Identifies revolving credit facility exceeds debt threshold",
+                        "verdict": "fail",
+                        "reasoning": (
+                            "The agent's output does not address the debt-threshold issue "
+                            "in the governance issues report."
+                        ),
+                    }
+                ],
+            }
+        )
+        self.assertIn("context_packing_error", diagnosis["failure_tags"])
+        self.assertEqual(diagnosis["suspected_module"], "final_packet_synthesizer")
+        self.assertEqual(diagnosis["suspected_actor"], "strong_synthesizer")
+
     def test_diagnose_harvey_scores_classifies_transaction_coverage_drop(self) -> None:
         diagnosis = diagnose_harvey_scores(
             {

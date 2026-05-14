@@ -71,6 +71,10 @@ def classify_failed_criteria(failed: list[dict[str, Any]]) -> set[FailureTag]:
             tags.add(FailureTag.CONTEXT_PACKING_ERROR)
             tags.add(FailureTag.SYNTHESIS_ERROR)
             continue
+        if _is_artifact_coverage_omission(text):
+            tags.add(FailureTag.SYNTHESIS_ERROR)
+            tags.add(FailureTag.CONTEXT_PACKING_ERROR)
+            continue
         if any(
             phrase in text
             for phrase in [
@@ -115,15 +119,71 @@ def classify_failed_criteria(failed: list[dict[str, Any]]) -> set[FailureTag]:
     return tags
 
 
+def _is_artifact_coverage_omission(text: str) -> bool:
+    omission = any(
+        phrase in text
+        for phrase in [
+            "does not include",
+            "does not contain",
+            "does not address",
+            "does not document",
+            "does not mention",
+            "does not state",
+            "fails to include",
+            "fails to address",
+            "fails to document",
+            "fails to mention",
+            "fails to state",
+            "failed to include",
+            "lacks",
+            "omits",
+            "omitted",
+        ]
+    )
+    if not omission:
+        return False
+    request_list = any(
+        phrase in text
+        for phrase in [
+            "request list",
+            "request for",
+            "requests ",
+            "diligence request",
+            "category requesting",
+            "includes tax category",
+            "includes insurance category",
+            "includes employment category",
+            "includes ip/technology category",
+            "includes hipaa/healthcare regulatory category",
+        ]
+    )
+    drafted_artifact = any(
+        phrase in text
+        for phrase in [
+            "minutes:",
+            "cover memo",
+            "issue_",
+            "agent's output",
+            "work product",
+            "deliverable",
+            "draft",
+            "governance issues report",
+            "issues report",
+            "board resolutions review",
+        ]
+    )
+    return request_list or drafted_artifact
+
+
 def suspected_module(tags: set[FailureTag]) -> str | None:
     if FailureTag.DISTRACTOR_CONFUSION in tags:
         return "final_packet_synthesizer"
-    if FailureTag.WRONG_COMPUTATION in tags:
-        return "calculator"
     if FailureTag.SEVERITY_CALIBRATION_ERROR in tags:
         return "severity_calibrator"
     if FailureTag.CONTEXT_PACKING_ERROR in tags or FailureTag.SYNTHESIS_ERROR in tags:
         return "final_packet_synthesizer"
+    if FailureTag.WRONG_COMPUTATION in tags:
+        return "calculator"
     if FailureTag.RETRIEVAL_MISS in tags or FailureTag.BAD_EXTRACTION in tags:
         return "retriever_extractor"
     if FailureTag.FORMAT_ERROR in tags:
@@ -134,12 +194,12 @@ def suspected_module(tags: set[FailureTag]) -> str | None:
 def suspected_actor(tags: set[FailureTag]) -> str | None:
     if FailureTag.DISTRACTOR_CONFUSION in tags:
         return "strong_synthesizer"
-    if FailureTag.WRONG_COMPUTATION in tags:
-        return "cheap_worker"
     if FailureTag.SEVERITY_CALIBRATION_ERROR in tags:
         return "cheap_worker"
     if FailureTag.CONTEXT_PACKING_ERROR in tags or FailureTag.SYNTHESIS_ERROR in tags:
         return "strong_synthesizer"
+    if FailureTag.WRONG_COMPUTATION in tags:
+        return "cheap_worker"
     if FailureTag.RETRIEVAL_MISS in tags or FailureTag.BAD_EXTRACTION in tags:
         return "cheap_worker"
     if FailureTag.FORMAT_ERROR in tags:
