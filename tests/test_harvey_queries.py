@@ -264,6 +264,125 @@ class HarveyQueryTests(unittest.TestCase):
         self.assertIn("PPM LPA Discrepancy Log", sheet_names)
         self.assertIn("Fund IV to V Comparison", sheet_names)
 
+    def test_package_plan_allocates_fee_letter_and_issues_memo(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="banking-finance/draft-fee-letter",
+            question=(
+                "Draft a fee letter for a senior secured credit facility and flag cross-document "
+                "inconsistencies in a separate issues memo. Output: fee-letter.docx and issues-memorandum.docx."
+            ),
+            context_files=[],
+            answer_schema={"deliverables": ["fee-letter.docx", "issues-memorandum.docx"]},
+            metadata={"practice_area": "banking-finance"},
+        )
+        state = RunState(task=task, config=load_config(), documents=[])
+        contract = build_deliverable_contract(state)
+        roles = {item["filename"]: item for item in contract["deliverables"]}
+        self.assertEqual(contract["package_plan"]["package_kind"], "instrument_plus_issues_package")
+        self.assertEqual(roles["fee-letter.docx"]["artifact_role"], "fee_letter")
+        self.assertEqual(roles["issues-memorandum.docx"]["artifact_role"], "issues_memo")
+        self.assertIn("Ticking fee start date and calculation", roles["fee-letter.docx"]["required_sections"])
+        self.assertIn("Cross-document inconsistencies", roles["issues-memorandum.docx"]["required_sections"])
+
+    def test_package_plan_builds_disclosure_schedule_artifacts_without_criteria(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="corporate-ma/draft-disclosure-schedule-preparation",
+            question="Prepare the full disclosure schedule package for the UPA.",
+            context_files=[],
+            answer_schema={
+                "deliverables": [
+                    "disclosure-schedule-master.docx",
+                    "schedule-3-01.docx",
+                    "contracts-matrix.xlsx",
+                    "employee-census.xlsx",
+                ]
+            },
+            metadata={"practice_area": "corporate-ma", "criteria": [{"title": "hidden scorer atom"}]},
+        )
+        state = RunState(task=task, config=load_config(), documents=[])
+        contract = build_deliverable_contract(state)
+        roles = {item["filename"]: item for item in contract["deliverables"]}
+        self.assertEqual(contract["package_plan"]["package_kind"], "disclosure_schedule_package")
+        self.assertEqual(roles["disclosure-schedule-master.docx"]["artifact_role"], "disclosure_schedule_master")
+        self.assertEqual(roles["schedule-3-01.docx"]["artifact_role"], "disclosure_schedule")
+        self.assertIn("Table of contents for schedules 3.1 through 3.26", roles["disclosure-schedule-master.docx"]["required_sections"])
+        self.assertIn("Schedule 3.1 heading", roles["schedule-3-01.docx"]["required_sections"])
+        contract_sheets = [sheet["name"] for sheet in roles["contracts-matrix.xlsx"]["workbook_sheets"]]
+        employee_sheets = [sheet["name"] for sheet in roles["employee-census.xlsx"]["workbook_sheets"]]
+        self.assertIn("Material Contract Matrix", contract_sheets)
+        self.assertIn("Employee Census", employee_sheets)
+        self.assertNotIn("hidden scorer atom", str(contract))
+
+    def test_disclosure_package_accessories_do_not_inherit_tax_memo_sections(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="corporate-ma/draft-disclosure-schedule-preparation",
+            question=(
+                "Prepare disclosure schedules, seller certificates, consent letters, opinion outline, "
+                "data-room mapping, transfer pricing memo, and outstanding items memo. Include tax nexus facts."
+            ),
+            context_files=[],
+            answer_schema={
+                "deliverables": [
+                    "seller-certificate.docx",
+                    "mac-certificate.docx",
+                    "kwp-opinion-outline.docx",
+                    "data-room-mapping.docx",
+                    "transfer-pricing-memo.docx",
+                    "landlord-consent-letter.docx",
+                    "outstanding-items-memo.docx",
+                ]
+            },
+            metadata={"practice_area": "corporate-ma"},
+        )
+        state = RunState(task=task, config=load_config(), documents=[])
+        contract = build_deliverable_contract(state)
+        roles = {item["filename"]: item for item in contract["deliverables"]}
+
+        expected_roles = {
+            "seller-certificate.docx": "seller_certificate",
+            "mac-certificate.docx": "mac_certificate",
+            "kwp-opinion-outline.docx": "opinion_outline",
+            "data-room-mapping.docx": "data_room_mapping",
+            "transfer-pricing-memo.docx": "transfer_pricing_memo",
+            "landlord-consent-letter.docx": "consent_letter",
+            "outstanding-items-memo.docx": "outstanding_items_memo",
+        }
+        for filename, expected_role in expected_roles.items():
+            self.assertEqual(roles[filename]["artifact_role"], expected_role)
+            self.assertNotIn("Tax issue matrix", roles[filename]["required_sections"])
+        self.assertIn("Bringdown representations and warranties", roles["seller-certificate.docx"]["required_sections"])
+        self.assertIn("Covered period and no-MAC statement", roles["mac-certificate.docx"]["required_sections"])
+        self.assertIn("Requested consent grant", roles["landlord-consent-letter.docx"]["required_sections"])
+        self.assertIn("Outstanding item tracker", roles["outstanding-items-memo.docx"]["required_sections"])
+
+    def test_synthesis_prompt_includes_package_plan_and_filename_headings(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="funds-asset-management/draft-lpa-drafting",
+            question="Draft a complete LPA, with an issues memo and side letter checklist.",
+            context_files=[],
+            answer_schema={"deliverables": ["lpa-draft.docx", "issues-memo.docx", "side-letter-checklist.docx"]},
+            metadata={"practice_area": "funds-asset-management"},
+        )
+        state = RunState(task=task, config=load_config(), documents=[])
+        contract = build_deliverable_contract(state)
+        state.task.answer_schema["deliverable_contract"] = contract
+        state.final_packet = {
+            "deliverable_contract": contract,
+            "package_plan": contract["package_plan"],
+            "cheap_worker_summary": "Fund IV has a 2.0% management fee and side-letter MFN issues.",
+            "verified_evidence": [],
+        }
+        prompt = build_synthesis_prompt(state)
+        self.assertIn("Package plan", prompt)
+        self.assertIn("fund_formation_lpa_package", prompt)
+        self.assertIn("top-level section for every requested filename", prompt)
+        self.assertIn("lpa-draft.docx", prompt)
+        self.assertIn("side-letter-checklist.docx", prompt)
+
     def test_funds_route_does_not_match_unrelated_stipulation_text(self) -> None:
         task = BenchmarkTask(
             benchmark="harvey_lab_sample",

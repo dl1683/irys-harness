@@ -201,6 +201,7 @@ class HarveyLabAdapter(BenchmarkAdapter):
             "chunks": len(state.chunks),
             "criteria_count": state.task.answer_schema.get("criteria_count", 0),
             "deliverable_contract": deliverable_contract,
+            "package_plan": deliverable_contract.get("package_plan", {}),
         }
         if self.live_synthesis:
             router = GeminiModelRouter(state.config)
@@ -328,8 +329,16 @@ class HarveyLabAdapter(BenchmarkAdapter):
                         task_family_digest,
                     ]
                 )
+            state.extraction_records.append(
+                {
+                    "mode": "deterministic_package_plan",
+                    "summary": deliverable_contract.get("package_plan", {}),
+                }
+            )
             worker_sections.extend(
                 [
+                    "## Package plan",
+                    json.dumps(deliverable_contract.get("package_plan", {}), indent=2, sort_keys=True),
                     "## Deliverable contract",
                     format_deliverable_contract(state),
                     "## Per-document analysis",
@@ -601,19 +610,25 @@ def build_deliverable_contract(state: RunState) -> dict[str, Any]:
     for filename in deliverables:
         suffix = Path(str(filename)).suffix.lower()
         workbook_sheets = build_workbook_sheet_plan(str(filename), haystack) if suffix == ".xlsx" else []
+        artifact_role = infer_artifact_role(str(filename), haystack)
         plans.append(
             {
                 "filename": str(filename),
                 "extension": suffix,
                 "artifact_kind": "workbook" if suffix == ".xlsx" else "document",
+                "artifact_role": artifact_role,
+                "drafting_mode": infer_drafting_mode(artifact_role, suffix),
                 "required_sections": build_required_sections(str(filename), haystack, workbook_sheets),
                 "workbook_sheets": workbook_sheets,
                 "evidence_focus": build_evidence_focus(haystack),
+                "artifact_goal": build_artifact_goal(str(filename), artifact_role),
             }
         )
+    package_plan = build_package_plan(plans, haystack)
     return {
         "version": 1,
         "task_family": infer_task_family(haystack),
+        "package_plan": package_plan,
         "deliverables": plans,
         "global_evidence_focus": build_evidence_focus(haystack),
         "worker_routes": {
@@ -625,10 +640,179 @@ def build_deliverable_contract(state: RunState) -> dict[str, Any]:
         },
         "construction_rules": [
             "Build the exact requested artifact files.",
+            "When multiple files are requested, allocate source facts to the specific artifact role for each filename before drafting.",
+            "Repeat shared source facts inside every deliverable that needs them; do not assume a companion file carries the fact.",
+            "Do not let an issues memorandum replace operative instrument, schedule, form, filing, checklist, or workbook content.",
             "For workbook deliverables, preserve planned tabs and populate each with task-specific issues, inputs, formulas, conclusions, and source support.",
             "Use benchmark-provided documents only.",
         ],
     }
+
+
+def build_package_plan(deliverable_plans: list[dict[str, Any]], haystack: str) -> dict[str, Any]:
+    roles = [str(item.get("artifact_role", "")) for item in deliverable_plans]
+    package_kind = infer_package_kind(roles, haystack, deliverable_count=len(deliverable_plans))
+    return {
+        "package_kind": package_kind,
+        "deliverable_count": len(deliverable_plans),
+        "requires_file_by_file_allocation": len(deliverable_plans) > 1,
+        "deliverable_roles": [
+            {
+                "filename": item.get("filename"),
+                "artifact_role": item.get("artifact_role"),
+                "drafting_mode": item.get("drafting_mode"),
+                "artifact_goal": item.get("artifact_goal"),
+                "required_section_count": len(item.get("required_sections", []) or []),
+                "workbook_sheet_count": len(item.get("workbook_sheets", []) or []),
+            }
+            for item in deliverable_plans
+        ],
+        "shared_state_policy": [
+            "Build one source-state inventory, then allocate each fact to every deliverable that needs it.",
+            "A companion memo may explain issues, but it does not satisfy the operative artifact unless the operative artifact includes the clause, schedule row, filing text, checklist row, or workbook row.",
+            "Use filename-level headings during synthesis so package coverage can be inspected in the trace and rendered artifacts.",
+        ],
+    }
+
+
+def infer_package_kind(roles: list[str], haystack: str, *, deliverable_count: int) -> str:
+    role_set = set(roles)
+    if any(role.startswith("disclosure_schedule") for role in role_set):
+        return "disclosure_schedule_package"
+    if "limited_partnership_agreement" in role_set and "checklist_tracker" in role_set:
+        return "fund_formation_lpa_package"
+    if "private_placement_memorandum" in role_set:
+        return "regulated_offering_document"
+    if "compliance_manual" in role_set:
+        return "compliance_manual"
+    if any(role in role_set for role in ["operative_instrument", "legal_agreement", "fee_letter", "limited_partnership_agreement"]) and "issues_memo" in role_set:
+        return "instrument_plus_issues_package"
+    if any(role in role_set for role in ["operative_instrument", "legal_agreement", "fee_letter"]):
+        return "legal_instrument_package" if deliverable_count > 1 else "legal_instrument"
+    if deliverable_count > 1:
+        return "multi_deliverable_package"
+    if "checklist_tracker" in role_set:
+        return "checklist_or_tracker"
+    if any(term in haystack for term in ["form adv", "proxy statement", "form 8-k", "form 10", "quarterly report"]):
+        return "regulated_form_or_filing"
+    return "single_deliverable"
+
+
+def infer_artifact_role(filename: str, haystack: str) -> str:
+    lower = filename.lower()
+    stem = Path(lower).stem
+    suffix = Path(lower).suffix
+    if suffix == ".xlsx":
+        if "financial" in stem:
+            return "financial_statement_workbook"
+        if "debt" in stem:
+            return "debt_schedule_workbook"
+        if "working-capital" in stem or "working_capital" in stem:
+            return "working_capital_workbook"
+        if "patent" in stem or "ip" in stem:
+            return "ip_registry_workbook"
+        if "contract" in stem:
+            return "contracts_matrix_workbook"
+        if "employee" in stem or "census" in stem:
+            return "employee_census_workbook"
+        if "insurance" in stem:
+            return "insurance_matrix_workbook"
+        if "tax" in stem or "nexus" in stem:
+            return "tax_nexus_workbook"
+        return "analysis_workbook"
+    if "issues-memo" in stem or "issues-memorandum" in stem or stem in {"issues", "issue-memo"}:
+        return "issues_memo"
+    if "seller-certificate" in stem or ("seller" in stem and "certificate" in stem):
+        return "seller_certificate"
+    if ("mac" in stem or "material-adverse" in stem) and "certificate" in stem:
+        return "mac_certificate"
+    if "opinion-outline" in stem or ("opinion" in stem and "outline" in stem) or stem.startswith("kwp-opinion"):
+        return "opinion_outline"
+    if "data-room-mapping" in stem or "data_room_mapping" in stem or ("data-room" in stem and "mapping" in stem):
+        return "data_room_mapping"
+    if "transfer-pricing" in stem or "transfer_pricing" in stem:
+        return "transfer_pricing_memo"
+    if "landlord-consent" in stem or "consent-letter" in stem or ("consent" in stem and "letter" in stem):
+        return "consent_letter"
+    if "outstanding-items" in stem or ("outstanding" in stem and ("items" in stem or "memo" in stem)):
+        return "outstanding_items_memo"
+    if any(term in stem for term in ["memo", "memorandum", "report", "assessment", "analysis", "comparison", "review"]):
+        return "analysis_memo"
+    if "checklist" in stem or "tracker" in stem or "log" in stem:
+        return "checklist_tracker"
+    if stem == "disclosure-schedule-master" or "disclosure-schedule-master" in stem:
+        return "disclosure_schedule_master"
+    if re.search(r"schedule-\d", stem) or "disclosure-schedule" in stem:
+        return "disclosure_schedule"
+    if "fee-letter" in stem:
+        return "fee_letter"
+    if "investors-rights-agreement" in stem or "investors-rights" in stem:
+        return "legal_agreement"
+    if "lpa-draft" in stem or "limited-partnership-agreement" in stem or stem.endswith("-lpa"):
+        return "limited_partnership_agreement"
+    if "ppm" in stem or "private-placement-memorandum" in stem:
+        return "private_placement_memorandum"
+    if "compliance-manual" in stem or "policy-manual" in stem:
+        return "compliance_manual"
+    if any(term in stem for term in ["agreement", "contract", "indenture", "lease", "will", "trust"]):
+        return "operative_instrument"
+    if any(term in haystack for term in ["proxy statement", "form 8-k", "form 10", "quarterly report"]):
+        return "regulated_form_or_filing"
+    return "analysis_memo"
+
+
+def infer_drafting_mode(artifact_role: str, suffix: str) -> str:
+    if suffix == ".xlsx" or artifact_role.endswith("_workbook"):
+        return "structured_workbook_rows"
+    if artifact_role in {"issues_memo", "analysis_memo"}:
+        return "issue_analysis"
+    if artifact_role in {"checklist_tracker"}:
+        return "row_level_tracker"
+    if artifact_role in {"data_room_mapping", "outstanding_items_memo"}:
+        return "row_level_mapping"
+    if artifact_role in {"seller_certificate", "mac_certificate"}:
+        return "certificate_drafting"
+    if artifact_role == "consent_letter":
+        return "consent_letter_drafting"
+    if artifact_role in {"opinion_outline", "transfer_pricing_memo"}:
+        return "issue_analysis"
+    if artifact_role.startswith("disclosure_schedule"):
+        return "schedule_exception_drafting"
+    if artifact_role in {
+        "fee_letter",
+        "legal_agreement",
+        "limited_partnership_agreement",
+        "operative_instrument",
+    }:
+        return "operative_legal_drafting"
+    if artifact_role in {"private_placement_memorandum", "compliance_manual", "regulated_form_or_filing"}:
+        return "regulated_document_drafting"
+    return "legal_work_product"
+
+
+def build_artifact_goal(filename: str, artifact_role: str) -> str:
+    goals = {
+        "issues_memo": "Explain source inconsistencies, legal/business issues, recommendations, and open points.",
+        "checklist_tracker": "Provide a row-level checklist or tracker with item, source requirement, status, owner/deadline, and action.",
+        "disclosure_schedule_master": "Create the master disclosure schedule cover, general provisions, table of contents, and schedule index.",
+        "disclosure_schedule": "Draft schedule-specific exceptions keyed to the governing representation and source facts.",
+        "fee_letter": "Draft operative fee-letter provisions with exact fee triggers, rates, payment timing, flex terms, and confidentiality/survival language.",
+        "legal_agreement": "Draft operative agreement provisions, not only a memo about the agreement.",
+        "limited_partnership_agreement": "Draft the complete LPA article structure with operative fund terms and source-derived economics.",
+        "private_placement_memorandum": "Draft a regulated offering document body with section-by-section disclosure coverage.",
+        "compliance_manual": "Draft operational policy/procedure sections, roles, controls, monitoring, escalation, and recordkeeping.",
+        "regulated_form_or_filing": "Draft the requested filing or form body with item headings and source-supported disclosure text.",
+        "seller_certificate": "Draft the seller certificate as a certification artifact with bringdown statements, exceptions, and signature mechanics.",
+        "mac_certificate": "Draft the no-MAC certificate with source-supported period coverage, exceptions, and officer certification mechanics.",
+        "opinion_outline": "Create an opinion outline keyed to requested legal opinions, assumptions, reviewed documents, qualifications, and open diligence.",
+        "data_room_mapping": "Map source documents to disclosure schedule artifacts, extracted facts, missing support, and follow-up items.",
+        "transfer_pricing_memo": "Analyze transfer-pricing facts, intercompany transactions, tax periods, methods, exposure, and recommendations.",
+        "consent_letter": "Draft the requested consent letter with parties, contract reference, consent grant, conditions, effective date, and signature mechanics.",
+        "outstanding_items_memo": "List open package items with owner, blocker, source document, deadline, and next action.",
+    }
+    if artifact_role.endswith("_workbook"):
+        return "Populate workbook rows with source inputs, calculations or comparisons, conclusions, and support."
+    return goals.get(artifact_role, f"Produce the requested legal work product for {filename}.")
 
 
 def lower_task_text(state: RunState) -> str:
@@ -826,6 +1010,71 @@ def has_tax_controversy_terms(text: str) -> bool:
 
 
 def build_workbook_sheet_plan(filename: str, haystack: str) -> list[dict[str, str]]:
+    file_lower = filename.lower()
+    if "financial-statements" in file_lower:
+        return sheet_plans(
+            [
+                ("Financial Statement Extracts", "Balance sheet, income statement, cash flow, and source period rows"),
+                ("Accounting Exceptions", "GAAP, consistency, audit, or disclosed financial-statement exceptions"),
+                ("Source Tie-Out", "Document, page, line item, value, and disclosure schedule reference"),
+            ]
+        )
+    if "debt-schedule" in file_lower:
+        return sheet_plans(
+            [
+                ("Debt Instrument Register", "Debt instrument, lender, borrower, principal, maturity, rate, and security"),
+                ("Lien Covenant Exceptions", "Liens, guarantees, consent needs, defaults, and payoff or release requirements"),
+                ("Payoff Closing Actions", "Payoff letters, releases, consents, notices, and responsible party"),
+            ]
+        )
+    if "working-capital" in file_lower:
+        return sheet_plans(
+            [
+                ("Working Capital Inputs", "Current asset and liability line items, source values, and accounting treatment"),
+                ("Adjustment Calculations", "Target, estimate, final value, disputed items, collar, and payment arithmetic"),
+                ("Open Items", "Missing source values, methodology disputes, deadlines, and owner"),
+            ]
+        )
+    if "patent-registry" in file_lower:
+        return sheet_plans(
+            [
+                ("Patent Asset Register", "Patent/application, jurisdiction, owner, filing number, status, and source"),
+                ("Chain of Title Issues", "Assignments, encumbrances, missing signatures, and required cleanup"),
+                ("Maintenance Deadlines", "Upcoming fees, deadlines, prosecution status, and action owner"),
+            ]
+        )
+    if "contracts-matrix" in file_lower:
+        return sheet_plans(
+            [
+                ("Material Contract Matrix", "Contract, counterparty, term, value, consent, assignment, termination, and notice"),
+                ("Change of Control Consent", "Trigger, required approval, deadline, counterparty, and closing consequence"),
+                ("Open Contract Actions", "Cure, consent, amendment, notice, or disclosure action"),
+            ]
+        )
+    if "employee-census" in file_lower:
+        return sheet_plans(
+            [
+                ("Employee Census", "Employee, title, location, status, compensation, equity, and source"),
+                ("Employment Risk Flags", "Classification, leave, restrictive covenant, bonus, severance, and policy issues"),
+                ("Required Follow-Up", "Missing records, consent, notice, or employment-document cleanup"),
+            ]
+        )
+    if "insurance-matrix" in file_lower:
+        return sheet_plans(
+            [
+                ("Insurance Policy Matrix", "Policy, carrier, insured, limit, deductible, period, and coverage type"),
+                ("Coverage Gaps", "Required coverage, current coverage, deficiency, acquisition impact, and action"),
+                ("Claims Notices", "Known claims, notice status, reservation, and renewal or tail requirement"),
+            ]
+        )
+    if "tax-nexus" in file_lower:
+        return sheet_plans(
+            [
+                ("Tax Nexus Matrix", "Jurisdiction, activity, filing status, exposure, and source"),
+                ("Tax Exposure Calculations", "Tax base, rate, period, penalty/interest, and estimated exposure"),
+                ("Remediation Tracker", "Registration, filing, disclosure, indemnity, or reserve action"),
+            ]
+        )
     if "section 382" in haystack or "section-382" in haystack or "ownership shift" in haystack:
         return sheet_plans(
             [
@@ -927,6 +1176,9 @@ def build_required_sections(
             *[str(sheet["name"]) for sheet in workbook_sheets],
             "Source citations for every material row",
         ]
+    artifact_sections = build_artifact_required_sections(filename, haystack)
+    if artifact_sections:
+        return artifact_sections
     if "certificate" in haystack and "series b" in haystack and "draft" in haystack:
         return [
             "Second Amended and Restated Certificate of Incorporation",
@@ -1137,6 +1389,227 @@ def build_required_sections(
     if any(term in haystack for term in ["risk", "gap", "compare", "discrepancy"]):
         sections.extend(["Issue matrix", "Risk severity", "Remediation"])
     return dedupe_strings(sections)
+
+
+def build_artifact_required_sections(filename: str, haystack: str) -> list[str]:
+    lower = filename.lower()
+    stem = Path(lower).stem
+    role = infer_artifact_role(filename, haystack)
+    if role == "issues_memo":
+        return [
+            "Executive summary",
+            "Issue matrix by source document",
+            "Cross-document inconsistencies",
+            "Client decision points",
+            "Recommended drafting or closing actions",
+            "Open factual gaps",
+            "Source citations",
+        ]
+    if role == "checklist_tracker":
+        return [
+            "Checklist overview",
+            "Item-by-item tracker",
+            "Required source document or condition",
+            "Current status and deficiency",
+            "Owner, deadline, and next action",
+            "Source citations",
+        ]
+    if role == "seller_certificate":
+        return [
+            "Seller certificate title",
+            "Transaction and agreement reference",
+            "Officer or seller certification capacity",
+            "Bringdown representations and warranties",
+            "Covenant and closing-condition certifications",
+            "Exceptions and disclosure schedule cross-references",
+            "No waiver of disclosed exceptions",
+            "Signature block",
+            "Source citations",
+        ]
+    if role == "mac_certificate":
+        return [
+            "MAC certificate title",
+            "Transaction and agreement reference",
+            "Covered period and no-MAC statement",
+            "Known exceptions and carveouts",
+            "Bringdown limitations",
+            "Officer certification capacity",
+            "Signature block",
+            "Source citations",
+        ]
+    if role == "opinion_outline":
+        return [
+            "Opinion outline",
+            "Requested opinion topics",
+            "Documents reviewed",
+            "Factual assumptions",
+            "Legal assumptions and qualifications",
+            "Entity, authorization, enforceability, and approvals issues",
+            "Open diligence items",
+            "Source citations",
+        ]
+    if role == "data_room_mapping":
+        return [
+            "Data room mapping overview",
+            "Source document index",
+            "Mapped deliverable or schedule",
+            "Extracted source fact",
+            "Gap or missing support",
+            "Follow-up owner and action",
+            "Source citations",
+        ]
+    if role == "transfer_pricing_memo":
+        return [
+            "Executive summary",
+            "Intercompany transaction inventory",
+            "Tax periods and entity relationships",
+            "Transfer-pricing method and support",
+            "Documentation gaps",
+            "Exposure and adjustment risk",
+            "Recommended follow-up",
+            "Source citations",
+        ]
+    if role == "consent_letter":
+        return [
+            "Consent letter title",
+            "Parties and notice addresses",
+            "Contract, lease, or permit reference",
+            "Requested consent grant",
+            "Conditions, reservations, and limitations",
+            "Effective date",
+            "Signature blocks",
+            "Source citations",
+        ]
+    if role == "outstanding_items_memo":
+        return [
+            "Executive summary",
+            "Outstanding item tracker",
+            "Required source document or condition",
+            "Current status and blocker",
+            "Owner, deadline, and next action",
+            "Impact on closing or deliverable completion",
+            "Source citations",
+        ]
+    if role == "disclosure_schedule_master":
+        return [
+            "Master disclosure schedule cover page",
+            "Agreement date and parties",
+            "General provisions and interpretive notes",
+            "Table of contents for schedules 3.1 through 3.26",
+            "Schedule index with source mapping",
+            "Outstanding disclosure items",
+            "Source citations",
+        ]
+    if role == "disclosure_schedule":
+        schedule_number = infer_schedule_number(stem)
+        return [
+            f"Schedule {schedule_number} heading" if schedule_number else "Schedule heading",
+            "Representation cross-reference",
+            "Exception text drafted as disclosure schedule language",
+            "Source facts supporting each exception",
+            "Consents, notices, thresholds, and amounts",
+            "Open items and required follow-up",
+            "Source citations",
+        ]
+    if role == "fee_letter":
+        return [
+            "Fee Letter",
+            "Parties and facility identification",
+            "Arrangement, structuring, agency, upfront, and other fees",
+            "Earned versus payable timing",
+            "Ticking fee start date and calculation",
+            "Market flex and reverse flex mechanics",
+            "Payment mechanics, offsets, and survival",
+            "Confidentiality and governing law",
+            "Signature blocks",
+            "Issues and source notes appendix",
+        ]
+    if role == "legal_agreement" and "investors-rights" in stem:
+        return [
+            "Amended and Restated Investors' Rights Agreement",
+            "Parties, recitals, and definitions",
+            "Registration rights",
+            "Piggyback and cutback mechanics",
+            "Information and inspection rights",
+            "Pro rata and super pro rata rights",
+            "MFN and side-letter treatment",
+            "Lock-up and market standoff",
+            "Confidentiality and data-sharing limitations",
+            "Transfer, termination, and amendment provisions",
+            "Signature blocks",
+            "Drafting notes appendix",
+        ]
+    if role == "limited_partnership_agreement":
+        return [
+            "Limited Partnership Agreement",
+            "Formation",
+            "Capital commitments and contributions",
+            "Management and operations",
+            "Management fee and expenses",
+            "Allocations and distributions",
+            "Carried interest, preferred return, and clawback",
+            "LPAC",
+            "Investment restrictions",
+            "Transfer restrictions",
+            "Key person",
+            "Reporting and valuation",
+            "ESG and responsible investment",
+            "Tax, ERISA, regulatory, and BBA audit provisions",
+            "Default, dissolution, indemnification, and miscellaneous",
+            "Signature blocks",
+        ]
+    if role == "private_placement_memorandum":
+        return [
+            "Private Placement Memorandum",
+            "Notice and investor suitability legends",
+            "Executive summary and offering terms",
+            "Investment strategy and portfolio construction",
+            "Management, GP, adviser, and key personnel",
+            "Fees, expenses, carried interest, and distributions",
+            "Risk factors",
+            "Conflicts of interest",
+            "Tax, ERISA, regulatory, AML, and sanctions disclosures",
+            "Valuation, reporting, transfers, and withdrawals",
+            "Subscription procedures",
+            "Source-backed disclosure notes",
+        ]
+    if role == "compliance_manual":
+        return [
+            "Compliance manual overview",
+            "Governance, roles, and escalation",
+            "Policies and procedures by compliance area",
+            "Monitoring, testing, and certifications",
+            "Books and records",
+            "Training and employee attestations",
+            "Exception handling and remediation",
+            "Annual review and update process",
+            "Source-backed gap notes",
+        ]
+    if role == "operative_instrument":
+        return [
+            "Operative agreement title",
+            "Parties, recitals, and definitions",
+            "Core transaction provisions",
+            "Representations and warranties",
+            "Covenants",
+            "Conditions",
+            "Indemnity, limitations, and remedies",
+            "Termination",
+            "Miscellaneous provisions",
+            "Schedules, exhibits, and signature blocks",
+            "Drafting notes appendix",
+        ]
+    return []
+
+
+def infer_schedule_number(stem: str) -> str | None:
+    match = re.search(r"schedule-(\d+)-(\d+)", stem)
+    if match:
+        return f"{int(match.group(1))}.{int(match.group(2))}"
+    match = re.search(r"schedule-(\d+)", stem)
+    if match:
+        return str(int(match.group(1)))
+    return None
 
 
 def build_evidence_focus(haystack: str) -> list[str]:
@@ -1501,6 +1974,8 @@ def build_synthesis_prompt(state: RunState) -> str:
             )
         evidence_text = chr(10).join(evidence)
     deliverables = ", ".join(state.task.answer_schema.get("deliverables", []))
+    package_plan = packet.get("package_plan") or (state.task.answer_schema.get("deliverable_contract") or {}).get("package_plan", {})
+    package_plan_text = json.dumps(package_plan, indent=2, sort_keys=True)
     prenuptial_guidance = ""
     if needs_prenuptial_asset_rights_digest(state):
         prenuptial_guidance = """
@@ -1611,13 +2086,18 @@ Task instructions:
 Required deliverables:
 {deliverables}
 
+Package plan:
+{package_plan_text}
+
 Deliverable contract:
 {format_deliverable_contract(state)}
 
 Evidence packet prepared by the worker tier:
 {evidence_text}
 
-Write the complete content for the requested deliverable(s). Follow the deliverable contract closely, including workbook sheet names, section names, issue matrices, formula tables, and source-support expectations. Be specific, structured, and use only the provided evidence. If evidence is incomplete, still produce the best work product possible and clearly identify gaps.
+Write the complete content for the requested deliverable(s). Follow the package plan and deliverable contract closely, including workbook sheet names, section names, issue matrices, formula tables, and source-support expectations. Be specific, structured, and use only the provided evidence. If evidence is incomplete, still produce the best work product possible and clearly identify gaps.
+
+For multi-file packages, create a top-level section for every requested filename using the exact filename as the section heading. Within each filename section, include the artifact-specific content required for that file. Repeat shared source facts, numbers, definitions, party names, and risk points inside every deliverable section that needs them; do not assume a companion memo, checklist, schedule, or workbook will carry facts for another artifact. A companion issues memorandum should not replace operative agreement text, schedule exception language, checklist rows, filing/body text, or workbook rows.
 
 For gap-analysis deliverables, include a summary table with columns: Priority, Issue, Evidence, Risk, Remediation, Source. Also explicitly reconcile any document ranges, exhibit ranges, checklist counts, stale-date requirements, signatures, support letters, and mismatches between draft documents and checklists.
 
