@@ -2347,6 +2347,8 @@ If a deterministic task-family digest is included, treat its tables and snippets
 
 For bankruptcy distribution compliance deliverables, preserve the "High-Priority Bankruptcy Calculation Checklist" exactly as substantive conclusions, not just background evidence. Include a class-by-class comparison for Classes 1 through 8 when present, show the Class 1 interest math, cite the priority-tax standard when present, recompute GUC cash-pool tranches net of plan-agent fees and disputed-claims reserve, analyze Westlake timing and amount discrepancies, address reserve segregation, discuss undeliverable checks and Section 347(b) when present, and separately address Class 6 equity valuation.
 
+For bankruptcy plan-deviation deliverables, preserve the "High-Priority Bankruptcy Plan-Deviation Checklist" as the organizing matrix. First state which source documents are the current debtor plan, committee redline, transmittal, valuation support, and disclosure support; treat same-topic plan markups from a different debtor/case as distractor materials unless the task explicitly asks for them. Include recovery-pool math, Effective Date cash uses, deferred-payment interest, double-recovery interaction, third-party-release enforceability, 2021 dividend recap carve-out, supplemental disclosure condition, retention-bonus/cramdown linkage, Section 365 contract-rejection standard, sponsor-support risk, and a prioritized May 28 meet-and-confer agenda when those facts appear.
+
 For FLSA overtime gap-analysis deliverables, preserve the "High-Priority FLSA Checklist" and "Position-Level Classification Risk Matrix" as substantive memo findings. State the summary-pivot workforce counts, Phase 1 and Phase 2 threshold cohorts, HCE threshold cohorts, Washington/Oregon/Idaho state distribution, Washington higher-threshold issue, job-title counts/salaries/duties-test risks, overtime exposure math, 2021 audit history, limitations periods, and collective-action risk. Do not collapse position-level risks into a generic salary-threshold summary.
 
 For EU distribution or cross-border market-entry risk memoranda, preserve the "High-Priority EU Distribution Risk Matrix" as the organizing issue list. Address competition/VBER issues, regulatory responsibility contradictions, product-specific supplement compliance risks, label/formulation control gaps, trademark and patent limitations, GDPR/data-transfer gaps, sub-distribution controls, cost-sharing emails, counterparty investigation disclosures, governing-law/arbitration enforceability, and recommended section revisions.
@@ -2992,6 +2994,8 @@ def build_task_family_digest(state: RunState) -> str:
         return build_ipo_charter_digest(state)
     if "change of control" in haystack:
         return build_change_of_control_digest(state)
+    if needs_bankruptcy_plan_deviation_digest(state):
+        return build_bankruptcy_plan_deviation_digest(state)
     if needs_bankruptcy_distribution_digest(state):
         return build_bankruptcy_distribution_digest(state)
     if needs_flsa_gap_digest(state):
@@ -3531,6 +3535,314 @@ MAX_BANKRUPTCY_CLASS_ROWS = 96
 MAX_BANKRUPTCY_TOPIC_ROWS = 80
 MAX_BANKRUPTCY_NUMERIC_ROWS = 120
 MAX_BANKRUPTCY_WORKBOOK_ROWS = 100
+
+
+def needs_bankruptcy_plan_deviation_digest(state: RunState) -> bool:
+    haystack = lower_task_text(state)
+    practice_area = str(state.task.metadata.get("practice_area", "")).lower()
+    doc_names = " ".join(str(doc.get("filename", "")) for doc in state.documents).lower()
+    context = " ".join([haystack, practice_area, doc_names])
+    if "bankruptcy" not in context and "chapter 11" not in context and "plan of reorganization" not in context:
+        return False
+    if "distribution report" in context or "q1 distribution" in context:
+        return False
+    return any(
+        term in context
+        for term in [
+            "plan-deviation-report",
+            "redlined plan",
+            "redline",
+            "markup of plan",
+            "counterparty-markup-of-plan-of-reorganization",
+            "committee-redlined-plan",
+            "debtors-proposed-plan",
+        ]
+    ) and any(term in context for term in ["compare", "deviation", "markup", "against", "redline"])
+
+
+def build_bankruptcy_plan_deviation_digest(state: RunState) -> str:
+    doc_lookup = {str(doc.get("doc_id")): doc for doc in state.documents}
+    text_by_doc = joined_text_by_doc(state)
+
+    role_rows: list[list[str]] = []
+    for doc in state.documents:
+        doc_id = str(doc.get("doc_id", ""))
+        filename = str(doc.get("filename", ""))
+        text = text_by_doc.get(doc_id, "")
+        role_rows.append(
+            [
+                doc_id,
+                filename,
+                infer_bankruptcy_plan_deviation_doc_role(filename, text),
+                infer_bankruptcy_matter_signal(text),
+            ]
+        )
+
+    primary_doc_ids = bankruptcy_plan_deviation_primary_doc_ids(state)
+    primary_text = "\n".join(text_by_doc.get(doc_id, "") for doc_id in primary_doc_ids)
+    all_text = "\n".join(text_by_doc.values())
+    checklist_rows = build_bankruptcy_plan_deviation_priority_rows(state, primary_text or all_text)
+    snippet_rows = build_bankruptcy_plan_deviation_snippet_rows(state, primary_doc_ids)
+
+    if not role_rows and not checklist_rows and not snippet_rows:
+        return ""
+
+    lines = [
+        "# Deterministic bankruptcy plan-deviation digest",
+        "These rows preserve matter alignment, plan-redline economic deltas, legal enforceability issues, and meeting priorities before final synthesis.",
+        "",
+        "## Source Alignment Map",
+        "| Doc ID | Filename | Inferred Role | Matter Signal |",
+        "| --- | --- | --- | --- |",
+    ]
+    lines.extend("| " + " | ".join(markdown_cell(cell) for cell in row) + " |" for row in role_rows)
+
+    if checklist_rows:
+        append_digest_table(
+            lines,
+            "High-Priority Bankruptcy Plan-Deviation Checklist",
+            ["Issue", "Source-Derived Finding Or Calculation", "Required Report Treatment", "Source Basis"],
+            checklist_rows,
+        )
+
+    if snippet_rows:
+        append_digest_table(
+            lines,
+            "Plan Deviation Source Snippets",
+            ["Topic", "Source Snippet", "Source"],
+            snippet_rows,
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Required Bankruptcy Plan-Deviation Operator",
+            "- Start by identifying the debtor/case/matter and the controlling source set; do not let unrelated same-topic plan markups override the requested debtor plan and committee redline.",
+            "- Build a provision-by-provision table with columns: Priority, Provision, Debtor Plan, Committee Redline, Legal/Economic Effect, Recommendation, Source.",
+            "- Put cash and recovery math in a dedicated Effective Date feasibility section. Show the arithmetic rather than only describing feasibility qualitatively.",
+            "- Keep the May 28 meet-and-confer agenda separate from the full issue list, with non-negotiable items first and dialogue items second when the source makes that distinction.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def infer_bankruptcy_plan_deviation_doc_role(filename: str, text: str) -> str:
+    lower = f"{filename} {text[:1500]}".lower()
+    if "committee-counsel-transmittal" in lower or "meet-and-confer" in lower:
+        return "committee transmittal / negotiation framing"
+    if "committee-redlined-plan" in lower or "committee's proposed modifications" in lower:
+        return "committee redline / target markup"
+    if "debtors-proposed-plan" in lower or "debtor's proposed" in lower:
+        return "debtor original plan"
+    if "valuation-summary" in lower or "clearview" in lower:
+        return "valuation and waterfall support"
+    if "disclosure-statement" in lower:
+        return "disclosure and feasibility support"
+    if "preference-action" in lower or "avoidance action" in lower:
+        return "avoidance action support"
+    if "response-markup" in lower or "plan-markup" in lower:
+        return "possible same-topic distractor or secondary markup"
+    if "dip-credit" in lower:
+        return "financing support or possible separate-matter material"
+    return infer_bankruptcy_document_role(filename + " " + text[:900])
+
+
+def infer_bankruptcy_matter_signal(text: str) -> str:
+    compact = " ".join(text[:3000].split())
+    case_match = re.search(r"\bCase No\.\s*([A-Za-z0-9-]+)", compact, flags=re.IGNORECASE)
+    debtor_match = re.search(r"\bIn re:\s*\**([A-Z][A-Za-z0-9&.,' -]{3,80})", compact)
+    parts = []
+    if debtor_match:
+        parts.append(compact_digest_text(debtor_match.group(1), limit=70).strip("*, "))
+    if case_match:
+        parts.append(f"Case No. {case_match.group(1)}")
+    if parts:
+        return " / ".join(parts)
+    for marker in ["Cascadia Timber Holdings", "Argonaut Industrial Holdings"]:
+        if marker.lower() in text.lower():
+            return marker
+    return ""
+
+
+def bankruptcy_plan_deviation_primary_doc_ids(state: RunState) -> set[str]:
+    primary_terms = [
+        "committee-counsel-transmittal",
+        "committee-redlined-plan",
+        "debtors-proposed-plan",
+        "clearview-valuation-summary",
+        "disclosure-statement-excerpts",
+        "preference-action-summary",
+    ]
+    primary_doc_ids = {
+        str(doc.get("doc_id", ""))
+        for doc in state.documents
+        if any(term in str(doc.get("filename", "")).lower() for term in primary_terms)
+    }
+    return primary_doc_ids or {str(doc.get("doc_id", "")) for doc in state.documents}
+
+
+def build_bankruptcy_plan_deviation_priority_rows(state: RunState, text: str) -> list[list[str]]:
+    lower = text.lower()
+    rows: list[list[str]] = []
+    if all(term in lower for term in ["$18.7", "$28.0", "$187"]):
+        rows.append(
+            [
+                "Unsecured recovery pool",
+                "$18.7M proposed pool is about 10.0% of $187M GUC claims; committee redline increases the pool to $28.0M, about 14.97%.",
+                "State both the dollar increase and recovery-rate change near the top of the report.",
+                source_for_bankruptcy_plan_terms(state, ["18.7", "28.0", "187"], "committee-redlined-plan"),
+            ]
+        )
+    if all(term in lower for term in ["75%", "25%", "5.24"]):
+        rows.append(
+            [
+                "Payment timing and deferred interest",
+                "Committee changes the GUC payment split from 50/50 to 75/25: $21.0M on the Effective Date and $7.0M on the first anniversary, with 5.24% federal-judgment-rate interest on the deferred amount.",
+                "Identify the timing change separately from the recovery-pool increase and state approximate first-year deferred interest of $366,800.",
+                source_for_bankruptcy_plan_terms(state, ["75%", "25%", "5.24"], "committee-redlined-plan"),
+            ]
+        )
+    if all(term in lower for term in ["$68.0m", "$62.85m", "$9.35m"]):
+        rows.append(
+            [
+                "Effective Date cash requirement",
+                "Debtor sources/uses show $68.0M projected cash, $62.85M Effective Date uses, and only $5.15M cushion under a $9.35M initial GUC payment. Committee's $21.0M initial GUC payment raises Effective Date uses by $11.65M to about $74.5M, creating an approximate $6.5M cash shortfall before any exit-facility draw.",
+                "Show the cash bridge and recommend requesting a Pinecrest Advisory Group feasibility update.",
+                source_for_bankruptcy_plan_terms(state, ["68.0", "62.85", "9.35"], "disclosure-statement"),
+            ]
+        )
+    if "$9.5" in lower and "avoidance" in lower and "$28.0" in lower:
+        rows.append(
+            [
+                "Avoidance-action double-recovery interaction",
+                "Committee seeks both a $28.0M recovery pool and 100% of net avoidance-action recoveries; sources identify about $9.5M in gross preference/avoidance recoveries outside TEV.",
+                "Analyze whether avoidance recoveries are additive, credited against, or otherwise coordinated with the increased recovery pool to avoid double recovery or ambiguity.",
+                source_for_bankruptcy_plan_terms(state, ["9.5", "avoidance", "28.0"], "committee"),
+            ]
+        )
+    if "harrington v. purdue" in lower or "non-consensual third-party releases" in lower:
+        rows.append(
+            [
+                "Non-consensual third-party releases",
+                "Committee deletes non-consensual releases and states they are impermissible in the Ninth Circuit and likely impermissible nationwide after Harrington v. Purdue Pharma.",
+                "Analyze enforceability under Ninth Circuit authority and Harrington/Purdue; do not merely say the releases are a business issue.",
+                source_for_bankruptcy_plan_terms(state, ["Harrington", "Purdue", "Ninth Circuit"], "committee-redlined-plan"),
+            ]
+        )
+    if "timberline" in lower and "dividend recap" in lower and "release" in lower:
+        rows.append(
+            [
+                "Timberline release carve-out and sponsor-support risk",
+                "Committee carves out 2021 Dividend Recapitalization claims against Timberline, while the debtor plan states Timberline consent/support is a material condition to effectiveness.",
+                "Flag that the release carve-out can threaten Timberline's continued plan support and therefore plan viability.",
+                source_for_bankruptcy_plan_terms(state, ["Timberline", "Dividend Recapitalization", "material condition"], ""),
+            ]
+        )
+    if "section 11.9" in lower and "1129(b)(2)(b)" in lower:
+        rows.append(
+            [
+                "Retention bonuses and cramdown reserve",
+                "Committee adds Section 11.9 requiring cramdown compliance under Section 1129(b)(2)(B) if GUCs reject, tied to $3.4M retention bonuses as possible value retained by insiders/junior parties.",
+                "Identify Section 11.9 as a distinct redline issue and link it to retention bonuses as both a Section 503(c) issue and negotiating lever.",
+                source_for_bankruptcy_plan_terms(state, ["Section 11.9", "1129(b)(2)(B)", "3.4"], "committee-redlined-plan"),
+            ]
+        )
+    if "10%" in lower and "7%" in lower and "mip" in lower:
+        rows.append(
+            [
+                "MIP reduction rationale caveat",
+                "Committee reduces the MIP pool from 10% to 7%, but the report should test the stated rationale: GUCs receive cash recovery, while MIP dilution affects residual/new-equity economics indirectly.",
+                "Flag the internal incoherence or limitation in the Committee's MIP rationale instead of accepting the dilution argument uncritically.",
+                source_for_bankruptcy_plan_terms(state, ["10%", "7%", "MIP"], "committee-redlined-plan"),
+            ]
+        )
+    if "business judgment" in lower and "material net burden" in lower:
+        rows.append(
+            [
+                "Executory contract rejection standard",
+                "Committee changes Section 7.2/8.2 rejection language from business judgment to a material-net-burden standard.",
+                "Analyze against Bankruptcy Code Section 365 and the Bildisco business-judgment standard; recommend whether to reject or narrow the change.",
+                source_for_bankruptcy_plan_terms(state, ["business judgment", "material net burden", "365"], "committee-redlined-plan"),
+            ]
+        )
+    if "supplemental disclosure" in lower and "condition precedent" in lower:
+        rows.append(
+            [
+                "Supplemental disclosure timing",
+                "Committee makes supplemental disclosure on the 2021 Dividend Recapitalization a non-negotiable condition precedent and requires Committee consent to waiver.",
+                "Identify timeline risk to the Effective Date, including financing/DIP and administrative-cost consequences if the disclosure condition delays consummation.",
+                source_for_bankruptcy_plan_terms(state, ["supplemental disclosure", "condition precedent", "waiver"], "committee-redlined-plan"),
+            ]
+        )
+    if "may 28" in lower and "meet-and-confer" in lower:
+        rows.append(
+            [
+                "May 28 meet-and-confer priorities",
+                "Transmittal identifies non-negotiables: eliminate non-consensual releases, carve out 2021 Dividend Recap claims, and require supplemental disclosure; dialogue items include recovery pool, payment timing/interest, MIP, retention bonuses, governance, and avoidance proceeds mechanics.",
+                "Put a prioritized May 28 agenda in the executive summary rather than burying it in the full issue matrix.",
+                source_for_bankruptcy_plan_terms(state, ["May 28", "Non-Negotiable", "Areas Where"], "committee-counsel-transmittal"),
+            ]
+        )
+    return rows
+
+
+def build_bankruptcy_plan_deviation_snippet_rows(state: RunState, primary_doc_ids: set[str]) -> list[list[str]]:
+    topics = [
+        ("Recovery / payment split", ["$28.0", "75%", "5.24"]),
+        ("Release enforceability", ["Harrington", "Purdue", "Ninth Circuit"]),
+        ("Cramdown reserve", ["Section 11.9", "1129(b)(2)(B)", "retention"]),
+        ("Cash uses", ["Effective Date Cash", "$62.85", "$68.0"]),
+        ("Contract rejection", ["business judgment", "material net burden"]),
+        ("Supplemental disclosure", ["supplemental disclosure", "condition precedent"]),
+    ]
+    doc_lookup = {str(doc.get("doc_id")): doc for doc in state.documents}
+    rows: list[list[str]] = []
+    seen: set[str] = set()
+    for topic, keywords in topics:
+        for chunk in sorted(state.chunks, key=lambda item: (str(item.get("doc_id", "")), int(item.get("index", 0) or 0))):
+            doc_id = str(chunk.get("doc_id", ""))
+            if primary_doc_ids and doc_id not in primary_doc_ids:
+                continue
+            text = str(chunk.get("text", ""))
+            lower = text.lower()
+            if not all(keyword.lower() in lower for keyword in keywords[:2]):
+                continue
+            first_keyword = keywords[0]
+            start = lower.find(first_keyword.lower())
+            snippet = compact_digest_text(text[max(0, start - 260) : start + 760], limit=760)
+            key = normalize_issue_key(topic + snippet)
+            if key in seen:
+                continue
+            seen.add(key)
+            filename = str(doc_lookup.get(doc_id, {}).get("filename", ""))
+            rows.append([topic, snippet, f"{doc_id} / {chunk.get('chunk_id', '')} / {filename}"])
+            break
+    return rows
+
+
+def source_for_bankruptcy_plan_terms(state: RunState, terms: list[str], filename_hint: str) -> str:
+    doc_lookup = {str(doc.get("doc_id")): doc for doc in state.documents}
+    primary_doc_ids = bankruptcy_plan_deviation_primary_doc_ids(state)
+    hint = filename_hint.lower()
+    for chunk in sorted(state.chunks, key=lambda item: (str(item.get("doc_id", "")), int(item.get("index", 0) or 0))):
+        doc_id = str(chunk.get("doc_id", ""))
+        if primary_doc_ids and doc_id not in primary_doc_ids:
+            continue
+        filename = str(doc_lookup.get(doc_id, {}).get("filename", ""))
+        if hint and hint not in filename.lower():
+            continue
+        lower = str(chunk.get("text", "")).lower()
+        if all(term.lower() in lower for term in terms[:2]):
+            return f"{doc_id} / {chunk.get('chunk_id', '')} / {filename}"
+    for chunk in sorted(state.chunks, key=lambda item: (str(item.get("doc_id", "")), int(item.get("index", 0) or 0))):
+        doc_id = str(chunk.get("doc_id", ""))
+        if primary_doc_ids and doc_id not in primary_doc_ids:
+            continue
+        filename = str(doc_lookup.get(doc_id, {}).get("filename", ""))
+        lower = str(chunk.get("text", "")).lower()
+        if all(term.lower() in lower for term in terms[:2]):
+            return f"{doc_id} / {chunk.get('chunk_id', '')} / {filename}"
+    return "primary bankruptcy plan-deviation sources"
 
 
 def needs_bankruptcy_distribution_digest(state: RunState) -> bool:

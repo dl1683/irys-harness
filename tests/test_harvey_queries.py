@@ -1154,6 +1154,81 @@ class HarveyQueryTests(unittest.TestCase):
         self.assertIn("Westlake", digest)
         self.assertIn("within 14 days", digest)
 
+    def test_bankruptcy_plan_deviation_digest_preserves_source_alignment_and_cash_rows(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="bankruptcy-restructuring/analyze-counterparty-markup-of-plan-of-reorganization",
+            question="Compare the committee's redlined plan against the debtor's original plan and prepare a deviation report.",
+            answer_schema={"deliverables": ["plan-deviation-report.docx"]},
+            metadata={"practice_area": "bankruptcy-restructuring"},
+        )
+        state = RunState(
+            task=task,
+            config=load_config(),
+            documents=[
+                {"doc_id": "doc_1", "filename": "committee-counsel-transmittal.eml"},
+                {"doc_id": "doc_2", "filename": "committee-redlined-plan.docx"},
+                {"doc_id": "doc_3", "filename": "disclosure-statement-excerpts.docx"},
+                {"doc_id": "doc_4", "filename": "other-plan-markup.docx"},
+            ],
+            chunks=[
+                {
+                    "doc_id": "doc_1",
+                    "chunk_id": "c1",
+                    "index": 0,
+                    "text": (
+                        "To frame the May 28 meet-and-confer, non-negotiable items are elimination of "
+                        "non-consensual third-party releases, the release carve-out for claims arising "
+                        "from the 2021 Dividend Recapitalization, and the supplemental disclosure condition "
+                        "precedent. Dialogue items include recovery pool, payment timing and interest, "
+                        "MIP, retention bonuses, governance, and avoidance proceeds mechanics."
+                    ),
+                },
+                {
+                    "doc_id": "doc_2",
+                    "chunk_id": "c2",
+                    "index": 0,
+                    "text": (
+                        "Allowed General Unsecured Claims receive $28.0M instead of $18.7M on $187M "
+                        "claims. Distribution changes from 50/50 to 75% / 25%: $21M on the Effective "
+                        "Date and $7M one year later, with 5.24% federal judgment rate interest. "
+                        "The Committee also seeks 100% of net avoidance recoveries. Non-consensual "
+                        "third-party releases are impermissible in the Ninth Circuit and likely "
+                        "impermissible nationwide after Harrington v. Purdue Pharma. Section 11.9 "
+                        "requires cramdown compliance under 1129(b)(2)(B) because $3.4M retention "
+                        "bonuses may transfer value to insiders. Section 7.2 changes the rejection "
+                        "standard from business judgment to material net burden on the estate."
+                    ),
+                },
+                {
+                    "doc_id": "doc_3",
+                    "chunk_id": "c3",
+                    "index": 0,
+                    "text": (
+                        "Estimated Sources and Uses of Cash on the Effective Date show $68.0M cash, "
+                        "$62.85M total uses, and a $9.35M unsecured pool Effective Date payment."
+                    ),
+                },
+                {
+                    "doc_id": "doc_4",
+                    "chunk_id": "c4",
+                    "index": 0,
+                    "text": "ARGONAUT unrelated plan markup with warrant economics and a different case.",
+                },
+            ],
+        )
+        digest = build_task_family_digest(state)
+        self.assertIn("Deterministic bankruptcy plan-deviation digest", digest)
+        self.assertIn("committee transmittal / negotiation framing", digest)
+        self.assertIn("possible same-topic distractor or secondary markup", digest)
+        self.assertIn("High-Priority Bankruptcy Plan-Deviation Checklist", digest)
+        self.assertIn("$18.7M proposed pool", digest)
+        self.assertIn("$366,800", digest)
+        self.assertIn("$11.65M", digest)
+        self.assertIn("Harrington/Purdue", digest)
+        self.assertIn("Section 365", digest)
+        self.assertIn("May 28 agenda", digest)
+
     def test_synthesis_prompt_forbids_encoded_artifacts(self) -> None:
         task = BenchmarkTask(
             benchmark="harvey_lab_sample",
