@@ -2100,9 +2100,7 @@ def build_evidence_focus(haystack: str) -> list[str]:
 
 
 def infer_task_family(haystack: str) -> str:
-    if any(term in haystack for term in ["privilege-log", "privilege log", "relevance-classification", "relevance classification"]) or (
-        "production set" in haystack and any(term in haystack for term in ["privilege", "relevance"])
-    ):
+    if is_document_review_privilege_task_text(haystack):
         return "document_review_privilege_log"
     if "emerging-companies-venture-capital" in haystack or any(
         term in haystack
@@ -3163,6 +3161,23 @@ def needs_document_review_privilege_digest(state: RunState) -> bool:
     haystack = lower_task_text(state)
     deliverables = " ".join(str(item) for item in state.task.answer_schema.get("deliverables", [])).lower()
     combined = f"{haystack} {deliverables}"
+    return is_document_review_privilege_task_text(combined)
+
+
+def is_document_review_privilege_task_text(text: str) -> bool:
+    combined = text.lower()
+    if any(
+        term in combined
+        for term in [
+            "subpoena request categories",
+            "subpoena-request-categories",
+            "subpoena category",
+            "subpoena-category",
+            "against subpoena",
+            "against-subpoena",
+        ]
+    ):
+        return False
     if any(
         term in combined
         for term in [
@@ -3173,7 +3188,11 @@ def needs_document_review_privilege_digest(state: RunState) -> bool:
         ]
     ):
         return True
-    return "production set" in combined and any(term in combined for term in ["privilege", "relevance", "document review"])
+    if "production set" not in combined:
+        return False
+    has_privilege_axis = "privilege" in combined or "privileged" in combined or "redaction" in combined
+    has_relevance_axis = "relevance" in combined or "relevance classification" in combined
+    return has_privilege_axis and has_relevance_axis
 
 
 def needs_regulated_filing_guidance(state: RunState) -> bool:

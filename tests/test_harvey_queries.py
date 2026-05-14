@@ -1015,6 +1015,9 @@ class HarveyQueryTests(unittest.TestCase):
                 }
             ],
         )
+        contract = build_deliverable_contract(state)
+        self.assertEqual(contract["task_family"], "white_collar_investigations_review")
+        self.assertFalse(needs_document_review_privilege_digest(state))
         digest = build_task_family_digest(state)
         self.assertIn("52,318 total documents", digest)
         self.assertIn("Category 1 has about 2,134 documents", digest)
