@@ -25,6 +25,7 @@ from irys_harness.agent_bench_bridge import (
     score_docfinqa_numeric,
     score_repoqa_symbol_or_body,
     stable_task_hash,
+    synthesis_prompt_for_benchmark,
 )
 from irys_harness.config import ModelConfig, ModelTier, parse_config
 from irys_harness.metrics import ModelCallRecord
@@ -369,6 +370,23 @@ class AgentBenchBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["answer"], "56.57")
         self.assertEqual(result["method"], "docfinqa_share_repurchase_cash_impact")
+
+    def test_cuad_prompts_require_verbatim_spans_not_legal_analysis(self) -> None:
+        evidence_prompt = evidence_prompt_for_benchmark(
+            "cuad",
+            'Highlight the parts related to "Effective Date".',
+            "This Agreement is effective as of January 1, 2024.",
+        )
+        self.assertIn("exact contract text spans", evidence_prompt)
+        self.assertIn("Do not answer with legal analysis", evidence_prompt)
+        synth_prompt = synthesis_prompt_for_benchmark(
+            "cuad",
+            'Highlight the parts related to "Effective Date".',
+            "ANSWER_CANDIDATE: This Agreement is effective as of January 1, 2024.",
+            "FINAL_FORMAT: exact span text only",
+        )
+        self.assertIn("Return only the exact contract span text", synth_prompt)
+        self.assertIn("Do not add bullets", synth_prompt)
 
     def test_citation_judge_context_selects_cited_doc_not_prefix_window(self) -> None:
         context = "[doc1] irrelevant\n\n[doc49] William Pooley died in 1629."

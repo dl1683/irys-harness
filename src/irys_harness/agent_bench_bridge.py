@@ -1001,6 +1001,20 @@ def evidence_prompt_for_benchmark(benchmark: str, query: str, context: str) -> s
             f"Question:\n{query}\n\n"
             f"Context:\n{context}"
         )
+    if benchmark == "cuad":
+        return (
+            "You are the cheap worker for a contract-clause extraction benchmark. Extract the exact contract text spans "
+            "that answer the requested clause category. Do not answer with legal analysis, section numbers alone, or "
+            "summaries. The scorer rewards the source span text, so preserve wording, dates, party names, amounts, and "
+            "defined terms verbatim where possible.\n\n"
+            "Return these sections:\n"
+            "ANSWER_CANDIDATE: exact span text only; if multiple spans are needed, separate them with newlines; if no span exists, NO_ANSWER.\n"
+            "FORMAT_REQUIREMENT: verbatim contract span(s), no explanation.\n"
+            "EVIDENCE: source section labels plus the same exact span text.\n"
+            "RISKS: overbroad span, section label without text, paraphrase, or false positive.\n\n"
+            f"Question:\n{query}\n\n"
+            f"Context:\n{context}"
+        )
     if benchmark == "facts_grounding":
         return (
             "You are the cheap worker for a context-grounding benchmark. Answer only from the provided source. "
@@ -1085,6 +1099,18 @@ def critic_prompt_for_benchmark(benchmark: str, query: str, evidence_packet: str
             f"Question:\n{query}\n\n"
             f"Evidence packet:\n{evidence_packet}"
         )
+    if benchmark == "cuad":
+        return (
+            "You are the mid-tier checker for a contract span extraction task. Check whether ANSWER_CANDIDATE contains "
+            "verbatim contract text for the requested clause category, not just a section number or explanation.\n\n"
+            "Return compact sections:\n"
+            "SUFFICIENCY: sufficient or insufficient.\n"
+            "FINAL_FORMAT: exact span text only; one span per line; NO_ANSWER if absent.\n"
+            "MISSING_OR_WEAK: paraphrase, missing quoted language, overbroad span, false positive, or unsupported section.\n"
+            "SYNTHESIS_INSTRUCTIONS: return only the exact span text from ANSWER_CANDIDATE/EVIDENCE; no legal explanation.\n\n"
+            f"Question:\n{query}\n\n"
+            f"Evidence packet:\n{evidence_packet}"
+        )
     return critic_prompt(query, evidence_packet)
 
 
@@ -1142,6 +1168,16 @@ def synthesis_prompt_for_benchmark(
         return (
             "Answer concisely using only the evidence packet, and include the supporting [docN] citation IDs from the evidence. "
             "Do not invent citation IDs or cite unrelated documents.\n\n"
+            f"Question:\n{query}\n\n"
+            f"Evidence packet:\n{evidence_packet}\n\n"
+            f"Critic notes:\n{critic_notes}\n\n"
+            "Final answer:"
+        )
+    if benchmark == "cuad":
+        return (
+            "Return only the exact contract span text for the requested CUAD clause category. Use the worker's "
+            "ANSWER_CANDIDATE/EVIDENCE and critic notes. Do not include section labels unless they are part of the span. "
+            "Do not add bullets, markdown, legal analysis, or explanations. If no source span is supported, return NO_ANSWER.\n\n"
             f"Question:\n{query}\n\n"
             f"Evidence packet:\n{evidence_packet}\n\n"
             f"Critic notes:\n{critic_notes}\n\n"
