@@ -2963,6 +2963,18 @@ def sanitize_expert_writer(raw: str) -> str:
 
 
 def build_task_family_digest(state: RunState) -> str:
+    primary = build_primary_task_family_digest(state)
+    if not needs_requirement_reconciliation_digest(state):
+        return primary
+    supplement = build_requirement_reconciliation_digest(state)
+    if not supplement:
+        return primary
+    if not primary:
+        return supplement
+    return f"{primary}\n\n{supplement}"
+
+
+def build_primary_task_family_digest(state: RunState) -> str:
     haystack = lower_task_text(state)
     if needs_venture_financing_digest(state):
         return build_venture_financing_digest(state)
@@ -3405,6 +3417,7 @@ DOCUMENT_COMPARISON_ISSUE_FAMILIES: list[tuple[str, list[str]]] = [
 
 MAX_DOCUMENT_COMPARISON_ISSUE_ROWS = 140
 MAX_DOCUMENT_COMPARISON_NUMERIC_ROWS = 70
+MAX_REQUIREMENT_RECONCILIATION_ROWS = 120
 
 
 BANKRUPTCY_DISTRIBUTION_TOPIC_FAMILIES: list[tuple[str, list[str]]] = [
@@ -12989,6 +13002,231 @@ def add_real_estate_general_rows(lines: list[str]) -> None:
         ["Control rights", "Always check assignment, transfer, ROFO/ROFR, consent, title objection, recapture, and lender/landlord discretion provisions.", "Classify whether each change affects economics, control, closing certainty, or post-closing remedies."],
     ]
     append_digest_table(lines, "General Real Estate Extraction Rules", ["Issue", "Extraction Rule", "Required Treatment"], rows)
+
+
+def needs_requirement_reconciliation_digest(state: RunState) -> bool:
+    haystack = lower_task_text(state)
+    if any(
+        term in haystack
+        for term in [
+            "against",
+            "audit",
+            "compliance gaps",
+            "compliance gap",
+            "closing documents",
+            "filing receipt",
+            "investigative demand",
+            "transaction records",
+        ]
+    ):
+        return any(
+            term in haystack
+            for term in [
+                "benchmark",
+                "checklist",
+                "condition",
+                "precedent",
+                "requirement",
+                "regulation",
+                "rules",
+                "standards",
+                "term sheet",
+                "permit",
+                "policy",
+                "prior filing",
+                "precedent",
+                "seller disclosure",
+                "tax returns",
+                "sanction",
+                "ofac",
+                "export",
+                "classification",
+                "transaction records",
+                "filing receipt",
+                "privacy",
+                "cpra",
+                "gdpr",
+                "hipaa",
+            ]
+        )
+    return False
+
+
+def build_requirement_reconciliation_digest(state: RunState) -> str:
+    doc_lookup = {str(doc.get("doc_id")): doc for doc in state.documents}
+    role_rows: list[list[str]] = []
+    for doc in state.documents:
+        doc_id = str(doc.get("doc_id", ""))
+        filename = str(doc.get("filename", ""))
+        role_rows.append([doc_id, filename, infer_reconciliation_doc_role(filename)])
+
+    relevance_tokens = task_relevance_tokens(state)
+    row_candidates: list[tuple[int, int, list[str]]] = []
+    seen_rows: set[tuple[str, str]] = set()
+    sequence = 0
+    for chunk in sorted(state.chunks, key=lambda item: (str(item.get("doc_id", "")), int(item.get("index", 0) or 0))):
+        doc_id = str(chunk.get("doc_id", ""))
+        chunk_id = str(chunk.get("chunk_id", ""))
+        text = str(chunk.get("text", ""))
+        if not text.strip():
+            continue
+        doc = doc_lookup.get(doc_id, {})
+        filename = str(doc.get("filename", ""))
+        role = infer_reconciliation_doc_role(filename + " " + text[:1200])
+        source = f"{doc_id} / {chunk_id} / {filename}"
+        for line in iter_reconciliation_candidate_lines(text):
+            score = score_reconciliation_line(line=line, role=role, relevance_tokens=relevance_tokens)
+            if score <= 0:
+                continue
+            key = (source, normalize_issue_key(line))
+            if key in seen_rows:
+                continue
+            seen_rows.add(key)
+            sequence += 1
+            row_candidates.append(
+                (
+                    score,
+                    sequence,
+                    [
+                        role,
+                        extract_reconciliation_anchor(line),
+                        compact_digest_text(line, limit=700),
+                        reconciliation_required_use(line, role),
+                        source,
+                    ],
+                )
+            )
+
+    rows = [
+        row
+        for _score, _sequence, row in sorted(
+            row_candidates,
+            key=lambda item: (-item[0], item[1]),
+        )[:MAX_REQUIREMENT_RECONCILIATION_ROWS]
+    ]
+    if not rows:
+        return ""
+
+    lines = [
+        "# Deterministic requirement-reconciliation digest",
+        "These rows preserve checklist, requirement, benchmark, permit, policy, filing, term-sheet, transaction-record, and precedent facts for compare/audit tasks before synthesis.",
+        "",
+        "## Reconciliation Source Role Map",
+        "| Doc ID | Filename | Inferred Role |",
+        "| --- | --- | --- |",
+    ]
+    lines.extend("| " + " | ".join(markdown_cell(cell) for cell in row) + " |" for row in role_rows)
+    append_digest_table(
+        lines,
+        "Requirement / Current-State Row Inventory",
+        ["Source Role", "Anchor", "Extracted Requirement Or Current Fact", "Required Comparison Use", "Source"],
+        rows,
+    )
+    lines.extend(
+        [
+            "",
+            "## Required Reconciliation Operator",
+            "- Build a row-by-row matrix with columns: Requirement / Benchmark, Current Evidence, Gap Or Match, Severity, Remediation, Source.",
+            "- Do not merge distinct issues for the same entity, document, requirement number, exhibit, schedule, certificate, filing, shipment, or counterparty.",
+            "- Preserve exact names, amounts, dates, filing numbers, item numbers, CUSIPs, statutory sections, thresholds, and status labels from the row inventory.",
+            "- Include a summary count by severity or status when the task asks for a checklist, audit, gap assessment, or discrepancy report.",
+            "- If one source is a checklist, benchmark, rules document, permit, term sheet, policy, precedent, or condition list, treat it as the target state and compare every material current-state row against it.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def infer_reconciliation_doc_role(text: str) -> str:
+    lower = text.lower()
+    if any(term in lower for term in ["checklist", "requirements", "rules", "standard", "benchmark", "term sheet", "permit", "precedent", "policy"]):
+        return "target requirements / benchmark source"
+    if any(term in lower for term in ["current", "draft", "filing", "certificate", "ledger", "records", "data room", "application"]):
+        return "current-state evidence source"
+    if any(term in lower for term in ["markup", "redline", "blackline", "counterparty"]):
+        return "current markup / counterparty position"
+    return infer_document_role(text)
+
+
+def iter_reconciliation_candidate_lines(text: str) -> list[str]:
+    lines: list[str] = []
+    for raw in text.splitlines():
+        line = " ".join(raw.strip().split())
+        if not line or len(line) < 18:
+            continue
+        if len(line) > 1200:
+            line = compact_digest_text(line, limit=1200)
+        if is_reconciliation_candidate_line(line):
+            lines.append(line)
+    return lines
+
+
+def is_reconciliation_candidate_line(line: str) -> bool:
+    lower = line.lower()
+    if "|" in line and count_nonempty_cells(line) >= 3:
+        return True
+    if re.search(r"\b(?:item|section|schedule|exhibit|requirement|condition|benchmark|criterion)\s+[a-z0-9_.()-]+", lower):
+        return True
+    if any(term in lower for term in ["missing", "omits", "omitted", "inconsistent", "discrepancy", "shortfall", "not address", "does not", "wrong ", "stale "]):
+        return True
+    if any(term in lower for term in ["shall", "must", "required", "no later than", "within ", "deadline", "threshold", "limit", "cap", "ratio"]):
+        return True
+    if any(term in lower for term in ["ofac", "cpra", "gdpr", "hipaa", "sec", "cusip", "10b-5", "good standing", "license exception", "entity list", "50% rule"]):
+        return True
+    return bool(re.search(r"\b(?:19|20)\d{2}\b", line) and re.search(r"\$?\d[\d,]*(?:\.\d+)?%?", line))
+
+
+def score_reconciliation_line(*, line: str, role: str, relevance_tokens: set[str]) -> int:
+    lower = line.lower()
+    score = 0
+    if "|" in line:
+        score += 8
+    if "target requirements" in role or "benchmark source" in role:
+        score += 5
+    if "current-state" in role or "current markup" in role:
+        score += 4
+    if any(term in lower for term in ["missing", "omits", "omitted", "inconsistent", "discrepancy", "shortfall", "wrong ", "stale "]):
+        score += 12
+    if any(term in lower for term in ["require", "condition", "benchmark", "threshold", "limit", "deadline", "shall", "must"]):
+        score += 8
+    if any(term in lower for term in ["critical", "significant", "administrative", "high", "medium", "low"]):
+        score += 5
+    if any(term in lower for term in ["ofac", "sanction", "cpra", "gdpr", "hipaa", "sec", "cusip", "10b-5", "license", "permit"]):
+        score += 6
+    if re.search(r"\b(?:19|20)\d{2}\b", line):
+        score += 3
+    if re.search(r"\$?\d[\d,]*(?:\.\d+)?%?", line):
+        score += 3
+    normalized = normalize_issue_key(line)
+    for token in relevance_tokens:
+        if len(token) >= 4 and token in normalized:
+            score += 3
+    return score if score >= 10 else 0
+
+
+def count_nonempty_cells(line: str) -> int:
+    return len([cell for cell in line.split("|") if cell.strip()])
+
+
+def extract_reconciliation_anchor(line: str) -> str:
+    anchor = extract_clause_anchor(line)
+    if anchor and len(anchor) <= 120:
+        return anchor
+    if "|" in line:
+        cells = [cell.strip(" *`") for cell in line.split("|") if cell.strip(" *`")]
+        if cells:
+            return compact_digest_text(" / ".join(cells[:2]), limit=120)
+    return compact_digest_text(line, limit=120)
+
+
+def reconciliation_required_use(line: str, role: str) -> str:
+    lower = line.lower()
+    if any(term in lower for term in ["missing", "omits", "omitted", "inconsistent", "discrepancy", "shortfall", "wrong ", "stale "]):
+        return "Treat as a specific discrepancy; include severity and remediation."
+    if "target requirements" in role or "benchmark source" in role:
+        return "Treat as target requirement or benchmark row to test against current evidence."
+    if "current-state" in role or "current markup" in role:
+        return "Treat as observed current-state evidence to compare against target requirements."
+    return "Use as source row in the requirement-by-requirement reconciliation matrix."
 
 
 def build_document_comparison_digest(state: RunState) -> str:

@@ -1229,6 +1229,58 @@ class HarveyQueryTests(unittest.TestCase):
         self.assertIn("Section 365", digest)
         self.assertIn("May 28 agenda", digest)
 
+    def test_requirement_reconciliation_digest_preserves_checklist_rows(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="capital-markets/compare-closing-documents-against-closing-checklist",
+            question="Compare the closing documents against the master closing checklist and identify discrepancies by severity.",
+            answer_schema={"deliverables": ["closing-discrepancy-report.docx"]},
+            metadata={"practice_area": "capital-markets"},
+        )
+        state = RunState(
+            task=task,
+            config=load_config(),
+            documents=[
+                {"doc_id": "doc_1", "filename": "master-closing-checklist.docx"},
+                {"doc_id": "doc_2", "filename": "closing-data-room-index.xlsx"},
+                {"doc_id": "doc_3", "filename": "delivered-closing-documents.docx"},
+            ],
+            chunks=[
+                {
+                    "doc_id": "doc_1",
+                    "chunk_id": "c1",
+                    "index": 0,
+                    "text": (
+                        "| 6.1 | Officers' Certificate of the Issuer and Guarantors | Must cover Cascadia, "
+                        "CFT, PES, and Great Basin Controls Corp. | Required at closing |\n"
+                        "| 10.4 | 10b-5 negative assurance letter | Must be addressed to Bridgewell Securities "
+                        "LLC and Lakefield Stern & Co. | Required for all underwriters |\n"
+                        "| 7.5 | DTC eligibility letter | CUSIP 147829 AB3 must match the notes | Critical |"
+                    ),
+                },
+                {
+                    "doc_id": "doc_2",
+                    "chunk_id": "c2",
+                    "index": 1,
+                    "text": (
+                        "| Officers_Certificate.pdf | certifies Cascadia, CFT, and PES only; omits "
+                        "Great Basin Controls Corp. |\n"
+                        "| Thornton_10b5_Letter.pdf | addressed only to Bridgewell Securities LLC; "
+                        "Lakefield Stern & Co. is not an addressee |\n"
+                        "| DTC_Letter.pdf | CUSIP 147829 AC4 appears instead of 147829 AB3 |"
+                    ),
+                },
+            ],
+        )
+        digest = build_task_family_digest(state)
+        self.assertIn("Deterministic requirement-reconciliation digest", digest)
+        self.assertIn("Officers' Certificate", digest)
+        self.assertIn("Great Basin Controls Corp", digest)
+        self.assertIn("10b-5 negative assurance", digest)
+        self.assertIn("Lakefield Stern", digest)
+        self.assertIn("CUSIP 147829 AC4", digest)
+        self.assertIn("summary count by severity", digest)
+
     def test_synthesis_prompt_forbids_encoded_artifacts(self) -> None:
         task = BenchmarkTask(
             benchmark="harvey_lab_sample",
