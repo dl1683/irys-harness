@@ -1239,6 +1239,7 @@ class HarveyQueryTests(unittest.TestCase):
         self.assertIn("$150K annually", digest)
         self.assertIn("$513,750", digest)
         self.assertIn("$1,475,000", digest)
+        self.assertNotIn("Side Letter Markup Matrix", digest)
 
     def test_funds_digest_preserves_side_letter_and_transfer_specificity_rows(self) -> None:
         side_letter = BenchmarkTask(
@@ -1265,6 +1266,20 @@ class HarveyQueryTests(unittest.TestCase):
         self.assertIn("$35,512,000", transfer_digest)
         self.assertIn("$1,325,000", transfer_digest)
         self.assertIn("Northbridge Valuation Services", transfer_digest)
+
+    def test_funds_digest_routes_side_letter_lpa_comparison_to_side_letter_rows(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="funds-asset-management/compare-side-letter-provisions-against-limited-partnership-agreement",
+            question="Compare CalSEPS side letter provisions against the limited partnership agreement.",
+            answer_schema={"deliverables": ["side-letter-lpa-comparison-memo.docx"]},
+            metadata={"practice_area": "funds-asset-management"},
+        )
+        digest = build_task_family_digest(RunState(task=task, config=load_config()))
+        self.assertIn("Side Letter Markup Matrix", digest)
+        self.assertIn("Key Person side-letter conflict", digest)
+        self.assertIn("Removal thresholds", digest)
+        self.assertIn("Near-Top Funds Required Findings", digest)
 
     def test_ipo_charter_digest_preserves_governance_issue_families(self) -> None:
         task = BenchmarkTask(

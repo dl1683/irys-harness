@@ -15102,12 +15102,15 @@ def funds_asset_management_digest_modes(state: RunState, context: str) -> set[st
         return {"investment_advisory"}
     if "limited-partnership-interest-transfer" in task_text or "interest transfer agreement" in task_text:
         return {"transfer_agreement"}
-    if "limited-partnership-agreement" in task_text or "lpa redline" in context:
-        return {"lpa_markup"}
-    if "analyze-counterparty-markup-of-side-letter" in task_text:
-        return {"side_letter_markup"}
     if "fund-economics-comparison" in task_text or "fund economics comparison" in task_text:
         return {"fund_economics"}
+    if "side-letter" in task_text or "side letter" in task_text:
+        modes = {"side_letter_markup"}
+        if "limited-partnership-agreement" in task_text or "limited partnership agreement" in task_text:
+            modes.add("lpa_markup")
+        return modes
+    if "limited-partnership-agreement" in task_text or "lpa redline" in context:
+        return {"lpa_markup"}
 
     modes: set[str] = set()
     if "advisory agreement" in context and ("section 205" in context or "soft dollar" in context):
