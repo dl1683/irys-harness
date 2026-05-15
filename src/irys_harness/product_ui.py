@@ -1231,6 +1231,8 @@ INDEX_HTML = r"""<!doctype html>
           const plan = await requestPlan({paths: pathPayload($("paths").value)});
           currentPlan = plan;
           renderPlan(plan);
+          status.textContent = "Plan ready. Review first-read documents, then click Run Approved Plan again.";
+          return;
         }
         applyCheckedCandidatePaths({silent: true});
         const response = await fetch("/api/run-async", {

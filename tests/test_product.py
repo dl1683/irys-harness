@@ -364,6 +364,7 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn("/api/plan", INDEX_HTML)
         self.assertIn("/api/rerun-plan", INDEX_HTML)
         self.assertIn("Review Plan", INDEX_HTML)
+        self.assertIn("Plan ready. Review first-read documents, then click Run Approved Plan again.", INDEX_HTML)
         self.assertIn("Detailed Plan", INDEX_HTML)
         self.assertIn('id="planPreview"', INDEX_HTML)
         self.assertIn("Run Brief", INDEX_HTML)
