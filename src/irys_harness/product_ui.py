@@ -1129,7 +1129,7 @@ INDEX_HTML = r"""<!doctype html>
       <details class="control-help">
         <summary>What the controls mean</summary>
         <small>
-          Folders are read recursively. No artificial file-count or per-document character cap is applied to local corpus paths. Matter ID groups saved runs and costs. Chat ID keeps separate conversations inside the same matter. Smart source planning reviews the file inventory before the first read and falls back to path scoring if model planning is unavailable. Draft final answer is on by default and calls the configured drafting model; turn it off only for a cheap dry run. Evidence chunks controls how many retrieved chunks are used for the answer packet; the default favors source coverage over minimal token use. Source actions let you read a document more deeply, pin it into synthesis, or hold it back on the next pass. Message Cost is the loaded run; Matter Cost totals saved traces for the matter.
+          Folders are read recursively. No artificial file-count or per-document character cap is applied to local corpus paths. Matter ID groups saved runs and costs. Chat ID keeps separate conversations inside the same matter. Smart source planning reviews the file inventory before the first read and falls back to path scoring if model planning is unavailable. Draft final answer is on by default and calls the configured drafting model; turn it off only for a cheap dry run. Evidence passages controls how many retrieved source passages are used for the answer packet; the default favors source coverage over minimal token use. Source actions let you read a document more deeply, pin it into synthesis, or hold it back on the next pass. Current Run Cost is the loaded run; Matter Cost totals saved traces for the matter.
         </small>
       </details>
       <label for="matter">Matter ID</label>
@@ -1147,7 +1147,7 @@ INDEX_HTML = r"""<!doctype html>
       <div class="row">
         <label class="toggle"><input id="usePlanner" type="checkbox" checked /> Smart source planning</label>
         <label class="toggle"><input id="live" type="checkbox" checked /> Draft final answer</label>
-        <label for="topk">Evidence chunks</label>
+        <label for="topk">Evidence passages</label>
         <input id="topk" type="number" min="1" max="200" value="36" />
       </div>
       <div class="row">
@@ -1157,8 +1157,9 @@ INDEX_HTML = r"""<!doctype html>
       </div>
     </section>
     <section>
-      <h2>Question Or Deliverable</h2>
+      <h2>Question Or Work Product</h2>
       <textarea id="objective" class="objective" placeholder="Ask the question or describe the work product you want from this matter."></textarea>
+      <div class="hint">For a follow-up, keep the same Matter ID and Chat ID, replace the question, and run again. Prior questions and final answers are used for continuity; intermediate trace details are not used as chat history.</div>
       <div class="row">
         <button class="secondary" id="planRun">Review Source Plan</button>
       </div>
@@ -1193,11 +1194,11 @@ INDEX_HTML = r"""<!doctype html>
       </details>
       <div class="metric-grid">
         <div class="metric"><b>Documents</b><span id="docCount">0</span></div>
-        <div class="metric"><b>Chunks</b><span id="chunkCount">0</span></div>
+        <div class="metric"><b>Source Passages</b><span id="chunkCount">0</span></div>
         <div class="metric"><b>Tokens</b><span id="tokens">0</span></div>
-        <div class="metric"><b>Message Cost</b><span id="cost">$0.00</span></div>
+        <div class="metric"><b>Current Run Cost</b><span id="cost">$0.00</span></div>
         <div class="metric"><b>Matter Cost</b><span id="matterCost">$0.00</span></div>
-        <div class="metric"><b>Matter Messages</b><span id="matterMessages">0</span></div>
+        <div class="metric"><b>Matter Runs</b><span id="matterMessages">0</span></div>
       </div>
       <h2>Answer</h2>
       <div class="answer" id="answer"></div>
@@ -1211,7 +1212,7 @@ INDEX_HTML = r"""<!doctype html>
       <div class="list" id="sourcesUsed"></div>
       <h2 style="margin-top:16px">Open Questions</h2>
       <div class="list" id="openQuestions"></div>
-      <h2 style="margin-top:16px">Chat History</h2>
+      <h2 style="margin-top:16px">Conversation History</h2>
       <div class="list" id="chatHistory"></div>
     </section>
     <section>
@@ -1992,7 +1993,7 @@ INDEX_HTML = r"""<!doctype html>
       const loadErrors = docs.filter(doc => doc && doc.load_error);
       const retrieved = Array.isArray(packet.retrieved_chunks) ? packet.retrieved_chunks : [];
       const summaryRows = [
-        ["Corpus read", `${docs.length} document(s), ${chunks.length} searchable chunk(s).`],
+        ["Corpus read", `${docs.length} document(s), ${chunks.length} searchable source passage(s).`],
         ["Evidence found", `${evidence.length} source item(s) carried into the answer packet.`],
         ["Pinned sources", pinnedSources.length ? `${pinnedSources.length} document(s) pinned into synthesis context.` : "No document was pinned into synthesis context."],
         ["Sources selected", `${retrieved.length} retrieved passage(s) were considered.`],
@@ -2037,7 +2038,7 @@ INDEX_HTML = r"""<!doctype html>
           const docName = docNameFor(source.doc_id, docs) || source.doc_id || "source";
           return sourceCard(
             `Source ${index + 1}: ${docName}`,
-            `${item.raw_support || item.claim || ""}\n${source.chunk_id ? "Chunk: " + source.chunk_id : ""}`,
+            `${item.raw_support || item.claim || ""}\n${source.chunk_id ? "Passage: " + source.chunk_id : ""}`,
             docPathFor(source.doc_id, docs)
           );
         }, {limit: 50, itemName: "source"});
@@ -2242,7 +2243,7 @@ INDEX_HTML = r"""<!doctype html>
         const unresolved = Array.isArray(packet.unresolved) ? packet.unresolved : [];
         const answerSources = Array.isArray(packet.answer_source_map) ? packet.answer_source_map : [];
         const selected = Array.isArray(scope.selected_paths) ? scope.selected_paths : [];
-        rows.push(["Corpus read", `${docs.length} document(s), ${chunks.length} searchable chunk(s).`]);
+        rows.push(["Corpus read", `${docs.length} document(s), ${chunks.length} searchable source passage(s).`]);
         if (selected.length) rows.push(["First-read focus", selected.slice(0, 8).map(path => `- ${filenameFromPath(path)}`).join("\n") + (selected.length > 8 ? `\n- ... ${selected.length - 8} more` : "")]);
         rows.push(["Evidence status", `${evidence.length} evidence item(s), ${answerSources.length} answer-source link(s), ${unresolved.length} open question(s).`]);
         if (comparison) rows.push(["What changed", comparisonTakeaway(comparison)]);
@@ -2369,7 +2370,7 @@ INDEX_HTML = r"""<!doctype html>
     function renderRunTimeline(events) {
       const stages = [
         {key: "scope", title: "Select sources", detail: "Choose the first documents to read.", labels: ["SCOPE", "STEER"]},
-        {key: "read", title: "Read documents", detail: "Extract text and chunks from the active corpus.", labels: ["READ", "LOAD"]},
+        {key: "read", title: "Read documents", detail: "Extract text and source passages from the active corpus.", labels: ["READ", "LOAD"]},
         {key: "plan", title: "Plan answer", detail: "Clarify the answer target and search needs.", labels: ["PLAN", "CONTRACT"]},
         {key: "search", title: "Find evidence", detail: "Search for relevant passages and source support.", labels: ["SEARCH", "EVIDENCE", "EXTRACT"]},
         {key: "analyze", title: "Organize evidence", detail: "Use worker notes where live synthesis is enabled.", labels: ["ANALYZE"]},
@@ -2437,8 +2438,8 @@ INDEX_HTML = r"""<!doctype html>
       if (fields.current && fields.total) lines.push(`Progress: ${fields.current} of ${fields.total}`);
       if (fields.document_count !== undefined) lines.push(`Documents found: ${fields.document_count}`);
       if (fields.documents !== undefined) lines.push(`Documents loaded: ${fields.documents}`);
-      if (fields.chunks !== undefined) lines.push(`Searchable chunks: ${fields.chunks}`);
-      if (fields.chunk_count !== undefined) lines.push(`Chunks from this document: ${fields.chunk_count}`);
+      if (fields.chunks !== undefined) lines.push(`Searchable passages: ${fields.chunks}`);
+      if (fields.chunk_count !== undefined) lines.push(`Passages from this document: ${fields.chunk_count}`);
       if (fields.text_chars !== undefined) lines.push(`Extracted characters: ${fields.text_chars}`);
       if (fields.load_error) lines.push(`Load issue: ${fields.load_error}`);
       if (fields.error) lines.push(`Error: ${fields.error}`);
