@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-import base64
 from http.server import ThreadingHTTPServer
 import json
 import threading
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from urllib.request import Request, urlopen
 
 from irys_harness.config import load_config
@@ -23,11 +23,9 @@ from irys_harness.product_ui import (
     build_handler,
     list_product_traces,
     parse_paths,
+    pick_local_paths,
     rerun_from_trace,
     resolve_trace_path,
-    safe_upload_path,
-    safe_upload_filename,
-    save_uploaded_files,
     summarize_trace_rows,
 )
 
@@ -147,58 +145,6 @@ class ProductMatterTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 resolve_trace_path(str(root / "outside.json"), trace_dir)
 
-    def test_save_uploaded_files_sanitizes_and_writes_files(self) -> None:
-        with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            uploads = [
-                {
-                    "filename": "../credit terms.txt",
-                    "content_base64": base64.b64encode(b"notice and cure").decode("ascii"),
-                },
-                {
-                    "filename": "../credit terms.txt",
-                    "content_base64": base64.b64encode(b"second copy").decode("ascii"),
-                },
-            ]
-
-            paths = save_uploaded_files(uploads, upload_root=root / "uploads")
-
-            self.assertEqual([path.name for path in paths], ["credit terms.txt", "credit terms-2.txt"])
-            self.assertEqual(paths[0].read_text(encoding="utf-8"), "notice and cure")
-            self.assertEqual(paths[1].read_text(encoding="utf-8"), "second copy")
-
-    def test_safe_upload_filename_removes_path_and_control_chars(self) -> None:
-        self.assertEqual(safe_upload_filename(r"..\folder/bad:name?.txt"), "bad-name-.txt")
-
-    def test_safe_upload_path_preserves_sanitized_subfolders(self) -> None:
-        self.assertEqual(
-            safe_upload_path(r"matter docs\sub/folder/bad:name?.txt"),
-            Path("matter docs") / "sub" / "folder" / "bad-name-.txt",
-        )
-        self.assertEqual(safe_upload_path("../outside/contract.txt"), Path("outside") / "contract.txt")
-
-    def test_save_uploaded_files_preserves_directory_upload_paths(self) -> None:
-        with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            uploads = [
-                {
-                    "filename": "agreement.txt",
-                    "relative_path": "deal folder/sub/agreement.txt",
-                    "content_base64": base64.b64encode(b"notice and cure").decode("ascii"),
-                },
-                {
-                    "filename": "agreement.txt",
-                    "relative_path": "deal folder/sub/agreement.txt",
-                    "content_base64": base64.b64encode(b"second copy").decode("ascii"),
-                },
-            ]
-
-            paths = save_uploaded_files(uploads, upload_root=root / "uploads")
-
-            self.assertEqual(paths[0].relative_to(root / "uploads"), Path("deal folder") / "sub" / "agreement.txt")
-            self.assertEqual(paths[1].relative_to(root / "uploads"), Path("deal folder") / "sub" / "agreement-2.txt")
-            self.assertEqual(paths[0].read_text(encoding="utf-8"), "notice and cure")
-
     def test_product_ui_renders_answer_markdown_online(self) -> None:
         self.assertIn('class="answer" id="answer"', INDEX_HTML)
         self.assertIn("function renderMarkdown", INDEX_HTML)
@@ -215,10 +161,18 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn("Paste local file or folder paths", INDEX_HTML)
         self.assertIn("No artificial file-count or per-document character cap", INDEX_HTML)
         self.assertIn("Top K is the number of retrieved chunks", INDEX_HTML)
+        self.assertIn("/api/pick-path", INDEX_HTML)
+        self.assertIn('id="chooseFolder"', INDEX_HTML)
+        self.assertIn('id="chooseFiles"', INDEX_HTML)
+        self.assertIn("function appendPaths", INDEX_HTML)
         self.assertNotIn("webkitdirectory", INDEX_HTML)
         self.assertNotIn("function uploadFiles", INDEX_HTML)
 
-    def test_upload_endpoint_saves_files_before_run(self) -> None:
+    def test_pick_local_paths_rejects_invalid_mode(self) -> None:
+        with self.assertRaises(ValueError):
+            pick_local_paths(mode="invalid")
+
+    def test_pick_path_endpoint_returns_selected_paths(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             trace_dir = root / "traces"
@@ -232,34 +186,24 @@ class ProductMatterTests(unittest.TestCase):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
-                payload = {
-                    "matter_id": "Upload Matter",
-                    "uploads": [
-                        {
-                            "filename": "agreement.txt",
-                            "relative_path": "folder/sub/agreement.txt",
-                            "content_base64": base64.b64encode(b"notice and cure").decode("ascii"),
-                        }
-                    ],
-                }
-                request = Request(
-                    f"http://127.0.0.1:{server.server_port}/api/upload",
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
-                )
-                with urlopen(request, timeout=5) as response:  # noqa: S310 - local test server.
-                    data = json.loads(response.read().decode("utf-8"))
+                with patch(
+                    "irys_harness.product_ui.pick_local_paths",
+                    return_value=[str(root / "selected")],
+                ):
+                    request = Request(
+                        f"http://127.0.0.1:{server.server_port}/api/pick-path",
+                        data=json.dumps({"mode": "folder"}).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urlopen(request, timeout=5) as response:  # noqa: S310 - local test server.
+                        data = json.loads(response.read().decode("utf-8"))
             finally:
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=5)
 
-            self.assertEqual(data["count"], 1)
-            saved = Path(data["paths"][0])
-            self.assertTrue(saved.exists())
-            self.assertEqual(saved.read_text(encoding="utf-8"), "notice and cure")
-            self.assertEqual(saved.relative_to(output_dir / "_uploads" / "Upload-Matter"), Path("folder") / "sub" / "agreement.txt")
+            self.assertEqual(data["paths"], [str(root / "selected")])
 
     def test_list_product_traces_filters_by_matter_and_chat(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -350,11 +294,16 @@ class ProductMatterTests(unittest.TestCase):
             self.assertIn("What cure period applies?", history[-1]["user"])
             self.assertIn("5 day cure period", history[-1]["assistant"])
 
-    def test_rerun_from_trace_can_add_uploaded_corpus(self) -> None:
+    def test_rerun_from_trace_can_add_local_path_corpus(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             doc = root / "agreement.txt"
             doc.write_text("Payment default has a 5 day cure period after notice.", encoding="utf-8")
+            guaranty = root / "guaranty.txt"
+            guaranty.write_text(
+                "The guarantor cure period is 2 business days after written notice.",
+                encoding="utf-8",
+            )
             trace_dir = root / "traces"
             output_dir = root / "outputs"
             parent = run_product_matter(
@@ -372,14 +321,7 @@ class ProductMatterTests(unittest.TestCase):
                 {
                     "trace_path": str(parent.trace_path),
                     "nudge": "Also consider the guaranty.",
-                    "uploads": [
-                        {
-                            "filename": "guaranty.txt",
-                            "content_base64": base64.b64encode(
-                                b"The guarantor cure period is 2 business days after written notice."
-                            ).decode("ascii"),
-                        }
-                    ],
+                    "paths": [str(guaranty)],
                 },
                 config=load_config(),
                 trace_dir=trace_dir,

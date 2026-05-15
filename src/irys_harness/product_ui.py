@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import base64
 from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
-import re
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -90,21 +88,18 @@ def build_handler(
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib handler API.
             parsed = urlparse(self.path)
-            if parsed.path not in {"/api/run", "/api/rerun", "/api/upload"}:
+            if parsed.path not in {"/api/run", "/api/rerun", "/api/pick-path"}:
                 self.send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
                 return
             try:
                 payload = self.read_json()
-                if parsed.path == "/api/upload":
-                    matter_id = str(payload.get("matter_id", "matter"))
-                    upload_paths = save_uploaded_files(
-                        payload.get("uploads", []),
-                        upload_root=Path(output_dir) / "_uploads" / sanitize_matter_id(matter_id),
-                    )
+                if parsed.path == "/api/pick-path":
                     self.send_json(
                         {
-                            "paths": [str(path) for path in upload_paths],
-                            "count": len(upload_paths),
+                            "paths": pick_local_paths(
+                                mode=str(payload.get("mode") or "folder"),
+                                initial_dir=str(payload.get("initial_dir") or ""),
+                            )
                         }
                     )
                     return
@@ -119,11 +114,6 @@ def build_handler(
                     return
                 paths = parse_paths(payload.get("paths", []))
                 matter_id = str(payload.get("matter_id", "matter"))
-                upload_paths = save_uploaded_files(
-                    payload.get("uploads", []),
-                    upload_root=Path(output_dir) / "_uploads" / sanitize_matter_id(matter_id),
-                )
-                paths.extend(str(path) for path in upload_paths)
                 result = run_product_matter(
                     objective=str(payload.get("objective", "")),
                     paths=paths,
@@ -200,11 +190,6 @@ def rerun_from_trace(
     suffix = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
     matter_id = sanitize_matter_id(f"{base_matter_id}-nudge-{suffix}")
     paths.extend(parse_paths(payload.get("paths", [])))
-    upload_paths = save_uploaded_files(
-        payload.get("uploads", []),
-        upload_root=Path(output_dir) / "_uploads" / matter_id,
-    )
-    paths.extend(str(path) for path in upload_paths)
     objective = f"{original_objective}\n\nUser steering note: {nudge}"
     result = run_product_matter(
         objective=objective,
@@ -241,6 +226,36 @@ def parse_optional_int(value: Any) -> int | None:
         return None
     parsed = int(value)
     return parsed if parsed > 0 else None
+
+
+def pick_local_paths(*, mode: str = "folder", initial_dir: str = "") -> list[str]:
+    normalized = mode.strip().lower()
+    if normalized not in {"file", "files", "folder"}:
+        raise ValueError("mode must be file, files, or folder")
+
+    import tkinter as tk
+    from tkinter import filedialog
+
+    root = tk.Tk()
+    try:
+        root.withdraw()
+        root.attributes("-topmost", True)
+        root.update()
+        options: dict[str, Any] = {"title": "Select corpus path"}
+        initial = Path(initial_dir).expanduser() if initial_dir.strip() else None
+        if initial and initial.exists():
+            options["initialdir"] = str(initial if initial.is_dir() else initial.parent)
+
+        if normalized == "folder":
+            selected = filedialog.askdirectory(**options)
+            return [str(Path(selected).resolve())] if selected else []
+        if normalized == "files":
+            selected_files = filedialog.askopenfilenames(**options)
+            return [str(Path(path).resolve()) for path in selected_files]
+        selected_file = filedialog.askopenfilename(**options)
+        return [str(Path(selected_file).resolve())] if selected_file else []
+    finally:
+        root.destroy()
 
 
 def conversation_history_for_rerun(parent: dict[str, Any]) -> list[dict[str, str]]:
@@ -337,69 +352,6 @@ def resolve_trace_path(raw_path: str, trace_dir: str | Path) -> Path:
     if root != resolved and root not in resolved.parents:
         raise ValueError("trace path must be under the configured trace directory")
     return resolved
-
-
-def save_uploaded_files(raw_uploads: Any, *, upload_root: str | Path) -> list[Path]:
-    if not raw_uploads:
-        return []
-    if not isinstance(raw_uploads, list):
-        raise ValueError("uploads must be a list")
-    root = Path(upload_root)
-    root.mkdir(parents=True, exist_ok=True)
-    paths: list[Path] = []
-    for index, item in enumerate(raw_uploads, 1):
-        if not isinstance(item, dict):
-            raise ValueError("each upload must be an object")
-        upload_path = safe_upload_path(
-            str(item.get("relative_path") or item.get("filename") or f"upload-{index}.txt")
-        )
-        if not upload_path.name:
-            upload_path = Path(safe_upload_filename(str(item.get("filename") or f"upload-{index}.txt")))
-        encoded = str(item.get("content_base64") or "")
-        if not encoded:
-            raise ValueError(f"upload {upload_path} is missing content_base64")
-        try:
-            data = base64.b64decode(encoded, validate=True)
-        except Exception as exc:  # noqa: BLE001 - normalize base64 parser errors.
-            raise ValueError(f"upload {upload_path} is not valid base64") from exc
-        target = unique_upload_path(root / upload_path.parent, upload_path.name)
-        target.write_bytes(data)
-        paths.append(target)
-    return paths
-
-
-def safe_upload_filename(filename: str) -> str:
-    name = Path(filename).name.strip() or "upload.txt"
-    cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "-", name).strip(" .")
-    return cleaned[:120] or "upload.txt"
-
-
-def safe_upload_path(raw_path: str) -> Path:
-    raw = str(raw_path or "").replace("\\", "/")
-    parts: list[str] = []
-    for part in raw.split("/"):
-        if not part or part in {".", ".."}:
-            continue
-        safe = safe_upload_filename(part)
-        if safe:
-            parts.append(safe)
-    if not parts:
-        return Path("upload.txt")
-    return Path(*parts[-8:])
-
-
-def unique_upload_path(root: Path, filename: str) -> Path:
-    root.mkdir(parents=True, exist_ok=True)
-    target = root / filename
-    if not target.exists():
-        return target
-    stem = target.stem
-    suffix = target.suffix
-    for index in range(2, 1000):
-        candidate = root / f"{stem}-{index}{suffix}"
-        if not candidate.exists():
-            return candidate
-    raise ValueError(f"too many uploads named {filename}")
 
 
 INDEX_HTML = r"""<!doctype html>
@@ -597,7 +549,7 @@ INDEX_HTML = r"""<!doctype html>
       <div class="item">
         <strong>How to use this test UI</strong>
         <small>
-          Paste local file or folder paths into Corpus Paths, one per line. Local folders are read recursively and are the intended way to test large matters on this machine. No artificial file-count or per-document character cap is applied to local Corpus Paths. Matter ID groups saved runs and costs. Chat ID separates parallel conversations inside the same matter. Live synthesis calls the configured Gemini models; when it is off, the UI produces a deterministic preview without model cost. Top K is the number of retrieved chunks used for the evidence packet. Message Cost is the loaded run; Matter Cost totals saved traces for the matter.
+          Use Choose Folder, Choose File, or Choose Files to open a native picker on this machine. Paste local file or folder paths into Corpus Paths one per line when that is faster. Local folders are read recursively. No artificial file-count or per-document character cap is applied to local Corpus Paths. Matter ID groups saved runs and costs. Chat ID separates parallel conversations inside the same matter. Live synthesis calls the configured Gemini models; when it is off, the UI produces a deterministic preview without model cost. Top K is the number of retrieved chunks used for the evidence packet. Message Cost is the loaded run; Matter Cost totals saved traces for the matter.
         </small>
       </div>
       <label for="matter">Matter ID</label>
@@ -606,6 +558,11 @@ INDEX_HTML = r"""<!doctype html>
       <input id="chat" value="main" />
       <label for="paths">Corpus Paths</label>
       <textarea id="paths" spellcheck="false"></textarea>
+      <div class="row">
+        <button class="secondary" id="chooseFolder">Choose Folder</button>
+        <button class="secondary" id="chooseFile">Choose File</button>
+        <button class="secondary" id="chooseFiles">Choose Files</button>
+      </div>
       <div class="row">
         <label class="toggle"><input id="live" type="checkbox" /> Live synthesis</label>
         <label for="topk">Top K</label>
@@ -645,6 +602,11 @@ INDEX_HTML = r"""<!doctype html>
       <label for="rerunPaths">Additional Corpus Paths</label>
       <textarea id="rerunPaths"></textarea>
       <div class="row">
+        <button class="secondary" id="chooseRerunFolder">Choose Folder</button>
+        <button class="secondary" id="chooseRerunFile">Choose File</button>
+        <button class="secondary" id="chooseRerunFiles">Choose Files</button>
+      </div>
+      <div class="row">
         <button class="secondary" id="rerunTrace">Rerun</button>
       </div>
       <h2 style="margin-top:16px">Diagnosis</h2>
@@ -672,6 +634,12 @@ INDEX_HTML = r"""<!doctype html>
     const loadTrace = $("loadTrace");
     const rerunTrace = $("rerunTrace");
     const listTraces = $("listTraces");
+    const chooseFolder = $("chooseFolder");
+    const chooseFile = $("chooseFile");
+    const chooseFiles = $("chooseFiles");
+    const chooseRerunFolder = $("chooseRerunFolder");
+    const chooseRerunFile = $("chooseRerunFile");
+    const chooseRerunFiles = $("chooseRerunFiles");
     let conversationByChat = {};
     $("clear").addEventListener("click", () => {
       $("objective").value = "";
@@ -690,6 +658,12 @@ INDEX_HTML = r"""<!doctype html>
       $("answerSources").innerHTML = "";
       status.textContent = "";
     });
+    chooseFolder.addEventListener("click", () => choosePath("folder", "paths"));
+    chooseFile.addEventListener("click", () => choosePath("file", "paths"));
+    chooseFiles.addEventListener("click", () => choosePath("files", "paths"));
+    chooseRerunFolder.addEventListener("click", () => choosePath("folder", "rerunPaths"));
+    chooseRerunFile.addEventListener("click", () => choosePath("file", "rerunPaths"));
+    chooseRerunFiles.addEventListener("click", () => choosePath("files", "rerunPaths"));
     run.addEventListener("click", async () => {
       run.disabled = true;
       status.textContent = "Running";
@@ -774,6 +748,35 @@ INDEX_HTML = r"""<!doctype html>
         rerunTrace.disabled = false;
       }
     });
+    async function choosePath(mode, targetId) {
+      status.textContent = "Waiting for native picker";
+      try {
+        const currentPaths = pathPayload($(targetId).value);
+        const initial = currentPaths.length ? currentPaths[currentPaths.length - 1] : "";
+        const response = await fetch("/api/pick-path", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({mode, initial_dir: initial})
+        });
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || "Path picker failed");
+        appendPaths(targetId, data.paths || []);
+        status.textContent = (data.paths || []).length ? `Added ${(data.paths || []).length} path(s)` : "Picker cancelled";
+      } catch (error) {
+        status.textContent = error.message;
+      }
+    }
+    function appendPaths(targetId, paths) {
+      const existing = pathPayload($(targetId).value);
+      const seen = new Set(existing.map(path => path.toLowerCase()));
+      for (const path of paths || []) {
+        const clean = String(path || "").trim();
+        if (!clean || seen.has(clean.toLowerCase())) continue;
+        existing.push(clean);
+        seen.add(clean.toLowerCase());
+      }
+      $(targetId).value = existing.join("\n");
+    }
     function pathPayload(pathText) {
       const paths = String(pathText || "").split(/\r?\n/).map(line => line.trim()).filter(Boolean);
       return paths;
