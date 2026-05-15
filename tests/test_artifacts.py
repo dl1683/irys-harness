@@ -212,6 +212,62 @@ MAC-only certificate text.
             finally:
                 workbook.close()
 
+    def test_xlsx_renderer_prefers_local_plain_heading_table(self) -> None:
+        packet = {
+            "deliverables": ["clawback-candidate-list.xlsx", "memo.docx"],
+            "deliverable_contract": {
+                "deliverables": [
+                    {
+                        "filename": "clawback-candidate-list.xlsx",
+                        "artifact_role": "candidate_list_workbook",
+                        "workbook_sheets": [
+                            {
+                                "name": "Clawback Candidates",
+                                "purpose": "Privilege-log entry, Bates range, claimed basis, deficiency, recommended action, and source support",
+                            }
+                        ],
+                    }
+                ]
+            },
+            "draft_answer": """
+# clawback-candidate-list.xlsx
+
+Workbook overview.
+
+Clawback Candidates
+| Privilege Log Entry / Doc ID | Bates Range | Privilege Basis Claimed | Deficiency / Gap | Recommended Action | Source ID |
+| --- | --- | --- | --- | --- | --- |
+| 24 | TF-PRIV-000190-197 | ACP | Non-lawyer-only operational communication | Produce or reclassify | doc_0024 |
+
+# memo.docx
+
+Narrative memo.
+""",
+            "cheap_worker_summary": """
+### **1. Fact Allocation Inventory**
+| Source Document | Fact / Issue | Deliverable Role |
+| --- | --- | --- |
+| doc_0001 | Generic background | Memo |
+""",
+            "verified_evidence": [],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            artifacts = render_deliverables(
+                output_dir=tmp,
+                deliverables=["clawback-candidate-list.xlsx"],
+                title="Privilege Review",
+                packet=packet,
+            )
+            workbook = load_workbook(Path(artifacts[0]["path"]), read_only=True)
+            try:
+                rows = list(workbook["Clawback Candidates"].iter_rows(values_only=True))
+            finally:
+                workbook.close()
+        flattened = "\n".join(" | ".join(str(cell or "") for cell in row) for row in rows)
+        self.assertIn("Privilege Log Entry / Doc ID", flattened)
+        self.assertIn("Non-lawyer-only operational communication", flattened)
+        self.assertNotIn("Generic background", flattened)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -104,10 +104,17 @@ def render_xlsx(path: Path, *, title: str, deliverable: str, packet: dict[str, A
     if "Evidence" not in {plan["name"] for plan in sheet_plans}:
         sheet_plans.append({"name": "Evidence", "purpose": "Source evidence and trace support"})
 
+    draft_text = str(packet.get("draft_answer") or "")
+    if draft_text:
+        draft_text = extract_deliverable_draft_text(
+            draft_text,
+            deliverable=deliverable,
+            deliverables=packet_deliverable_names(packet, fallback=[deliverable]),
+        )
     text = "\n\n".join(
-        str(packet.get(key, ""))
-        for key in ["draft_answer", "cheap_worker_summary"]
-        if packet.get(key)
+        item
+        for item in [draft_text, str(packet.get("cheap_worker_summary") or "")]
+        if item
     )
     tables = extract_markdown_tables(text)
 
@@ -186,6 +193,21 @@ def find_deliverable_plan(packet: dict[str, Any], deliverable: str) -> dict[str,
         if str(item.get("filename", "")).lower() == deliverable.lower():
             return item
     return None
+
+
+def packet_deliverable_names(packet: dict[str, Any], *, fallback: list[str] | None = None) -> list[str]:
+    names: list[str] = []
+    for item in packet.get("deliverables", []) or []:
+        if isinstance(item, str):
+            names.append(item)
+    contract = packet.get("deliverable_contract") or {}
+    for item in contract.get("deliverables", []) or []:
+        filename = str(item.get("filename") or "")
+        if filename:
+            names.append(filename)
+    if not names and fallback:
+        names.extend(fallback)
+    return dedupe_preserve_order(names)
 
 
 def apply_deliverable_coverage_audit(packet: dict[str, Any], deliverables: list[str]) -> list[dict[str, Any]]:
@@ -384,7 +406,11 @@ def render_planned_sheet(
         append_evidence_rows(sheet, packet)
         return
 
-    matched_tables = match_tables_to_sheet(tables, sheet_plan["name"])
+    matched_tables = match_tables_to_sheet(
+        tables,
+        sheet_plan["name"],
+        sheet_plan.get("purpose", ""),
+    )
     if matched_tables:
         for table in matched_tables[:3]:
             append_markdown_table(sheet, table)
@@ -436,6 +462,7 @@ def extract_markdown_tables(text: str) -> list[dict[str, Any]]:
         if "|" not in lines[index] or not re.search(r"\|\s*:?-{2,}:?\s*(\||$)", lines[index + 1]):
             index += 1
             continue
+        table_heading = infer_plain_table_heading(lines, index) or heading
         header = split_markdown_row(lines[index])
         rows: list[list[str]] = []
         index += 2
@@ -445,8 +472,37 @@ def extract_markdown_tables(text: str) -> list[dict[str, Any]]:
                 rows.append(row)
             index += 1
         if header and rows:
-            tables.append({"heading": heading, "headers": header, "rows": rows})
+            tables.append({"heading": table_heading, "headers": header, "rows": rows})
     return tables
+
+
+def infer_plain_table_heading(lines: list[str], table_index: int) -> str:
+    for offset in range(table_index - 1, max(-1, table_index - 5), -1):
+        candidate = lines[offset].strip()
+        if not candidate:
+            continue
+        if "|" in candidate:
+            return ""
+        normalized = normalize_plain_heading(candidate)
+        if normalized:
+            return normalized
+        return ""
+    return ""
+
+
+def normalize_plain_heading(line: str) -> str:
+    cleaned = line.strip()
+    cleaned = re.sub(r"^\s{0,3}(?:#{1,6}|[-*+>]|\d+[.)])\s*", "", cleaned)
+    cleaned = cleaned.replace("**", "").replace("__", "").strip()
+    cleaned = cleaned.strip("`'\" ")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    if not cleaned or len(cleaned) > 100:
+        return ""
+    if cleaned.endswith(".") or re.search(r"[,:;]$", cleaned):
+        return ""
+    if len(cleaned.split()) > 8:
+        return ""
+    return cleaned
 
 
 def split_markdown_row(line: str) -> list[str]:
@@ -454,18 +510,50 @@ def split_markdown_row(line: str) -> list[str]:
     return [safe_cell(cell.strip()) for cell in stripped.split("|")]
 
 
-def match_tables_to_sheet(tables: list[dict[str, Any]], sheet_name: str) -> list[dict[str, Any]]:
-    sheet_tokens = keyword_tokens(sheet_name)
+def match_tables_to_sheet(
+    tables: list[dict[str, Any]],
+    sheet_name: str,
+    sheet_purpose: str = "",
+) -> list[dict[str, Any]]:
+    sheet_tokens = keyword_tokens(f"{sheet_name} {sheet_purpose}")
     scored: list[tuple[int, dict[str, Any]]] = []
     for table in tables:
-        table_text = str(table.get("heading", "")) + " " + " ".join(table.get("headers", []))
+        heading = str(table.get("heading", ""))
+        table_text = heading + " " + " ".join(table.get("headers", []))
         table_text += " " + " ".join(" ".join(row) for row in table.get("rows", [])[:4])
-        score = len(sheet_tokens.intersection(keyword_tokens(table_text)))
+        table_tokens = keyword_tokens(table_text)
+        score = fuzzy_token_overlap(sheet_tokens, table_tokens)
+        heading_tokens = keyword_tokens(heading)
+        score += 2 * fuzzy_token_overlap(sheet_tokens, heading_tokens)
+        if normalize_match_text(sheet_name) and normalize_match_text(sheet_name) in normalize_match_text(heading):
+            score += 80
+        if score and any(
+            term in table_text.lower()
+            for term in ["deficiency", "candidate", "recommended action", "source", "formula", "calculation"]
+        ):
+            score += 2
         if score:
             scored.append((score, table))
     if scored:
         return [table for _, table in sorted(scored, key=lambda item: item[0], reverse=True)]
     return tables[:1]
+
+
+def fuzzy_token_overlap(left: set[str], right: set[str]) -> int:
+    score = 0
+    for token in left:
+        if token in right:
+            score += 1
+            continue
+        if len(token) < 5:
+            continue
+        if any(other.startswith(token) or token.startswith(other) for other in right if len(other) >= 5):
+            score += 1
+    return score
+
+
+def normalize_match_text(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", text.lower())).strip()
 
 
 def append_markdown_table(sheet: Any, table: dict[str, Any]) -> None:
