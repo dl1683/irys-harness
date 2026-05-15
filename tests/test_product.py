@@ -124,6 +124,55 @@ class ProductMatterTests(unittest.TestCase):
             self.assertEqual(plan["first_read_paths"], [str(target.resolve())])
             self.assertIn("research_paper", plan["likely_document_families"])
 
+    def test_product_plan_treats_vague_issue_discovery_as_high_priority_routing_eval(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            email_chain = root / "Project Acorn - Email Chain.docx"
+            resignations = root / "Letters of resignation.pdf"
+            background_law = root / "Biz Corp Act courtesy copy pages 1-72.pdf"
+            unknown_numbered = root / "[47535673]7.4.1.6.6_N(76758298.1).pdf"
+            email_chain.write_text("Email thread discusses the practical dispute at length.", encoding="utf-8")
+            resignations.write_text("Case-specific resignation letters.", encoding="utf-8")
+            background_law.write_text("Generic corporate statute reference.", encoding="utf-8")
+            unknown_numbered.write_text("Unlabeled attachment.", encoding="utf-8")
+
+            plan = build_product_plan_preview(
+                objective="What is the main issue here?",
+                paths=[str(root)],
+            )
+
+            self.assertIn(str(email_chain.resolve()), plan["first_read_paths"])
+            self.assertIn(str(resignations.resolve()), plan["first_read_paths"])
+            self.assertNotIn(str(background_law.resolve()), plan["first_read_paths"])
+            self.assertLess(plan["first_read_count"], plan["discovered_count"])
+            self.assertIn("case-specific narrative sources", plan["needed_information"])
+
+    def test_product_plan_keeps_data_dog_style_financial_routing_high_priority(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ten_k = root / "filings" / "sec" / "10-K"
+            news = root / "filings" / "ir" / "news-releases"
+            forms = root / "filings" / "sec" / "144"
+            ten_k.mkdir(parents=True)
+            news.mkdir(parents=True)
+            forms.mkdir(parents=True)
+            target = ten_k / "2025-02-20_0001561550-25-000025.pdf"
+            target.write_text("2024 annual report EPS", encoding="utf-8")
+            (news / "datadog-announces-fourth-quarter-2024-results.pdf").write_text("press release", encoding="utf-8")
+            (forms / "2024-12-02_0001561550-24-000199.pdf").write_text("form 144", encoding="utf-8")
+            (ten_k / "INDEX.md").write_text(
+                "| 2025-02-20 | `0001561550-25-000025` | ddog-20241231.htm | 10-K |\n",
+                encoding="utf-8",
+            )
+
+            plan = build_product_plan_preview(
+                objective="What was EPS in 2024 in the Data Dog file?",
+                paths=[str(root)],
+            )
+
+            self.assertIn(str(target.resolve()), plan["first_read_paths"])
+            self.assertLess(plan["first_read_count"], plan["discovered_count"])
+
     def test_product_scope_respects_user_approved_plan_paths(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -556,13 +556,14 @@ def build_product_plan_preview(
 def build_objective_profile(objective: str, *, plan_note: str | None = None) -> dict[str, Any]:
     combined = f"{objective}\n{plan_note or ''}"
     lowered = combined.lower()
-    tokens = tokenize(combined)
+    tokens = [token for token in tokenize(combined) if token not in PATH_PLANNING_STOPWORDS]
     years = sorted({int(match) for match in re.findall(r"\b(?:19|20)\d{2}\b", combined)})
     requested_families = infer_requested_document_families(lowered, tokens)
     return {
         "tokens": tokens,
         "years": years,
         "requested_families": requested_families,
+        "issue_discovery": is_issue_discovery_objective(lowered, tokens),
         "force_full_corpus": any(
             phrase in lowered
             for phrase in [
@@ -577,6 +578,60 @@ def build_objective_profile(objective: str, *, plan_note: str | None = None) -> 
         "has_focus_language": any(term in lowered for term in ["focus", "only", "first", "start with", "prioritize"]),
         "raw": combined,
     }
+
+
+PATH_PLANNING_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "here",
+    "in",
+    "is",
+    "it",
+    "main",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "this",
+    "to",
+    "was",
+    "what",
+    "which",
+    "with",
+}
+
+
+def is_issue_discovery_objective(lowered: str, tokens: list[str]) -> bool:
+    issue_phrases = [
+        "main issue",
+        "key issue",
+        "what is going on",
+        "what's going on",
+        "what happened",
+        "what is this about",
+        "what's this about",
+        "what is the problem",
+        "identify the issue",
+        "identify issues",
+        "spot the issue",
+        "issue spot",
+        "summarize the matter",
+        "understand the matter",
+        "what are we dealing with",
+    ]
+    if any(phrase in lowered for phrase in issue_phrases):
+        return True
+    token_set = set(tokens)
+    return bool({"issue", "issues", "problem", "dispute", "matter"} & token_set) and len(token_set) <= 8
 
 
 def infer_requested_document_families(lowered: str, tokens: list[str]) -> list[str]:
@@ -700,6 +755,15 @@ def infer_needed_information(profile: dict[str, Any]) -> list[str]:
         items.extend(["the controlling provision", "any exceptions or amendments", "the applicable party or obligation"])
     if "governance" in families:
         items.extend(["the relevant board action", "date and authority", "supporting minutes, consent, or charter text"])
+    if profile.get("issue_discovery"):
+        items.extend(
+            [
+                "case-specific narrative sources",
+                "the event timeline",
+                "the parties and disputed action",
+                "background rules only after the practical issue is identified",
+            ]
+        )
     if "research_paper" in families:
         items.extend(["the relevant paper or study", "the method or population", "the finding or conclusion"])
     if "regulatory_or_policy" in families:
@@ -749,6 +813,11 @@ def score_one_path(
         score += min(12, len(set(matched_tokens)) * 2)
         reasons.append(f"path matched query terms: {', '.join(sorted(set(matched_tokens))[:6])}")
 
+    source_role_score, source_role_reasons = score_path_source_role(path_text, profile)
+    if source_role_score:
+        score += source_role_score
+        reasons.extend(source_role_reasons)
+
     family_score = score_path_family(path_text, families)
     if family_score:
         score += family_score
@@ -781,6 +850,55 @@ def score_one_path(
         "score": score,
         "reasons": reasons or ["no strong path-level match"],
     }
+
+
+def score_path_source_role(path_text: str, profile: dict[str, Any]) -> tuple[int, list[str]]:
+    if not profile.get("issue_discovery"):
+        return 0, []
+    score = 0
+    reasons: list[str] = []
+    case_specific_terms = [
+        "email",
+        "emails",
+        "chain",
+        "correspondence",
+        "letter",
+        "letters",
+        "resignation",
+        "notice",
+        "memo",
+        "notes",
+        "minutes",
+        "transcript",
+        "complaint",
+        "motion",
+        "brief",
+        "deposition",
+        "messages",
+        "thread",
+        "chat",
+    ]
+    background_terms = [
+        "act",
+        "regulation",
+        "regulations",
+        "statute",
+        "code",
+        "rules",
+        "policy",
+        "manual",
+        "handbook",
+        "courtesy-copy",
+        "published-by",
+        "registrar",
+    ]
+    if any(term in path_text for term in case_specific_terms):
+        score += 18
+        reasons.append("issue-discovery source: likely case-specific narrative document")
+    if any(term in path_text for term in background_terms):
+        score -= 8
+        reasons.append("issue-discovery source: likely background rule or generic reference")
+    return score, reasons
 
 
 def score_path_family(path_text: str, families: list[str]) -> int:
@@ -830,7 +948,12 @@ def select_first_read_paths(
     top_score = int(scored[0]["score"])
     if top_score < 10:
         return []
-    focused = bool(profile.get("has_focus_language") or profile.get("years") or profile.get("requested_families"))
+    focused = bool(
+        profile.get("has_focus_language")
+        or profile.get("years")
+        or profile.get("requested_families")
+        or profile.get("issue_discovery")
+    )
     if not focused and total_paths <= 12:
         return [Path(str(row["path"])) for row in scored]
     floor = max(8, top_score - 8)
