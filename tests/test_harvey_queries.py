@@ -27,9 +27,11 @@ from irys_harness.benchmarks.harvey import (
     build_source_inventory_synthesis_safety_net,
     build_metadata_queries,
     build_numeric_audit_worker_prompt,
+    build_legal_standard_worker_prompt,
     build_provision_comparison_worker_prompt,
     needs_checklist_worker,
     needs_covenant_calculation_worker,
+    needs_legal_standard_worker,
     needs_numeric_audit_worker,
     needs_document_review_privilege_digest,
     needs_regulated_filing_guidance,
@@ -81,6 +83,49 @@ class HarveyQueryTests(unittest.TestCase):
         self.assertIn("stockholder action by written consent", prompt)
         self.assertIn("will provide", prompt)
         self.assertIn("default law", prompt)
+
+    def test_legal_standard_worker_triggers_for_regulatory_gap_tasks(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="data-privacy/task",
+            question="Analyze CPRA compliance gaps against the current privacy program.",
+            context_files=[],
+            answer_schema={"deliverables": ["gap-memo.docx"]},
+            metadata={},
+        )
+        state = RunState(
+            task=task,
+            config=load_config(),
+            documents=[],
+            chunks=[{"doc_id": "doc_1", "chunk_id": "c1", "text": "The policy lacks a Limit Use link."}],
+        )
+        self.assertTrue(needs_legal_standard_worker(state))
+        prompt = build_legal_standard_worker_prompt(state)
+        self.assertIn("model_legal_knowledge", prompt)
+        self.assertIn("CPRA", prompt)
+        self.assertIn("threshold", prompt)
+
+    def test_synthesis_prompt_allows_labeled_legal_standard_matrix(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="healthcare/task",
+            question="Compare policies against regulations.",
+            context_files=[],
+            answer_schema={
+                "deliverables": ["regulatory-gap-memo.docx"],
+                "deliverable_contract": {"package_plan": {}, "deliverables": []},
+            },
+            metadata={},
+        )
+        state = RunState(task=task, config=load_config(), documents=[], chunks=[])
+        state.final_packet = {
+            "cheap_worker_summary": "## Legal standard and requirements analysis\nsource_posture: model_legal_knowledge",
+            "legal_standard_worker_used": True,
+            "package_plan": {},
+        }
+        prompt = build_synthesis_prompt(state)
+        self.assertIn("legal-standard / requirements matrix", prompt)
+        self.assertIn("source-posture labels", prompt)
 
     def test_document_comparison_digest_builds_generic_issue_inventory(self) -> None:
         task = BenchmarkTask(

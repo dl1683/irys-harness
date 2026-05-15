@@ -189,8 +189,23 @@ def run_product_matter(
             ),
             reason=scope_decision.reason,
             selected_documents=[path.name for path in scope_decision.selected_paths[:12]],
+            held_back_documents=[
+                path.name
+                for path in scope_decision.discovered_paths
+                if path not in set(scope_decision.selected_paths)
+            ][:12],
             omitted_document_count=max(0, len(scope_decision.selected_paths) - 12),
             skipped_document_count=len(scope_decision.discovered_paths) - len(scope_decision.selected_paths),
+            needed_information=unique_strings(
+                [
+                    *infer_needed_information(scope_decision.signals),
+                    *(
+                        (scope_decision.signals.get("source_planner") or {}).get("needed_information", [])
+                        if isinstance(scope_decision.signals.get("source_planner"), dict)
+                        else []
+                    ),
+                ]
+            ),
             planner=scope_decision.signals.get("source_planner", {}).get("status"),
             steer_hint=(
                 "Use a steering note like 'focus on the 2024 10-K' or 'include quarterly reports too' "
@@ -297,7 +312,7 @@ def run_product_matter(
         next_step="Search the loaded corpus for source support.",
     )
 
-    queries = build_product_queries(objective, state.documents)
+    queries = build_product_queries_from_state(state)
     log.emit(
         "SEARCH",
         "searching corpus",
@@ -1745,7 +1760,7 @@ def build_product_contract(state: RunState, *, top_k: int) -> dict[str, Any]:
         "required_output_format": "clean product answer or draft work product",
         "document_boundary": "user_defined_corpus",
         "needed_information": needed_information,
-        "search_queries": build_product_queries(state.task.question, state.documents),
+        "search_queries": build_product_queries_from_state(state),
         "verification_requirements": [
             "Use only user-provided corpus unless external tools are explicitly enabled.",
             "Expose which documents and chunks were used.",
@@ -1785,6 +1800,31 @@ def build_product_queries(objective: str, documents: list[dict[str, Any]]) -> li
     if "research_paper" in families:
         queries.append("study method result finding conclusion population trial")
     return unique_strings([query for query in queries if query.strip()])
+
+
+def build_product_queries_from_state(state: RunState) -> list[str]:
+    queries = build_product_queries(state.task.question, state.documents)
+    metadata = state.task.metadata or {}
+    plan_note = str(metadata.get("plan_note") or "").strip()
+    if plan_note:
+        queries.append(plan_note)
+    scope = metadata.get("corpus_scope_decision") or {}
+    if isinstance(scope, dict):
+        reason = str(scope.get("reason") or "").strip()
+        if reason:
+            queries.append(reason)
+        signals = scope.get("signals") or {}
+        if isinstance(signals, dict):
+            source_planner = signals.get("source_planner") or {}
+            if isinstance(source_planner, dict):
+                queries.extend(str(item) for item in source_planner.get("needed_information", [])[:12])
+                planner_reason = str(source_planner.get("reason") or "").strip()
+                if planner_reason:
+                    queries.append(planner_reason)
+        selected_paths = [Path(str(path)).name for path in scope.get("selected_paths", [])[:16]]
+        if selected_paths:
+            queries.append("selected source filenames " + " ".join(selected_paths))
+    return unique_strings([compact_snippet(query, max_chars=900) for query in queries if str(query).strip()])
 
 
 def retrieve_product_chunks(
@@ -2104,6 +2144,7 @@ def build_product_packet_review_prompt(
     source_coverage: dict[str, Any],
 ) -> str:
     contract = state.answer_contract_versions[-1] if state.answer_contract_versions else {}
+    held_back_inventory = build_held_back_inventory_for_prompt(state)
     return f"""Review a user-corpus evidence packet before final synthesis.
 
 Use semantic judgment. This is a cheap worker step, so favor quality and missing-evidence detection over saving tokens.
@@ -2126,6 +2167,7 @@ Rules:
 - If selected documents exist but evidence is dominated by the wrong source family or stale period, set continue_retrieval true and provide better queries.
 - If the task asks to compare a source family across time or subsets, do not accept generic summaries alone; require a source-family index/inventory or representative primary documents.
 - If the answer would say information is unavailable, require strong coverage across likely source documents first.
+- If the held-back inventory contains likely source documents for a missing period, source family, party, metric, thread, agreement, paper, or filing, set continue_retrieval true and name the missing source family in missing_information or coverage_risks.
 - Queries should include synonyms and source-specific terms, not huge filename lists.
 - Use the source IDs in the active corpus. Do not invent sources.
 
@@ -2141,12 +2183,57 @@ Current retrieval queries:
 Active corpus:
 {format_documents_for_prompt(state.documents)}
 
+Held-back source inventory:
+{held_back_inventory}
+
 Source coverage:
 {json.dumps(source_coverage, indent=2)}
 
 Evidence packet:
 {format_evidence_for_prompt(evidence_items)}
 """
+
+
+def build_held_back_inventory_for_prompt(state: RunState, *, limit: int = 80) -> str:
+    metadata = state.task.metadata or {}
+    scope = metadata.get("corpus_scope_decision") or {}
+    if not isinstance(scope, dict):
+        return "- None."
+    discovered = [str(path) for path in scope.get("discovered_paths", []) if str(path).strip()]
+    active = {str(path).lower() for path in state.task.context_files}
+    if not discovered:
+        return "- None."
+    scored = {
+        str(row.get("path") or "").lower(): row
+        for row in scope.get("scored_paths", [])
+        if isinstance(row, dict)
+    }
+    rows = []
+    for raw_path in discovered:
+        if raw_path.lower() in active:
+            continue
+        row = scored.get(raw_path.lower()) or {}
+        reasons = "; ".join(str(reason) for reason in row.get("reasons", [])[:3]) if isinstance(row.get("reasons"), list) else ""
+        rows.append(
+            {
+                "path": raw_path,
+                "filename": Path(raw_path).name,
+                "score": int(row.get("score") or 0),
+                "reasons": reasons,
+            }
+        )
+    if not rows:
+        return "- None."
+    rows = sorted(rows, key=lambda item: (-int(item["score"]), str(item["path"]).lower()))
+    lines = []
+    for item in rows[:limit]:
+        detail = f"score={item['score']}"
+        if item["reasons"]:
+            detail += f" reasons={compact_snippet(item['reasons'], max_chars=240)}"
+        lines.append(f"- {item['filename']} path={item['path']} {detail}")
+    if len(rows) > limit:
+        lines.append(f"- ... {len(rows) - limit} more held-back document(s) omitted from this prompt.")
+    return "\n".join(lines)
 
 
 def normalize_packet_review(payload: dict[str, Any]) -> dict[str, Any]:

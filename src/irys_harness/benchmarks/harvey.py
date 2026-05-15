@@ -238,6 +238,16 @@ class HarveyLabAdapter(BenchmarkAdapter):
                 max_output_tokens=7000,
             )
             state.metrics.add_call(issue_inventory_result.usage)
+            legal_standard_result = None
+            if needs_legal_standard_worker(state):
+                legal_standard_prompt = build_legal_standard_worker_prompt(state)
+                legal_standard_result = router.generate(
+                    module="legal_standard",
+                    prompt=legal_standard_prompt,
+                    temperature=0.0,
+                    max_output_tokens=9000,
+                )
+                state.metrics.add_call(legal_standard_result.usage)
             specialist_result = None
             if needs_checklist_worker(state):
                 specialist_prompt = build_specialist_worker_prompt(state)
@@ -288,6 +298,13 @@ class HarveyLabAdapter(BenchmarkAdapter):
                     "summary": issue_inventory_result.text,
                 }
             )
+            if legal_standard_result is not None:
+                state.extraction_records.append(
+                    {
+                        "mode": "cheap_worker_legal_standard_matrix",
+                        "summary": legal_standard_result.text,
+                    }
+                )
             if specialist_result is not None:
                 state.extraction_records.append(
                     {
@@ -364,6 +381,13 @@ class HarveyLabAdapter(BenchmarkAdapter):
                     provision_result.text,
                 ]
             )
+            if legal_standard_result is not None:
+                worker_sections.extend(
+                    [
+                        "## Legal standard and requirements analysis",
+                        legal_standard_result.text,
+                    ]
+                )
             if specialist_result is not None:
                 worker_sections.extend(
                     [
@@ -415,6 +439,7 @@ class HarveyLabAdapter(BenchmarkAdapter):
             )
             if appendix:
                 state.final_packet["artifact_appendix"] = appendix
+            state.final_packet["legal_standard_worker_used"] = legal_standard_result is not None
             atom_map = build_deliverable_atom_map(
                 deliverable_contract,
                 "\n\n".join([combined_worker_summary, appendix]),
@@ -1817,6 +1842,17 @@ def lower_task_text(state: RunState) -> str:
             str(state.task.metadata.get("practice_area", "")),
             " ".join(str(item) for item in state.task.answer_schema.get("deliverables", [])),
             " ".join(str(doc.get("filename", "")) for doc in state.documents),
+        ]
+    ).lower()
+
+
+def lower_task_objective_text(state: RunState) -> str:
+    return " ".join(
+        [
+            state.task.task_id,
+            state.task.question,
+            str(state.task.metadata.get("practice_area", "")),
+            " ".join(str(item) for item in state.task.answer_schema.get("deliverables", [])),
         ]
     ).lower()
 
@@ -3298,6 +3334,40 @@ def needs_checklist_worker(state: RunState) -> bool:
     )
 
 
+def needs_legal_standard_worker(state: RunState) -> bool:
+    haystack = lower_task_objective_text(state)
+    privacy_terms = [
+        "cpra",
+        "ccpa",
+        "consumer privacy",
+        "data broker",
+        "sensitive personal information",
+        "limit use",
+        "opt-out",
+        "sale or sharing",
+        "sale/share",
+        "delete request",
+        "deletion request",
+    ]
+    if not any(term in haystack for term in privacy_terms):
+        return False
+    return any(
+        term in haystack
+        for term in [
+            "against regulations",
+            "against current regulations",
+            "against regulatory",
+            "compliance gaps",
+            "compliance gap",
+            "regulatory impact",
+            "regulatory requirements",
+            "requirements matrix",
+            "privacy program",
+            "data broker",
+        ]
+    )
+
+
 def format_deliverable_contract(state: RunState) -> str:
     contract = state.task.answer_schema.get("deliverable_contract") or {}
     return json.dumps(contract, indent=2, sort_keys=True)
@@ -3573,6 +3643,11 @@ For tax controversy, tax-closing, IDR, filed-return, stipulation, and Section 38
         credential_gap_guidance = """
 For credential, qualification, PERM, labor-certification, H-1B, and beneficiary gap-analysis deliverables, preserve the "Deterministic credential / qualification gap digest" as the organizing work product. Include a requirement-satisfaction matrix near the top. Explicitly distinguish education, pre-master's experience, concurrent-with-master's experience, post-master's experience, job-title fit, technical-skill mapping, skill timing, certification, R/Python evidence, supervision scope, SOC/PWD classification, and filing-status/cap-gap issues when the worker packet lists them. Do not let the AWS certification gap and missing experience letter crowd out the other requirement mismatches.
 """
+    legal_standard_guidance = ""
+    if packet.get("legal_standard_worker_used"):
+        legal_standard_guidance = """
+The worker packet includes a legal-standard / requirements matrix. Use it when the task asks to compare source facts against legal rules, regulatory requirements, enforcement guidelines, procedural schedules, benchmarks, or external standards. Preserve authority names, sections, thresholds, deadlines, penalty formulas, severity rules, source-posture labels, and uncertainty notes. Do not invent new authorities beyond the matrix; if a row is labeled model_legal_knowledge, use it carefully and tie it to the source facts in the packet.
+"""
     return f"""You are generating a legal benchmark deliverable from benchmark-provided materials only.
 
 Output discipline:
@@ -3659,6 +3734,7 @@ For insurance coverage-determination memoranda, preserve the "High-Priority Insu
 {trusts_estates_guidance}
 {tax_controversy_guidance}
 {credential_gap_guidance}
+{legal_standard_guidance}
 For covenant-compliance deliverables, include a Required Numeric Reconciliation section. At minimum, when the facts are present, it must state: Borrower's unadjusted EBITDA; corrected Total Funded Debt arithmetic; primary corrected EBITDA and leverage; interest denominator audit; available revolver / letters-of-credit correction; period-end liquidity and whether period-end liquidity is compliant; any intra-period liquidity breach separately; capital expenditures actual versus adjusted limit; extraordinary/non-recurring charge cap and claimed amount; realized versus projected savings; and any further-corrected named-settlement scenario. Do not let an intra-period breach replace the separate period-end liquidity calculation.
 
 Use the exact severity label "Critical" for missing required expert letters, material publication/citation discrepancies, and filing-blocking signature/form defects. When an exhibit letter is skipped, explicitly state that the skip causes cascading misnumbering or cross-reference errors for later exhibits.
@@ -4113,6 +4189,65 @@ For each issue or row, include:
 - source IDs.
 
 For workbook tasks, be especially exhaustive on row-level inventories. If the task asks for a register, matrix, model, log, comparison, or calculation schedule, return enough structured rows for the final artifact to populate that tab.
+
+Document text:
+{text}
+"""
+
+
+def build_legal_standard_worker_prompt(state: RunState) -> str:
+    text = "\n\n".join(
+        [
+            f"Chunk {chunk.get('doc_id')} / {chunk.get('chunk_id')}:\n{str(chunk.get('text', ''))[:3500]}"
+            for chunk in state.chunks
+        ]
+    )
+    return f"""You are a cheap worker building a legal, regulatory, procedural, or benchmark-requirements matrix.
+
+Return JSON only. Do not draft the memo, report, letter, workbook, executive summary, recommendations section, or final deliverable prose. Your output is machine-facing intermediate state for a later synthesizer.
+
+Task instructions:
+{state.task.question}
+
+Deliverable contract:
+{format_deliverable_contract(state)}
+
+Use the source documents first. If the task expressly asks to compare facts, filings, policies, drafts, or conduct against legal rules, regulatory requirements, enforcement guidelines, state/federal standards, benchmark terms, or procedural schedules that are not fully reproduced in the source documents, you may add model-knowledge legal-standard rows. Label those rows clearly as model_legal_knowledge and mark uncertainty instead of inventing authority.
+
+Return this JSON shape:
+{{
+  "status": "useful|not_applicable",
+  "reason": "short reason",
+  "rows": [
+    {{
+      "standard_or_requirement": "",
+      "source_posture": "source_document|model_legal_knowledge|inferred_from_task",
+      "authority_or_benchmark": "",
+      "threshold_deadline_formula_or_exception": "",
+      "source_fact_or_current_evidence": "",
+      "gap_conflict_match_or_open_question": "",
+      "severity_or_consequence": "",
+      "recommended_action": "",
+      "source_ids": []
+    }}
+  ],
+  "open_questions": [],
+  "warnings": []
+}}
+
+If the task does not actually require an external legal, regulatory, procedural, or benchmark standard, return status "not_applicable" with an empty rows array.
+
+Pay special attention to these cross-domain standard families when present:
+- privacy and cyber: CPRA/CCPA opt-out, sensitive personal information, consumer-request timing, HIPAA/HITECH breach notice and safeguards;
+- sanctions and trade: OFAC 50 Percent Rule, SDN/entity-list facts, blocked property, voluntary self-disclosure, penalty factors, transaction-value and per-violation calculations;
+- immigration and filing packages: current form editions, fee schedule, receipt/priority dates, A-numbers, lockbox and premium-processing posture, derivative filing implications;
+- litigation/arbitration: Redfern schedule categories, burden/relevance/proportionality, privilege, New York Convention defenses, public-policy or due-process exceptions;
+- SEC/finance/tax: filing item requirements, revenue rulings, exemption schedules, penalty/interest formulas, threshold calculations, disclosure deadlines;
+- healthcare/life sciences/FDA: protocol deviations, BAA status, clinical-trial duties, safety reporting, breach thresholds, validation and recordkeeping;
+- environmental/ESG/product safety: permit limits, CERCLA/CWA/NPDES/CPSC reporting, corrective-action deadlines, financial assurance and penalty exposure;
+- state regulatory filings, insurance applications, payor contracts, policy manuals, and benchmark comparisons.
+
+If a legal standard row conflicts with or extends beyond the source documents, preserve the source-posture label so the final synthesizer can decide how to use it.
 
 Document text:
 {text}

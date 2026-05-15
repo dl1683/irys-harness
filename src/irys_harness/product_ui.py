@@ -69,7 +69,10 @@ def build_handler(
                 trace_path = query.get("path", [""])[0]
                 try:
                     trace = load_trace(resolve_trace_path(trace_path, trace_dir))
-                    response = {"summary": trace_summary(trace), "trace": trace}
+                    response = {
+                        "summary": trace_summary(trace),
+                        "trace": compact_trace_for_ui(trace),
+                    }
                     comparison = comparison_from_parent(trace, trace_dir=trace_dir)
                     if comparison:
                         response["comparison"] = comparison
@@ -210,8 +213,9 @@ def build_handler(
                     verbose=False,
                 )
                 response = result.to_dict()
-                response["summary"] = trace_summary(result.state.to_trace())
-                response["trace"] = result.state.to_trace()
+                full_trace = result.state.to_trace()
+                response["summary"] = trace_summary(full_trace)
+                response["trace"] = compact_trace_for_ui(full_trace)
                 self.send_json(response)
             except Exception as exc:  # noqa: BLE001 - return actionable UI errors.
                 self.send_json({"error": f"{type(exc).__name__}: {exc}"}, status=HTTPStatus.BAD_REQUEST)
@@ -321,8 +325,9 @@ def start_product_run_job(
                     use_llm_planning=bool(payload.get("use_llm_planning", False)),
                 )
                 response = result.to_dict()
-                response["summary"] = trace_summary(result.state.to_trace())
-                response["trace"] = result.state.to_trace()
+                full_trace = result.state.to_trace()
+                response["summary"] = trace_summary(full_trace)
+                response["trace"] = compact_trace_for_ui(full_trace)
             append_run_job_event(job_id, "DONE", "product matter run completed")
             with RUN_JOBS_LOCK:
                 RUN_JOBS[job_id]["status"] = "completed"
@@ -500,7 +505,7 @@ def rerun_from_trace(
     child_trace = result.state.to_trace()
     response = result.to_dict()
     response["summary"] = trace_summary(child_trace)
-    response["trace"] = child_trace
+    response["trace"] = compact_trace_for_ui(child_trace)
     response["comparison"] = compare_product_traces(parent, child_trace)
     return response
 
@@ -711,6 +716,66 @@ def summarize_trace_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "estimated_cost": estimated_cost,
         "average_cost_per_message": estimated_cost / len(rows) if rows else 0.0,
     }
+
+
+def compact_trace_for_ui(trace: dict[str, Any]) -> dict[str, Any]:
+    compact = {
+        key: compact_value_for_ui(value)
+        for key, value in trace.items()
+        if key not in {"chunks", "final_packet", "extraction_records", "critic_records", "verification_records"}
+    }
+    chunks = trace.get("chunks") if isinstance(trace.get("chunks"), list) else []
+    compact["chunks"] = [compact_chunk_for_ui(chunk) for chunk in chunks]
+    if "final_packet" in trace:
+        compact["final_packet"] = compact_value_for_ui(trace.get("final_packet"), max_str=5000, max_list=260)
+    for key in ["extraction_records", "critic_records", "verification_records"]:
+        if key in trace:
+            compact[key] = compact_value_for_ui(trace.get(key), max_str=5000, max_list=120)
+    compact["_ui_compaction"] = {
+        "compacted": True,
+        "original_chunk_count": len(chunks),
+        "policy": "Full traces remain on disk; browser responses keep metadata and trim large text fields.",
+    }
+    return compact
+
+
+def compact_chunk_for_ui(chunk: Any) -> dict[str, Any]:
+    if not isinstance(chunk, dict):
+        return {"value": compact_value_for_ui(chunk, max_str=700)}
+    row = {key: compact_value_for_ui(value, max_str=700) for key, value in chunk.items() if key != "text"}
+    text = str(chunk.get("text") or "")
+    if text:
+        row["text_preview"] = compact_text_for_ui(text, max_chars=700)
+        row["text_chars"] = len(text)
+    return row
+
+
+def compact_value_for_ui(value: Any, *, max_str: int = 4000, max_list: int = 500, depth: int = 0) -> Any:
+    if isinstance(value, str):
+        return compact_text_for_ui(value, max_chars=max_str)
+    if isinstance(value, list):
+        items = [
+            compact_value_for_ui(item, max_str=max_str, max_list=max_list, depth=depth + 1)
+            for item in value[:max_list]
+        ]
+        if len(value) > max_list:
+            items.append({"_ui_omitted_items": len(value) - max_list})
+        return items
+    if isinstance(value, dict):
+        if depth >= 8:
+            return compact_text_for_ui(json.dumps(value, sort_keys=True, default=str), max_chars=max_str)
+        return {
+            str(key): compact_value_for_ui(item, max_str=max_str, max_list=max_list, depth=depth + 1)
+            for key, item in value.items()
+        }
+    return value
+
+
+def compact_text_for_ui(value: str, *, max_chars: int) -> str:
+    text = str(value or "")
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 80].rstrip() + f"\n\n[UI truncated {len(text) - (max_chars - 80)} character(s); full text is saved in the trace file.]"
 
 
 def resolve_trace_path(raw_path: str, trace_dir: str | Path) -> Path:
@@ -3061,11 +3126,13 @@ INDEX_HTML = r"""<!doctype html>
       if (fields.search_queries) lines.push(`Search targets: ${formatInlineList(fields.search_queries, 12)}`);
       if (fields.queries) lines.push(`Search targets: ${formatInlineList(fields.queries, 12)}`);
       if (fields.revised_queries) lines.push(`Revised search targets: ${formatInlineList(fields.revised_queries, 12)}`);
+      if (fields.needed_information) lines.push(`Plan needs: ${formatInlineList(fields.needed_information, 12)}`);
       if (fields.missing_information) lines.push(`Missing information: ${formatInlineList(fields.missing_information, 12)}`);
       if (fields.coverage_risks) lines.push(`Coverage risks: ${formatInlineList(fields.coverage_risks, 12)}`);
       if (fields.relevant_source_ids) lines.push(`Relevant source IDs: ${formatInlineList(fields.relevant_source_ids, 16)}`);
       if (fields.low_value_source_ids) lines.push(`Low-value source IDs: ${formatInlineList(fields.low_value_source_ids, 16)}`);
       if (fields.selected_documents) lines.push(`Reading first: ${formatInlineList(fields.selected_documents, 12)}`);
+      if (fields.held_back_documents) lines.push(`Held-back examples: ${formatInlineList(fields.held_back_documents, 12)}`);
       if (fields.pinned_documents) lines.push(`Pinned documents: ${formatInlineList(fields.pinned_documents, 12)}`);
       if (fields.skipped_document_count) lines.push(`Held back for now: ${fields.skipped_document_count} document(s).`);
       if (fields.source_coverage) {

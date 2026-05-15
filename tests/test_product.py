@@ -14,13 +14,16 @@ from urllib.request import Request, urlopen
 from irys_harness.cli import build_parser
 from irys_harness.config import ModelTier, load_config
 from irys_harness.metrics import ModelCallRecord
+from irys_harness.state import BenchmarkTask, RunState
 from irys_harness.product import (
     DEFAULT_PRODUCT_TOP_K,
     build_answer_source_map,
     build_metric_selection_notes,
+    build_held_back_inventory_for_prompt,
     build_product_evidence_items,
     build_product_plan_preview,
     build_product_synthesis_prompt,
+    build_product_queries_from_state,
     build_product_worker_analysis_prompt,
     build_source_planner_prompt,
     compact_relevant_snippet,
@@ -37,6 +40,7 @@ from irys_harness.product_ui import (
     INDEX_HTML,
     build_rerun_plan_note,
     build_handler,
+    compact_trace_for_ui,
     list_product_traces,
     parse_paths,
     pick_local_paths,
@@ -297,6 +301,65 @@ class ProductMatterTests(unittest.TestCase):
             self.assertEqual(plan["source_planner"]["selected_count"], 2)
             self.assertEqual(plan["source_planner"]["selected_directories"], [str(emails.resolve())])
             self.assertNotIn(str(rulebook.resolve()), plan["first_read_paths"])
+
+    def test_product_queries_include_source_planner_needed_information(self) -> None:
+        task = BenchmarkTask(
+            benchmark="product_matter",
+            task_id="matter",
+            question="What is the main issue here?",
+            context_files=[],
+            answer_schema={},
+            metadata={
+                "corpus_scope_decision": {
+                    "selected_paths": [str(Path("email_chain.txt").resolve())],
+                    "signals": {
+                        "source_planner": {
+                            "reason": "The email chain is the matter-specific narrative source.",
+                            "needed_information": ["event timeline", "parties and disputed action"],
+                        }
+                    },
+                }
+            },
+        )
+        state = RunState(task=task, config=load_config(), documents=[], chunks=[])
+
+        queries = build_product_queries_from_state(state)
+
+        self.assertTrue(any("event timeline" in query for query in queries))
+        self.assertTrue(any("matter-specific narrative source" in query for query in queries))
+
+    def test_packet_review_prompt_exposes_held_back_inventory(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            active = (root / "generic_rules.txt").resolve()
+            held_back = (root / "email_chain.txt").resolve()
+            task = BenchmarkTask(
+                benchmark="product_matter",
+                task_id="matter",
+                question="What is the main issue here?",
+                context_files=[str(active)],
+                answer_schema={},
+                metadata={
+                    "corpus_scope_decision": {
+                        "discovered_paths": [str(active), str(held_back)],
+                        "selected_paths": [str(active)],
+                        "scored_paths": [
+                            {"path": str(held_back), "score": 27, "reasons": ["likely case-specific narrative document"]}
+                        ],
+                    }
+                },
+            )
+            state = RunState(
+                task=task,
+                config=load_config(),
+                documents=[{"doc_id": "doc_0001", "filename": active.name, "path": str(active), "text_chars": 100}],
+                chunks=[],
+            )
+
+            inventory = build_held_back_inventory_for_prompt(state)
+
+            self.assertIn("email_chain.txt", inventory)
+            self.assertIn("likely case-specific narrative document", inventory)
 
     def test_cheap_worker_source_planner_stages_large_indexed_directory(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -925,6 +988,21 @@ class ProductMatterTests(unittest.TestCase):
             self.assertEqual(resolve_trace_path(str(trace), trace_dir), trace.resolve())
             with self.assertRaises(ValueError):
                 resolve_trace_path(str(root / "outside.json"), trace_dir)
+
+    def test_compact_trace_for_ui_keeps_browser_payload_bounded(self) -> None:
+        trace = {
+            "task": {"question": "Q"},
+            "chunks": [{"doc_id": "doc_1", "chunk_id": "c1", "text": "x" * 20_000}],
+            "final_packet": {"verified_evidence": [{"raw_support": "y" * 20_000}]},
+            "extraction_records": [{"analysis": "z" * 20_000}],
+        }
+
+        compact = compact_trace_for_ui(trace)
+
+        self.assertTrue(compact["_ui_compaction"]["compacted"])
+        self.assertLess(len(compact["chunks"][0]["text_preview"]), 1000)
+        self.assertIn("full text is saved in the trace file", compact["chunks"][0]["text_preview"])
+        self.assertLess(len(compact["final_packet"]["verified_evidence"][0]["raw_support"]), 6000)
 
     def test_product_ui_renders_answer_markdown_online(self) -> None:
         self.assertIn('class="answer" id="answer"', INDEX_HTML)
