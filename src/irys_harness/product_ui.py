@@ -1524,9 +1524,18 @@ INDEX_HTML = r"""<!doctype html>
     }
     document.addEventListener("click", (event) => {
       const target = event.target;
-      if (!target || !target.matches || !target.matches(".trace-load")) return;
-      $("tracepath").value = target.getAttribute("data-path") || "";
-      loadTrace.click();
+      if (!target || !target.matches) return;
+      if (target.matches(".trace-load")) {
+        $("tracepath").value = target.getAttribute("data-path") || "";
+        loadTrace.click();
+        return;
+      }
+      if (target.matches(".include-held-back")) {
+        const path = target.getAttribute("data-path") || "";
+        appendPaths("firstReadPaths", [path]);
+        firstReadPathsDirty = true;
+        status.textContent = `Added ${filenameFromPath(path)} to the next first-read set`;
+      }
     });
     function render(data) {
       const trace = data.trace || {};
@@ -1662,6 +1671,11 @@ INDEX_HTML = r"""<!doctype html>
       for (const item of scope.scored_paths || []) {
         scoreByPath[String(item.path || "").toLowerCase()] = item;
       }
+      heldBack.sort((left, right) => {
+        const leftScore = Number((scoreByPath[String(left || "").toLowerCase()] || {}).score || 0);
+        const rightScore = Number((scoreByPath[String(right || "").toLowerCase()] || {}).score || 0);
+        return rightScore - leftScore || String(left || "").localeCompare(String(right || ""));
+      });
       return heldBack.slice(0, 25).map((path, index) => {
         const item = scoreByPath[String(path || "").toLowerCase()] || {};
         const body = [
@@ -1669,7 +1683,9 @@ INDEX_HTML = r"""<!doctype html>
           Array.isArray(item.reasons) ? item.reasons.join("; ") : "",
           String(path || "")
         ].filter(Boolean).join("\n");
-        return card(`Held back ${index + 1}: ${filenameFromPath(path)}`, body);
+        return `<div class="item"><strong>${escapeHtml(`Held back ${index + 1}: ${filenameFromPath(path)}`)}</strong>` +
+          `<small><pre>${escapeHtml(body)}</pre></small>` +
+          `<button class="secondary include-held-back" data-path="${escapeAttr(path)}">Read next pass</button></div>`;
       }).join("") + (heldBack.length > 25 ? emptyState(`${heldBack.length - 25} additional document(s) were held back.`) : "");
     }
     function filenameFromPath(path) {
