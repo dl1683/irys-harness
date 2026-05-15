@@ -197,11 +197,12 @@ The product UI supports:
 - native local file/folder pickers;
 - recursive local folder paths;
 - optional worker source planning that reviews the file inventory before first read and falls back to deterministic path scoring if model planning is unavailable;
-- editable first-read plan preview before a run;
+- editable first-read plan preview before a run, with stale or missing plans shown for review before execution starts;
 - steering-note plan preview before a rerun, so users can inspect changed source focus before applying it;
 - first-read audit showing documents that were held back and one-click controls to read them in the next pass;
 - live workstream events while the run is active;
 - source review, open-question summaries, and source-ignore steering for the next pass;
+- large diagnostic panels summarized in the browser while full details remain in saved traces;
 - multiple chats per matter;
 - conversation history limited to user questions and final answers;
 - per-message, matter-level, and model-tier usage/cost display.
