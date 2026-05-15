@@ -809,6 +809,8 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn("/api/cancel-run", INDEX_HTML)
         self.assertIn("function pollRunJob", INDEX_HTML)
         self.assertIn("What Irys Is Doing", INDEX_HTML)
+        self.assertIn("function renderRecentLiveEvents", INDEX_HTML)
+        self.assertIn("earlier update(s) are saved in the trace", INDEX_HTML)
         self.assertIn('id="currentStep"', INDEX_HTML)
         self.assertIn('id="runTimeline"', INDEX_HTML)
         self.assertIn("function renderRunTimeline", INDEX_HTML)

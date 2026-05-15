@@ -2532,9 +2532,18 @@ INDEX_HTML = r"""<!doctype html>
       const latest = events[events.length - 1] || {};
       $("runTimeline").innerHTML = renderRunTimeline(events);
       $("currentStep").innerHTML = renderCurrentStep(latest);
-      $("liveEvents").innerHTML = events.slice(-30).map(renderUserEvent).join("");
+      $("liveEvents").innerHTML = renderRecentLiveEvents(events);
       renderRunBrief({plan: currentPlan, events});
       renderReviewChecklist({plan: currentPlan, events});
+    }
+    function renderRecentLiveEvents(events) {
+      const rows = Array.isArray(events) ? events : [];
+      const visibleLimit = 8;
+      const visible = rows.slice(-visibleLimit).map(renderUserEvent);
+      if (rows.length > visibleLimit) {
+        visible.unshift(emptyState(`${rows.length - visibleLimit} earlier update(s) are saved in the trace and advanced diagnostic data.`));
+      }
+      return visible.join("");
     }
     function renderRunTimeline(events) {
       const stages = [
