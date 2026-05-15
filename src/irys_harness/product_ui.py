@@ -1208,7 +1208,7 @@ INDEX_HTML = r"""<!doctype html>
       <div class="audit-board" id="reviewChecklist">
         <div class="empty">After a plan or run, this checklist will show whether the answer has enough source support, what still needs review, and what to do next.</div>
       </div>
-      <details class="workspace-details" open>
+      <details class="workspace-details" id="sourcePlanDetails" open>
         <summary>Review And Edit Source Plan</summary>
         <div class="hint">This is where you correct Irys before it spends time reading. Uncheck irrelevant documents, add missing first-read paths, or write a plan correction and preview again.</div>
         <h2 style="margin-top:16px">First-Read Review</h2>
@@ -1370,6 +1370,7 @@ INDEX_HTML = r"""<!doctype html>
       $("runBrief").innerHTML = emptyState("The brief will explain the current plan, what Irys is doing, and what you can change next.");
       $("reviewChecklist").innerHTML = emptyState("After a plan or run, this checklist will show whether the answer has enough source support, what still needs review, and what to do next.");
       $("candidateReview").innerHTML = emptyState("Review Plan will show the highest-ranked documents here. Check or uncheck what Irys should read first.");
+      setSourcePlanOpen(true);
       currentPlan = null;
       currentPlanNote = "";
       currentPlanObjective = "";
@@ -1647,6 +1648,10 @@ INDEX_HTML = r"""<!doctype html>
       $("commandStepTitle").textContent = title || "Ready";
       $("commandStepDetail").textContent = detail || "Choose a corpus, ask a question, review the source plan, then run.";
     }
+    function setSourcePlanOpen(open) {
+      const details = $("sourcePlanDetails");
+      if (details) details.open = Boolean(open);
+    }
     async function requestPlan({paths, selected_paths = []}) {
       const response = await fetch("/api/plan", {
         method: "POST",
@@ -1712,6 +1717,7 @@ INDEX_HTML = r"""<!doctype html>
       renderCandidateReview(plan.top_candidates || [], firstRead);
       renderRunBrief({plan});
       renderReviewChecklist({plan});
+      setSourcePlanOpen(true);
     }
     function planNeedsRefresh() {
       if (!pathPayload($("firstReadPaths").value).length) return true;
@@ -1944,6 +1950,7 @@ INDEX_HTML = r"""<!doctype html>
       excludedSourcePaths = [];
       renderTracePlan(metadata, trace);
       renderLiveEvents(trace.events || []);
+      setSourcePlanOpen(false);
       renderNextPassSetup();
       renderRunBrief({trace, comparison: data.comparison});
       renderReviewChecklist({trace, comparison: data.comparison});

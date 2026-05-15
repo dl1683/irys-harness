@@ -751,6 +751,8 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn('id="selectAllCandidates"', INDEX_HTML)
         self.assertIn('id="restoreRecommendedCandidates"', INDEX_HTML)
         self.assertIn('id="firstReadPaths"', INDEX_HTML)
+        self.assertIn('id="sourcePlanDetails"', INDEX_HTML)
+        self.assertIn("function setSourcePlanOpen", INDEX_HTML)
         self.assertIn('id="planNote"', INDEX_HTML)
         self.assertIn('id="applyPlanCorrection"', INDEX_HTML)
         self.assertIn("Preview Corrected Plan", INDEX_HTML)
