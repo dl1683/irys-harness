@@ -323,6 +323,40 @@ class ProductMatterTests(unittest.TestCase):
             self.assertGreater(trace["documents"][0]["text_chars"], 200_000)
             self.assertIn(marker, trace["rendered_answer"])
 
+    def test_run_product_matter_pins_sources_into_synthesis_packet(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            primary = root / "loan_notice.txt"
+            pinned = root / "board_minutes.txt"
+            primary.write_text(
+                "The borrower missed the May interest payment. The loan gives a five day cure period.",
+                encoding="utf-8",
+            )
+            pinned_marker = "PINNED_CONTEXT_MARKER board approved enforcement of the guaranty."
+            pinned.write_text(pinned_marker, encoding="utf-8")
+
+            result = run_product_matter(
+                objective="What cure period applies to the missed May payment?",
+                paths=[str(root)],
+                matter_id="Pinned Source",
+                config=load_config(),
+                trace_dir=root / "traces",
+                live_synthesis=False,
+                selected_paths=[str(primary)],
+                pinned_paths=[str(pinned)],
+                verbose=False,
+            )
+            trace = result.state.to_trace()
+            pinned_resolved = str(pinned.resolve())
+
+            self.assertIn(pinned_resolved, trace["task"]["context_files"])
+            self.assertEqual(trace["task"]["metadata"]["pinned_context_files"], [pinned_resolved])
+            self.assertEqual(trace["diagnosis"]["pinned_source_count"], 1)
+            pinned_sources = trace["final_packet"]["pinned_sources"]
+            self.assertEqual(pinned_sources[0]["path"], pinned_resolved)
+            self.assertIn(pinned_marker, pinned_sources[0]["excerpts"][0]["text"])
+            self.assertIn(pinned_marker, build_product_synthesis_prompt(result.state))
+
     def test_sanitize_matter_id_is_path_safe(self) -> None:
         self.assertEqual(sanitize_matter_id("Client / Matter: 01"), "Client-Matter-01")
 
@@ -427,6 +461,18 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn("Documents Held Back", INDEX_HTML)
         self.assertIn("ignore-source-next", INDEX_HTML)
         self.assertIn("Ignore next pass", INDEX_HTML)
+        self.assertIn("deeper-source-next", INDEX_HTML)
+        self.assertIn("Read deeper next pass", INDEX_HTML)
+        self.assertIn("pin-source-next", INDEX_HTML)
+        self.assertIn("Pin to synthesis", INDEX_HTML)
+        self.assertIn("Pinned For Next Pass", INDEX_HTML)
+        self.assertIn('id="pinnedSources"', INDEX_HTML)
+        self.assertIn("pinned_paths", INDEX_HTML)
+        self.assertIn("pinnedSourcePaths", INDEX_HTML)
+        self.assertIn("function addPinnedSourcePath", INDEX_HTML)
+        self.assertIn("function renderPinnedSources", INDEX_HTML)
+        self.assertIn("unpin-source-next", INDEX_HTML)
+        self.assertIn("Pinned sources", INDEX_HTML)
         self.assertIn("function sourceCard", INDEX_HTML)
         self.assertIn("function removePathFromFirstRead", INDEX_HTML)
         self.assertIn("excludedSourcePaths", INDEX_HTML)

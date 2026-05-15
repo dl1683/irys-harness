@@ -97,6 +97,7 @@ def run_product_matter(
     parent_trace_path: str | None = None,
     user_nudge: str | None = None,
     selected_paths: list[str] | None = None,
+    pinned_paths: list[str] | None = None,
     plan_note: str | None = None,
     use_llm_planning: bool = False,
     event_callback: Callable[[dict[str, Any]], None] | None = None,
@@ -137,6 +138,18 @@ def run_product_matter(
         config=config,
         use_llm_planning=use_llm_planning,
     )
+    pinned_corpus_paths = resolve_pinned_paths(pinned_paths, corpus_paths)
+    if pinned_corpus_paths:
+        emit_pre_event(
+            pre_events,
+            event_callback,
+            "STEER",
+            "Pinned sources for synthesis",
+            summary=f"Keeping {len(pinned_corpus_paths)} user-pinned source document(s) in the synthesis packet.",
+            pinned_documents=[path.name for path in pinned_corpus_paths[:12]],
+            omitted_document_count=max(0, len(pinned_corpus_paths) - 12),
+            next_step="Include pinned sources even if the automatic first-read plan would not select them.",
+        )
     emit_pre_event(
         pre_events,
         event_callback,
@@ -179,7 +192,7 @@ def run_product_matter(
             reason=scope_decision.reason,
             next_step="Read documents and extract searchable text.",
         )
-    active_corpus_paths = scope_decision.selected_paths
+    active_corpus_paths = unique_paths([*scope_decision.selected_paths, *pinned_corpus_paths])
     check_product_cancel(should_cancel)
     emit_pre_event(
         pre_events,
@@ -215,6 +228,7 @@ def run_product_matter(
             "parent_trace_path": parent_trace_path,
             "user_nudge": user_nudge,
             "plan_note": plan_note,
+            "pinned_context_files": [str(path) for path in pinned_corpus_paths],
             "conversation_history_turns": len(normalized_history),
             "conversation_history_policy": "synthesis_only_user_question_and_final_answer",
             "discovered_context_files": [str(path) for path in corpus_paths],
@@ -331,6 +345,12 @@ def run_product_matter(
         "documents": state.documents,
         "retrieved_chunks": [item.to_dict() for item in retrieved],
         "verified_evidence": evidence_items,
+        "pinned_sources": build_pinned_source_records(
+            state.documents,
+            state.chunks,
+            pinned_paths=[str(path) for path in pinned_corpus_paths],
+            evidence_items=evidence_items,
+        ),
         "unresolved": build_unresolved_items(state),
     }
 
@@ -564,6 +584,35 @@ def plan_product_corpus_scope(
         scored_paths=scored[:80],
         model_calls=model_calls,
     )
+
+
+def unique_paths(paths: list[Path]) -> list[Path]:
+    output: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        resolved = path.expanduser().resolve()
+        key = str(resolved).lower()
+        if key in seen:
+            continue
+        output.append(resolved)
+        seen.add(key)
+    return output
+
+
+def resolve_pinned_paths(pinned_paths: list[str] | None, corpus_paths: list[Path]) -> list[Path]:
+    if not pinned_paths:
+        return []
+    path_by_key = {str(path.resolve()).lower(): path.resolve() for path in corpus_paths}
+    output: list[Path] = []
+    seen: set[str] = set()
+    for raw_path in pinned_paths:
+        key = str(Path(raw_path).expanduser().resolve()).lower()
+        pinned = path_by_key.get(key)
+        if pinned is None or key in seen:
+            continue
+        output.append(pinned)
+        seen.add(key)
+    return output
 
 
 def build_product_plan_preview(
@@ -1384,6 +1433,7 @@ def build_product_diagnosis(state: RunState) -> dict[str, Any]:
     evidence = list(packet.get("verified_evidence", []) or [])
     source_map = list(packet.get("answer_source_map", []) or [])
     unresolved = list(packet.get("unresolved", []) or [])
+    pinned_sources = list(packet.get("pinned_sources", []) or [])
     load_errors = [doc for doc in state.documents if doc.get("load_error")]
     status = "ready_for_review"
     if load_errors or not state.chunks or not evidence or unresolved:
@@ -1397,6 +1447,7 @@ def build_product_diagnosis(state: RunState) -> dict[str, Any]:
         "retrieved_chunk_count": len(retrieved),
         "evidence_count": len(evidence),
         "answer_source_map_count": len(source_map),
+        "pinned_source_count": len(pinned_sources),
         "unresolved_count": len(unresolved),
         "unresolved": unresolved,
         "supporting_trace_refs": [
@@ -1502,6 +1553,89 @@ def compact_compare_text(value: Any, *, max_chars: int = 280) -> str:
     return text[: max_chars - 3].rstrip() + "..."
 
 
+def build_pinned_source_records(
+    documents: list[dict[str, Any]],
+    chunks: list[dict[str, Any]],
+    *,
+    pinned_paths: list[str],
+    evidence_items: list[dict[str, Any]],
+    max_chunks_per_doc: int = 6,
+    max_chars_per_doc: int = 16_000,
+) -> list[dict[str, Any]]:
+    pinned_keys = {str(Path(path).expanduser().resolve()).lower() for path in pinned_paths}
+    if not pinned_keys:
+        return []
+    docs_by_id = {
+        str(doc.get("doc_id")): doc
+        for doc in documents
+        if str(doc.get("path") or "").strip()
+        and str(Path(str(doc.get("path"))).expanduser().resolve()).lower() in pinned_keys
+    }
+    if not docs_by_id:
+        return []
+    chunks_by_doc: dict[str, list[dict[str, Any]]] = {}
+    chunks_by_id: dict[str, dict[str, Any]] = {}
+    for chunk in chunks:
+        doc_id = str(chunk.get("doc_id") or "")
+        chunks_by_doc.setdefault(doc_id, []).append(chunk)
+        chunks_by_id[str(chunk.get("chunk_id") or "")] = chunk
+    pinned_records: list[dict[str, Any]] = []
+    for doc_id, doc in docs_by_id.items():
+        preferred_chunk_ids: list[str] = []
+        for item in evidence_items:
+            source = item.get("source") or {}
+            if str(source.get("doc_id") or "") == doc_id and source.get("chunk_id"):
+                preferred_chunk_ids.append(str(source.get("chunk_id")))
+        selected_chunks: list[dict[str, Any]] = []
+        seen_chunks: set[str] = set()
+        for chunk_id in preferred_chunk_ids:
+            chunk = chunks_by_id.get(chunk_id)
+            if not chunk:
+                continue
+            for neighbor_id in [chunk.get("prev_chunk"), chunk.get("chunk_id"), chunk.get("next_chunk")]:
+                neighbor = chunks_by_id.get(str(neighbor_id or ""))
+                if not neighbor:
+                    continue
+                key = str(neighbor.get("chunk_id") or "")
+                if key and key not in seen_chunks:
+                    selected_chunks.append(neighbor)
+                    seen_chunks.add(key)
+        for chunk in chunks_by_doc.get(doc_id, []):
+            if len(selected_chunks) >= max_chunks_per_doc:
+                break
+            key = str(chunk.get("chunk_id") or "")
+            if key and key not in seen_chunks:
+                selected_chunks.append(chunk)
+                seen_chunks.add(key)
+        excerpts: list[dict[str, Any]] = []
+        used_chars = 0
+        for chunk in selected_chunks:
+            if len(excerpts) >= max_chunks_per_doc or used_chars >= max_chars_per_doc:
+                break
+            text = str(chunk.get("text") or "")
+            remaining = max_chars_per_doc - used_chars
+            if len(text) > remaining:
+                text = text[:remaining]
+            used_chars += len(text)
+            excerpts.append(
+                {
+                    "chunk_id": chunk.get("chunk_id"),
+                    "index": chunk.get("index"),
+                    "text": text,
+                }
+            )
+        pinned_records.append(
+            {
+                "doc_id": doc_id,
+                "filename": doc.get("filename"),
+                "path": doc.get("path"),
+                "text_chars": doc.get("text_chars"),
+                "excerpts": excerpts,
+            }
+        )
+    return pinned_records
+
+
 def build_product_synthesis_prompt(state: RunState) -> str:
     packet = state.final_packet or {}
     return f"""Produce the requested legal work product or answer using only the user-provided corpus.
@@ -1516,6 +1650,9 @@ User objective:
 
 Active corpus:
 {format_documents_for_prompt(state.documents)}
+
+Pinned sources:
+{format_pinned_sources_for_prompt(packet.get("pinned_sources", []))}
 
 Evidence packet:
 {format_evidence_for_prompt(packet.get("verified_evidence", []))}
@@ -1545,6 +1682,9 @@ User objective:
 
 Evidence packet:
 {format_evidence_for_prompt(packet.get("verified_evidence", []))}
+
+Pinned sources:
+{format_pinned_sources_for_prompt(packet.get("pinned_sources", []))}
 
 Return:
 - ANSWER_TARGET: the exact question or artifact to satisfy.
@@ -1657,6 +1797,11 @@ def build_deterministic_product_answer(state: RunState) -> str:
     gaps = packet.get("unresolved", [])
     if gaps:
         lines.extend(["", "## Open Gaps", *[f"- {gap}" for gap in gaps]])
+    pinned = packet.get("pinned_sources", [])
+    if pinned:
+        lines.extend(["", "## Pinned Sources"])
+        for source in pinned:
+            lines.append(f"- {source.get('doc_id')}: {source.get('filename')} ({len(source.get('excerpts') or [])} excerpt(s) pinned)")
     return "\n".join(lines)
 
 
@@ -1681,6 +1826,21 @@ def format_evidence_for_prompt(evidence: list[dict[str, Any]]) -> str:
                 ]
             )
         )
+    return "\n".join(parts)
+
+
+def format_pinned_sources_for_prompt(pinned_sources: list[dict[str, Any]]) -> str:
+    if not pinned_sources:
+        return "- None."
+    parts: list[str] = []
+    for source in pinned_sources:
+        parts.append(f"- Pinned document: {source.get('doc_id')} {source.get('filename')} path={source.get('path')}")
+        excerpts = source.get("excerpts") or []
+        if not excerpts:
+            parts.append("  - No extracted excerpts were available.")
+            continue
+        for excerpt in excerpts:
+            parts.append(f"  - {excerpt.get('chunk_id')} index={excerpt.get('index')}: {excerpt.get('text')}")
     return "\n".join(parts)
 
 

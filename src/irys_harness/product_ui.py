@@ -204,6 +204,7 @@ def build_handler(
                     top_k=int(payload.get("top_k", 12) or 12),
                     max_files=parse_optional_int(payload.get("max_files")),
                     selected_paths=parse_paths(payload.get("selected_paths", [])) or None,
+                    pinned_paths=parse_paths(payload.get("pinned_paths", [])) or None,
                     plan_note=str(payload.get("plan_note") or ""),
                     use_llm_planning=bool(payload.get("use_llm_planning", False)),
                     verbose=False,
@@ -315,6 +316,7 @@ def start_product_run_job(
                     event_callback=event_callback,
                     should_cancel=should_cancel,
                     selected_paths=parse_paths(payload.get("selected_paths", [])) or None,
+                    pinned_paths=parse_paths(payload.get("pinned_paths", [])) or None,
                     plan_note=str(payload.get("plan_note") or ""),
                     use_llm_planning=bool(payload.get("use_llm_planning", False)),
                 )
@@ -489,6 +491,7 @@ def rerun_from_trace(
         parent_trace_path=str(parent_path),
         user_nudge=nudge,
         selected_paths=selected_paths_for_rerun_payload(payload),
+        pinned_paths=parse_paths(payload.get("pinned_paths", [])) or None,
         plan_note=plan_note,
         use_llm_planning=bool(payload.get("use_llm_planning", False)),
         event_callback=event_callback,
@@ -990,7 +993,7 @@ INDEX_HTML = r"""<!doctype html>
       <details class="control-help">
         <summary>What the controls mean</summary>
         <small>
-          Folders are read recursively. No artificial file-count or per-document character cap is applied to local corpus paths. Matter ID groups saved runs and costs. Chat ID keeps separate conversations inside the same matter. Smart source planning reviews the file inventory before the first read and falls back to path scoring if model planning is unavailable. Draft final answer is on by default and calls the configured drafting model; turn it off only for a cheap dry run. Evidence chunks controls how many retrieved chunks are used for the answer packet. Message Cost is the loaded run; Matter Cost totals saved traces for the matter.
+          Folders are read recursively. No artificial file-count or per-document character cap is applied to local corpus paths. Matter ID groups saved runs and costs. Chat ID keeps separate conversations inside the same matter. Smart source planning reviews the file inventory before the first read and falls back to path scoring if model planning is unavailable. Draft final answer is on by default and calls the configured drafting model; turn it off only for a cheap dry run. Evidence chunks controls how many retrieved chunks are used for the answer packet. Source actions let you read a document more deeply, pin it into synthesis, or hold it back on the next pass. Message Cost is the loaded run; Matter Cost totals saved traces for the matter.
         </small>
       </details>
       <label for="matter">Matter ID</label>
@@ -1056,6 +1059,8 @@ INDEX_HTML = r"""<!doctype html>
       <div class="answer" id="answer"></div>
       <h2 style="margin-top:16px">Source Review</h2>
       <div class="list" id="sourceSummary"></div>
+      <h2 style="margin-top:16px">Pinned For Next Pass</h2>
+      <div class="list" id="pinnedSources"></div>
       <h2 style="margin-top:16px">Documents Held Back</h2>
       <div class="list" id="heldBackSources"></div>
       <h2 style="margin-top:16px">Sources Used</h2>
@@ -1144,6 +1149,7 @@ INDEX_HTML = r"""<!doctype html>
     let firstReadPathsDirty = false;
     let suppressFirstReadDirty = false;
     let excludedSourcePaths = [];
+    let pinnedSourcePaths = [];
     $("clear").addEventListener("click", () => {
       $("objective").value = "";
       $("answer").innerHTML = "";
@@ -1162,10 +1168,12 @@ INDEX_HTML = r"""<!doctype html>
       currentPlanMode = "";
       currentPlanPathKey = "";
       excludedSourcePaths = [];
+      pinnedSourcePaths = [];
       $("diagnosis").innerHTML = "";
       $("currentStep").innerHTML = "<strong>Idle</strong><small>No run has started.</small>";
       $("liveEvents").innerHTML = "";
       $("sourceSummary").innerHTML = "";
+      $("pinnedSources").innerHTML = "";
       $("heldBackSources").innerHTML = "";
       $("sourcesUsed").innerHTML = "";
       $("openQuestions").innerHTML = "";
@@ -1259,6 +1267,7 @@ INDEX_HTML = r"""<!doctype html>
             use_llm_planning: $("usePlanner").checked,
             top_k: Number($("topk").value || 12),
             selected_paths: pathPayload($("firstReadPaths").value),
+            pinned_paths: pinnedSourcePaths,
             plan_note: $("planNote").value
           })
         });
@@ -1327,6 +1336,7 @@ INDEX_HTML = r"""<!doctype html>
             selected_paths: firstReadPathsDirty ? pathPayload($("firstReadPaths").value) : [],
             selected_paths_locked: firstReadPathsDirty,
             excluded_paths: excludedSourcePaths,
+            pinned_paths: pinnedSourcePaths,
             plan_note: $("planNote").value
           })
         });
@@ -1422,6 +1432,7 @@ INDEX_HTML = r"""<!doctype html>
           selected_paths: firstReadPathsDirty ? pathPayload($("firstReadPaths").value) : [],
           selected_paths_locked: firstReadPathsDirty,
           excluded_paths: excludedSourcePaths,
+          pinned_paths: pinnedSourcePaths,
           plan_note: $("planNote").value
         })
       });
@@ -1471,7 +1482,8 @@ INDEX_HTML = r"""<!doctype html>
         String($("nudge").value || ""),
         pathPayload($("rerunPaths").value).join("\n"),
         String($("planNote").value || ""),
-        excludedSourcePaths.join("\n")
+        excludedSourcePaths.join("\n"),
+        pinnedSourcePaths.join("\n")
       ].join("\n---\n");
     }
     function rerunPlanNeedsRefresh() {
@@ -1482,6 +1494,8 @@ INDEX_HTML = r"""<!doctype html>
       if (!scope) return;
       const selected = scope.selected_paths || [];
       setFirstReadPaths(selected, {dirty: false});
+      pinnedSourcePaths = Array.isArray(metadata.pinned_context_files) ? [...metadata.pinned_context_files] : [];
+      renderPinnedSources();
       $("planNote").value = metadata.plan_note || $("planNote").value;
       currentPlanNote = $("planNote").value;
       currentPlanObjective = $("objective").value;
@@ -1618,9 +1632,36 @@ INDEX_HTML = r"""<!doctype html>
         status.textContent = `Added ${filenameFromPath(path)} to the next first-read set`;
         return;
       }
+      if (target.matches(".deeper-source-next")) {
+        const path = target.getAttribute("data-path") || "";
+        removeExcludedSourcePath(path);
+        appendPaths("firstReadPaths", [path]);
+        firstReadPathsDirty = true;
+        if (!$("nudge").value.trim()) $("nudge").value = `Read ${filenameFromPath(path)} more closely in the next pass.`;
+        status.textContent = `Added ${filenameFromPath(path)} for a deeper next pass`;
+        return;
+      }
+      if (target.matches(".pin-source-next")) {
+        const path = target.getAttribute("data-path") || "";
+        removeExcludedSourcePath(path);
+        addPinnedSourcePath(path);
+        appendPaths("firstReadPaths", [path]);
+        firstReadPathsDirty = true;
+        if (!$("nudge").value.trim()) $("nudge").value = `Keep ${filenameFromPath(path)} pinned in synthesis next pass.`;
+        status.textContent = `Pinned ${filenameFromPath(path)} for synthesis next pass`;
+        return;
+      }
+      if (target.matches(".unpin-source-next")) {
+        const path = target.getAttribute("data-path") || "";
+        removePinnedSourcePath(path);
+        firstReadPathsDirty = true;
+        status.textContent = `Unpinned ${filenameFromPath(path)} for the next pass`;
+        return;
+      }
       if (target.matches(".ignore-source-next")) {
         const path = target.getAttribute("data-path") || "";
         addExcludedSourcePath(path);
+        removePinnedSourcePath(path);
         removePathFromFirstRead(path);
         firstReadPathsDirty = true;
         if (!$("nudge").value.trim()) $("nudge").value = `Ignore ${filenameFromPath(path)} in the next pass.`;
@@ -1730,11 +1771,13 @@ INDEX_HTML = r"""<!doctype html>
       const evidence = Array.isArray(packet.verified_evidence) ? packet.verified_evidence : [];
       const answerSources = Array.isArray(packet.answer_source_map) ? packet.answer_source_map : [];
       const unresolved = Array.isArray(packet.unresolved) ? packet.unresolved : [];
+      const pinnedSources = Array.isArray(packet.pinned_sources) ? packet.pinned_sources : [];
       const loadErrors = docs.filter(doc => doc && doc.load_error);
       const retrieved = Array.isArray(packet.retrieved_chunks) ? packet.retrieved_chunks : [];
       const summaryRows = [
         ["Corpus read", `${docs.length} document(s), ${chunks.length} searchable chunk(s).`],
         ["Evidence found", `${evidence.length} source item(s) carried into the answer packet.`],
+        ["Pinned sources", pinnedSources.length ? `${pinnedSources.length} document(s) pinned into synthesis context.` : "No document was pinned into synthesis context."],
         ["Sources selected", `${retrieved.length} retrieved passage(s) were considered.`],
         ["Open questions", unresolved.length ? `${unresolved.length} issue(s) still flagged.` : "No obvious gaps were logged."]
       ];
@@ -1747,6 +1790,7 @@ INDEX_HTML = r"""<!doctype html>
         summaryRows.push(["Load issues", formatSimpleList(loadErrors.map(doc => `${doc.filename || doc.path}: ${doc.load_error}`), 20)]);
       }
       $("sourceSummary").innerHTML = summaryRows.map(([title, body]) => card(title, body)).join("");
+      renderPinnedSources();
       $("heldBackSources").innerHTML = renderHeldBackSources(scope);
       $("sourcesUsed").innerHTML = renderSourcesUsed(answerSources, evidence, docs);
       $("openQuestions").innerHTML = unresolved.length
@@ -1785,9 +1829,24 @@ INDEX_HTML = r"""<!doctype html>
     }
     function sourceCard(title, body, path) {
       const action = path
-        ? `<button class="secondary ignore-source-next" data-path="${escapeAttr(path)}">Ignore next pass</button>`
+        ? `<div class="row"><button class="secondary deeper-source-next" data-path="${escapeAttr(path)}">Read deeper next pass</button>` +
+          `<button class="secondary pin-source-next" data-path="${escapeAttr(path)}">Pin to synthesis</button>` +
+          `<button class="secondary ignore-source-next" data-path="${escapeAttr(path)}">Ignore next pass</button></div>`
         : "";
       return `<div class="item"><strong>${escapeHtml(title)}</strong><small><pre>${escapeHtml(limitDisplayText(body || "", 2000))}</pre></small>${action}</div>`;
+    }
+    function renderPinnedSources() {
+      const target = $("pinnedSources");
+      if (!target) return;
+      if (!pinnedSourcePaths.length) {
+        target.innerHTML = emptyState("No document is pinned into the next synthesis pass.");
+        return;
+      }
+      target.innerHTML = pinnedSourcePaths.map((path, index) =>
+        `<div class="item"><strong>${escapeHtml(`Pinned ${index + 1}: ${filenameFromPath(path)}`)}</strong>` +
+        `<small><pre>${escapeHtml(path)}</pre></small>` +
+        `<button class="secondary unpin-source-next" data-path="${escapeAttr(path)}">Unpin</button></div>`
+      ).join("");
     }
     function renderHeldBackSources(scope) {
       const discovered = Array.isArray(scope.discovered_paths) ? scope.discovered_paths : [];
@@ -1850,6 +1909,18 @@ INDEX_HTML = r"""<!doctype html>
       const key = String(path || "").toLowerCase();
       excludedSourcePaths = excludedSourcePaths.filter(item => String(item || "").toLowerCase() !== key);
     }
+    function addPinnedSourcePath(path) {
+      const clean = String(path || "").trim();
+      if (!clean) return;
+      const key = clean.toLowerCase();
+      if (!pinnedSourcePaths.some(item => String(item || "").toLowerCase() === key)) pinnedSourcePaths.push(clean);
+      renderPinnedSources();
+    }
+    function removePinnedSourcePath(path) {
+      const key = String(path || "").toLowerCase();
+      pinnedSourcePaths = pinnedSourcePaths.filter(item => String(item || "").toLowerCase() !== key);
+      renderPinnedSources();
+    }
     function renderRunHealth(trace) {
       const diagnosis = trace.diagnosis || {};
       const packet = trace.final_packet || {};
@@ -1863,6 +1934,7 @@ INDEX_HTML = r"""<!doctype html>
         ["Status", statusText],
         ["Evidence", `${diagnosis.evidence_count ?? (packet.verified_evidence || []).length} item(s) in the final packet.`],
         ["Source map", `${diagnosis.answer_source_map_count ?? (packet.answer_source_map || []).length} answer section link(s).`],
+        ["Pinned sources", `${diagnosis.pinned_source_count ?? (packet.pinned_sources || []).length} document(s) pinned into synthesis context.`],
         ["Cost", `$${Number(metrics.estimated_cost || 0).toFixed(4)} for this message.`],
         ["Tokens by tier", formatTierMetric(metrics.tokens_by_tier || {})],
         ["Cost by tier", formatTierMetric(metrics.cost_by_tier || {}, {currency: true})]
