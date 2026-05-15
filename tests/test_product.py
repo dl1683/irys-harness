@@ -20,8 +20,10 @@ from irys_harness.product_ui import (
     parse_paths,
     rerun_from_trace,
     resolve_trace_path,
+    safe_upload_path,
     safe_upload_filename,
     save_uploaded_files,
+    summarize_trace_rows,
 )
 
 
@@ -132,6 +134,35 @@ class ProductMatterTests(unittest.TestCase):
     def test_safe_upload_filename_removes_path_and_control_chars(self) -> None:
         self.assertEqual(safe_upload_filename(r"..\folder/bad:name?.txt"), "bad-name-.txt")
 
+    def test_safe_upload_path_preserves_sanitized_subfolders(self) -> None:
+        self.assertEqual(
+            safe_upload_path(r"matter docs\sub/folder/bad:name?.txt"),
+            Path("matter docs") / "sub" / "folder" / "bad-name-.txt",
+        )
+        self.assertEqual(safe_upload_path("../outside/contract.txt"), Path("outside") / "contract.txt")
+
+    def test_save_uploaded_files_preserves_directory_upload_paths(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            uploads = [
+                {
+                    "filename": "agreement.txt",
+                    "relative_path": "deal folder/sub/agreement.txt",
+                    "content_base64": base64.b64encode(b"notice and cure").decode("ascii"),
+                },
+                {
+                    "filename": "agreement.txt",
+                    "relative_path": "deal folder/sub/agreement.txt",
+                    "content_base64": base64.b64encode(b"second copy").decode("ascii"),
+                },
+            ]
+
+            paths = save_uploaded_files(uploads, upload_root=root / "uploads")
+
+            self.assertEqual(paths[0].relative_to(root / "uploads"), Path("deal folder") / "sub" / "agreement.txt")
+            self.assertEqual(paths[1].relative_to(root / "uploads"), Path("deal folder") / "sub" / "agreement-2.txt")
+            self.assertEqual(paths[0].read_text(encoding="utf-8"), "notice and cure")
+
     def test_product_ui_renders_answer_markdown_online(self) -> None:
         self.assertIn('class="answer" id="answer"', INDEX_HTML)
         self.assertIn("function renderMarkdown", INDEX_HTML)
@@ -142,6 +173,9 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn("function renderChatHistory", INDEX_HTML)
         self.assertIn('id="traceList"', INDEX_HTML)
         self.assertIn("/api/traces", INDEX_HTML)
+        self.assertIn('id="matterCost"', INDEX_HTML)
+        self.assertIn('id="matterMessages"', INDEX_HTML)
+        self.assertIn("webkitdirectory", INDEX_HTML)
 
     def test_list_product_traces_filters_by_matter_and_chat(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -177,6 +211,20 @@ class ProductMatterTests(unittest.TestCase):
             self.assertEqual(len(side_rows), 1)
             self.assertEqual(side_rows[0]["chat_id"], "side")
             self.assertTrue(Path(side_rows[0]["path"]).exists())
+
+    def test_summarize_trace_rows_reports_matter_cost(self) -> None:
+        summary = summarize_trace_rows(
+            [
+                {"chat_id": "main", "estimated_cost": 0.25, "total_tokens": 10},
+                {"chat_id": "side", "estimated_cost": 0.75, "total_tokens": 30},
+            ]
+        )
+
+        self.assertEqual(summary["messages"], 2)
+        self.assertEqual(summary["chats"], 2)
+        self.assertEqual(summary["total_tokens"], 40)
+        self.assertAlmostEqual(summary["estimated_cost"], 1.0)
+        self.assertAlmostEqual(summary["average_cost_per_message"], 0.5)
 
     def test_rerun_from_trace_links_parent_and_nudge(self) -> None:
         with TemporaryDirectory() as tmp:

@@ -65,14 +65,25 @@ def build_handler(
             if parsed.path == "/api/traces":
                 query = parse_qs(parsed.query)
                 try:
+                    matter_id = query.get("matter_id", [""])[0]
+                    chat_id = query.get("chat_id", [""])[0]
+                    limit = int(query.get("limit", ["100"])[0] or "100")
+                    traces = list_product_traces(
+                        trace_dir,
+                        matter_id=matter_id,
+                        chat_id=chat_id,
+                        limit=limit,
+                    )
+                    matter_traces = list_product_traces(
+                        trace_dir,
+                        matter_id=matter_id,
+                        limit=10_000,
+                    ) if matter_id else traces
                     self.send_json(
                         {
-                            "traces": list_product_traces(
-                                trace_dir,
-                                matter_id=query.get("matter_id", [""])[0],
-                                chat_id=query.get("chat_id", [""])[0],
-                                limit=int(query.get("limit", ["100"])[0] or "100"),
-                            )
+                            "traces": traces,
+                            "summary": summarize_trace_rows(traces),
+                            "matter_summary": summarize_trace_rows(matter_traces),
                         }
                     )
                 except Exception as exc:  # noqa: BLE001 - UI endpoint should return structured error.
@@ -287,6 +298,19 @@ def list_product_traces(
     return rows
 
 
+def summarize_trace_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    chat_ids = {str(row.get("chat_id") or "main") for row in rows}
+    total_tokens = sum(int(row.get("total_tokens") or 0) for row in rows)
+    estimated_cost = sum(float(row.get("estimated_cost") or 0.0) for row in rows)
+    return {
+        "messages": len(rows),
+        "chats": len(chat_ids),
+        "total_tokens": total_tokens,
+        "estimated_cost": estimated_cost,
+        "average_cost_per_message": estimated_cost / len(rows) if rows else 0.0,
+    }
+
+
 def resolve_trace_path(raw_path: str, trace_dir: str | Path) -> Path:
     root = Path(trace_dir).resolve()
     path = Path(raw_path)
@@ -309,17 +333,21 @@ def save_uploaded_files(raw_uploads: Any, *, upload_root: str | Path) -> list[Pa
     for index, item in enumerate(raw_uploads, 1):
         if not isinstance(item, dict):
             raise ValueError("each upload must be an object")
-        filename = safe_upload_filename(str(item.get("filename") or f"upload-{index}.txt"))
+        upload_path = safe_upload_path(
+            str(item.get("relative_path") or item.get("filename") or f"upload-{index}.txt")
+        )
+        if not upload_path.name:
+            upload_path = Path(safe_upload_filename(str(item.get("filename") or f"upload-{index}.txt")))
         encoded = str(item.get("content_base64") or "")
         if not encoded:
-            raise ValueError(f"upload {filename} is missing content_base64")
+            raise ValueError(f"upload {upload_path} is missing content_base64")
         try:
             data = base64.b64decode(encoded, validate=True)
         except Exception as exc:  # noqa: BLE001 - normalize base64 parser errors.
-            raise ValueError(f"upload {filename} is not valid base64") from exc
+            raise ValueError(f"upload {upload_path} is not valid base64") from exc
         if len(data) > MAX_UPLOAD_BYTES:
-            raise ValueError(f"upload {filename} exceeds {MAX_UPLOAD_BYTES} bytes")
-        target = unique_upload_path(root, filename)
+            raise ValueError(f"upload {upload_path} exceeds {MAX_UPLOAD_BYTES} bytes")
+        target = unique_upload_path(root / upload_path.parent, upload_path.name)
         target.write_bytes(data)
         paths.append(target)
     return paths
@@ -331,7 +359,22 @@ def safe_upload_filename(filename: str) -> str:
     return cleaned[:120] or "upload.txt"
 
 
+def safe_upload_path(raw_path: str) -> Path:
+    raw = str(raw_path or "").replace("\\", "/")
+    parts: list[str] = []
+    for part in raw.split("/"):
+        if not part or part in {".", ".."}:
+            continue
+        safe = safe_upload_filename(part)
+        if safe:
+            parts.append(safe)
+    if not parts:
+        return Path("upload.txt")
+    return Path(*parts[-8:])
+
+
 def unique_upload_path(root: Path, filename: str) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
     target = root / filename
     if not target.exists():
         return target
@@ -544,6 +587,8 @@ INDEX_HTML = r"""<!doctype html>
       <textarea id="paths" spellcheck="false"></textarea>
       <label for="files">Corpus Files</label>
       <input id="files" type="file" multiple />
+      <label for="folders">Corpus Folders</label>
+      <input id="folders" type="file" webkitdirectory directory multiple />
       <div class="row">
         <label class="toggle"><input id="live" type="checkbox" /> Live synthesis</label>
         <input id="topk" type="number" min="1" max="50" value="12" />
@@ -560,7 +605,9 @@ INDEX_HTML = r"""<!doctype html>
         <div class="metric"><b>Documents</b><span id="docCount">0</span></div>
         <div class="metric"><b>Chunks</b><span id="chunkCount">0</span></div>
         <div class="metric"><b>Tokens</b><span id="tokens">0</span></div>
-        <div class="metric"><b>Cost</b><span id="cost">$0.00</span></div>
+        <div class="metric"><b>Message Cost</b><span id="cost">$0.00</span></div>
+        <div class="metric"><b>Matter Cost</b><span id="matterCost">$0.00</span></div>
+        <div class="metric"><b>Matter Messages</b><span id="matterMessages">0</span></div>
       </div>
       <h2>Answer</h2>
       <div class="answer" id="answer"></div>
@@ -581,6 +628,8 @@ INDEX_HTML = r"""<!doctype html>
       <textarea id="rerunPaths"></textarea>
       <label for="rerunFiles">Additional Corpus Files</label>
       <input id="rerunFiles" type="file" multiple />
+      <label for="rerunFolders">Additional Corpus Folders</label>
+      <input id="rerunFolders" type="file" webkitdirectory directory multiple />
       <div class="row">
         <button class="secondary" id="rerunTrace">Rerun</button>
       </div>
@@ -613,12 +662,14 @@ INDEX_HTML = r"""<!doctype html>
     $("clear").addEventListener("click", () => {
       $("objective").value = "";
       $("files").value = "";
+      $("folders").value = "";
       $("answer").innerHTML = "";
       $("chatHistory").innerHTML = "";
       $("tracepath").value = "";
       $("nudge").value = "";
       $("rerunPaths").value = "";
       $("rerunFiles").value = "";
+      $("rerunFolders").value = "";
       $("diagnosis").innerHTML = "";
       $("traceList").innerHTML = "";
       $("comparison").innerHTML = "";
@@ -633,7 +684,10 @@ INDEX_HTML = r"""<!doctype html>
       run.disabled = true;
       status.textContent = "Running";
       try {
-        const uploads = await readUploads($("files").files);
+        const uploads = [
+          ...(await readUploads($("files").files)),
+          ...(await readUploads($("folders").files))
+        ];
         const response = await fetch("/api/run", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
@@ -651,6 +705,7 @@ INDEX_HTML = r"""<!doctype html>
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || "Run failed");
         render(data);
+        await refreshTraceList({setStatus: false});
         status.textContent = data.trace_path;
         $("tracepath").value = data.trace_path || "";
       } catch (error) {
@@ -667,6 +722,7 @@ INDEX_HTML = r"""<!doctype html>
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || "Trace load failed");
         render(data);
+        await refreshTraceList({setStatus: false});
         status.textContent = $("tracepath").value;
       } catch (error) {
         status.textContent = error.message;
@@ -678,13 +734,7 @@ INDEX_HTML = r"""<!doctype html>
       listTraces.disabled = true;
       status.textContent = "Listing traces";
       try {
-        const url = "/api/traces?matter_id=" + encodeURIComponent($("matter").value) +
-          "&chat_id=" + encodeURIComponent($("chat").value);
-        const response = await fetch(url);
-        const data = await response.json();
-        if (!response.ok || data.error) throw new Error(data.error || "Trace list failed");
-        $("traceList").innerHTML = renderTraceList(data.traces || []);
-        status.textContent = `${(data.traces || []).length} traces`;
+        await refreshTraceList({setStatus: true});
       } catch (error) {
         status.textContent = error.message;
       } finally {
@@ -695,7 +745,10 @@ INDEX_HTML = r"""<!doctype html>
       rerunTrace.disabled = true;
       status.textContent = "Rerunning";
       try {
-        const uploads = await readUploads($("rerunFiles").files);
+        const uploads = [
+          ...(await readUploads($("rerunFiles").files)),
+          ...(await readUploads($("rerunFolders").files))
+        ];
         const response = await fetch("/api/rerun", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
@@ -712,6 +765,7 @@ INDEX_HTML = r"""<!doctype html>
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || "Rerun failed");
         render(data);
+        await refreshTraceList({setStatus: false});
         status.textContent = data.trace_path;
         $("tracepath").value = data.trace_path || "";
       } catch (error) {
@@ -728,6 +782,7 @@ INDEX_HTML = r"""<!doctype html>
         const comma = dataUrl.indexOf(",");
         uploads.push({
           filename: file.name,
+          relative_path: file.webkitRelativePath || file.name,
           content_base64: comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl
         });
       }
@@ -754,6 +809,7 @@ INDEX_HTML = r"""<!doctype html>
       $("chunkCount").textContent = String((trace.chunks || []).length);
       $("tokens").textContent = String(metrics.total_tokens || 0);
       $("cost").textContent = "$" + Number(metrics.estimated_cost || 0).toFixed(4);
+      if (data.matter_summary) renderCostSummary(data.matter_summary);
       const metadata = ((trace.task || {}).metadata || {});
       $("matter").value = metadata.matter_id || (trace.task || {}).task_id || $("matter").value;
       $("chat").value = metadata.chat_id || $("chat").value || "main";
@@ -788,6 +844,21 @@ INDEX_HTML = r"""<!doctype html>
         "Section " + (item.section_index || ""),
         (item.answer_excerpt || "") + "\n" + JSON.stringify(item.source_refs || [], null, 2)
       )).join("");
+    }
+    async function refreshTraceList({setStatus = false} = {}) {
+      const url = "/api/traces?matter_id=" + encodeURIComponent($("matter").value) +
+        "&chat_id=" + encodeURIComponent($("chat").value);
+      const response = await fetch(url);
+      const data = await response.json();
+      if (!response.ok || data.error) throw new Error(data.error || "Trace list failed");
+      $("traceList").innerHTML = renderTraceList(data.traces || []);
+      renderCostSummary(data.matter_summary || data.summary || {});
+      if (setStatus) status.textContent = `${(data.traces || []).length} traces`;
+      return data;
+    }
+    function renderCostSummary(summary) {
+      $("matterCost").textContent = "$" + Number(summary.estimated_cost || 0).toFixed(4);
+      $("matterMessages").textContent = String(summary.messages || 0);
     }
     function card(title, body) {
       return `<div class="item"><strong>${escapeHtml(title)}</strong><small><pre>${escapeHtml(body || "")}</pre></small></div>`;
