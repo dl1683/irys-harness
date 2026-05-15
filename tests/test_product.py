@@ -402,6 +402,7 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn("Applying your steering note.", INDEX_HTML)
         self.assertIn("Your instruction:", INDEX_HTML)
         self.assertIn("Source plan:", INDEX_HTML)
+        self.assertIn("Error:", INDEX_HTML)
         self.assertIn("Reading first:", INDEX_HTML)
         self.assertIn("Held back for now:", INDEX_HTML)
         self.assertIn("function formatSourceSelectionMode", INDEX_HTML)
@@ -556,6 +557,59 @@ class ProductMatterTests(unittest.TestCase):
             self.assertIn("SAVE", labels)
             summaries = [event.get("fields", {}).get("summary", "") for event in status["events"]]
             self.assertTrue(any("Reading document" in summary for summary in summaries))
+
+    def test_async_run_endpoint_streams_readable_failure_event(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            unsupported = root / "archive.bin"
+            unsupported.write_bytes(b"not a supported matter file")
+            trace_dir = root / "traces"
+            output_dir = root / "outputs"
+            handler = build_handler(
+                config=load_config(),
+                trace_dir=trace_dir,
+                output_dir=output_dir,
+            )
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/run-async",
+                    data=json.dumps(
+                        {
+                            "matter_id": "Bad Matter",
+                            "paths": [str(unsupported)],
+                            "objective": "What does this say?",
+                            "live_synthesis": False,
+                        }
+                    ).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(request, timeout=5) as response:  # noqa: S310 - local test server.
+                    started = json.loads(response.read().decode("utf-8"))
+
+                status = started
+                for _ in range(20):
+                    with urlopen(  # noqa: S310 - local test server.
+                        f"http://127.0.0.1:{server.server_port}/api/run-status?job_id={started['job_id']}",
+                        timeout=5,
+                    ) as response:
+                        status = json.loads(response.read().decode("utf-8"))
+                    if status["status"] != "running":
+                        break
+                    time.sleep(0.05)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            self.assertEqual(status["status"], "failed")
+            error_events = [event for event in status["events"] if event["label"] == "ERROR"]
+            self.assertTrue(error_events)
+            self.assertEqual(error_events[-1]["fields"]["summary"], "The run failed before completion.")
+            self.assertIn("at least one supported document path is required", error_events[-1]["fields"]["error"])
 
     def test_list_product_traces_filters_by_matter_and_chat(self) -> None:
         with TemporaryDirectory() as tmp:

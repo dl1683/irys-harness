@@ -352,7 +352,14 @@ def start_product_run_job(
                     RUN_JOBS[job_id]["status"] = "canceled"
                     RUN_JOBS[job_id]["error"] = str(exc)
                 return
-            append_run_job_event(job_id, "ERROR", "product matter run failed", error=error)
+            append_run_job_event(
+                job_id,
+                "ERROR",
+                "product matter run failed",
+                error=error,
+                summary="The run failed before completion.",
+                next_step="Review the error, adjust the corpus or objective, then run again.",
+            )
             with RUN_JOBS_LOCK:
                 RUN_JOBS[job_id]["status"] = "failed"
                 RUN_JOBS[job_id]["error"] = error
@@ -2053,6 +2060,8 @@ INDEX_HTML = r"""<!doctype html>
       if (fields.chunk_count !== undefined) lines.push(`Chunks from this document: ${fields.chunk_count}`);
       if (fields.text_chars !== undefined) lines.push(`Extracted characters: ${fields.text_chars}`);
       if (fields.load_error) lines.push(`Load issue: ${fields.load_error}`);
+      if (fields.error) lines.push(`Error: ${fields.error}`);
+      if (fields.detail) lines.push(`Detail: ${fields.detail}`);
       if (fields.user_nudge) lines.push(`Your instruction: ${fields.user_nudge}`);
       if (fields.source_selection_mode) lines.push(`Source plan: ${formatSourceSelectionMode(fields.source_selection_mode)}`);
       if (fields.reason) lines.push(`Why: ${fields.reason}`);
