@@ -910,6 +910,37 @@ INDEX_HTML = r"""<!doctype html>
       line-height: 1.45;
     }
     .guide-steps li { margin: 4px 0; }
+    .timeline {
+      display: grid;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .timeline-step {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px 10px;
+      background: #fff;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .timeline-step b {
+      display: block;
+      color: var(--ink);
+      font-size: 13px;
+      margin-bottom: 2px;
+    }
+    .timeline-step.done {
+      border-color: #b8d8c2;
+      background: #f3fbf5;
+    }
+    .timeline-step.active {
+      border-color: #9fc2e8;
+      background: #f2f8ff;
+    }
+    .timeline-step.error {
+      border-color: #e1a1a1;
+      background: #fff5f5;
+    }
     .control-help {
       margin-top: 10px;
       background: #f7f9fb;
@@ -1072,6 +1103,7 @@ INDEX_HTML = r"""<!doctype html>
     </section>
     <section>
       <h2>Workstream</h2>
+      <div class="timeline" id="runTimeline"></div>
       <div class="item" id="currentStep"><strong>Idle</strong><small>No run has started.</small></div>
       <h2 style="margin-top:16px">What Irys Is Doing</h2>
       <div class="list" id="liveEvents"></div>
@@ -1171,6 +1203,7 @@ INDEX_HTML = r"""<!doctype html>
       pinnedSourcePaths = [];
       $("diagnosis").innerHTML = "";
       $("currentStep").innerHTML = "<strong>Idle</strong><small>No run has started.</small>";
+      $("runTimeline").innerHTML = "";
       $("liveEvents").innerHTML = "";
       $("sourceSummary").innerHTML = "";
       $("pinnedSources").innerHTML = "";
@@ -2078,14 +2111,45 @@ INDEX_HTML = r"""<!doctype html>
     function renderLiveEvents(events) {
       if (!Array.isArray(events) || !events.length) {
         $("liveEvents").innerHTML = "";
+        $("runTimeline").innerHTML = "";
         $("currentStep").innerHTML = "<strong>Idle</strong><small>No run has started.</small>";
         if (currentPlan) renderRunBrief({plan: currentPlan});
         return;
       }
       const latest = events[events.length - 1] || {};
+      $("runTimeline").innerHTML = renderRunTimeline(events);
       $("currentStep").innerHTML = renderCurrentStep(latest);
       $("liveEvents").innerHTML = events.slice(-30).map(renderUserEvent).join("");
       renderRunBrief({plan: currentPlan, events});
+    }
+    function renderRunTimeline(events) {
+      const stages = [
+        {key: "scope", title: "Select sources", detail: "Choose the first documents to read.", labels: ["SCOPE", "STEER"]},
+        {key: "read", title: "Read documents", detail: "Extract text and chunks from the active corpus.", labels: ["READ", "LOAD"]},
+        {key: "plan", title: "Plan answer", detail: "Clarify the answer target and search needs.", labels: ["PLAN", "CONTRACT"]},
+        {key: "search", title: "Find evidence", detail: "Search for relevant passages and source support.", labels: ["SEARCH", "EVIDENCE", "EXTRACT"]},
+        {key: "analyze", title: "Organize evidence", detail: "Use worker notes where live synthesis is enabled.", labels: ["ANALYZE"]},
+        {key: "draft", title: "Draft answer", detail: "Create the user-facing answer or work product.", labels: ["SYNTH"]},
+        {key: "save", title: "Save trace", detail: "Write the answer, artifacts, costs, and trace.", labels: ["SAVE", "DONE"]}
+      ];
+      const labelToIndex = {};
+      stages.forEach((stage, index) => stage.labels.forEach(label => { labelToIndex[label] = index; }));
+      let latestIndex = -1;
+      let hasError = false;
+      for (const event of events || []) {
+        const label = String(event.label || "EVENT");
+        if (label === "ERROR" || label === "STOP") hasError = true;
+        if (labelToIndex[label] !== undefined) latestIndex = Math.max(latestIndex, labelToIndex[label]);
+      }
+      const latestLabel = String(((events || [])[events.length - 1] || {}).label || "");
+      const activeIndex = Math.max(0, latestIndex);
+      return stages.map((stage, index) => {
+        let state = "pending";
+        if (index < activeIndex || latestLabel === "DONE") state = "done";
+        if (index === activeIndex && latestLabel !== "DONE") state = hasError ? "error" : "active";
+        const status = state === "done" ? "Done" : state === "active" ? "Now" : state === "error" ? "Needs attention" : "Waiting";
+        return `<div class="timeline-step ${state}"><b>${escapeHtml(stage.title)}</b><span>${escapeHtml(status + ": " + stage.detail)}</span></div>`;
+      }).join("");
     }
     function renderCurrentStep(event) {
       const fields = event.fields || {};
