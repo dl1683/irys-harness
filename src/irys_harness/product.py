@@ -38,6 +38,24 @@ class ProductRunCancelled(RuntimeError):
 
 
 @dataclass(frozen=True)
+class CorpusScopeDecision:
+    selected_paths: list[Path]
+    discovered_paths: list[Path]
+    reason: str
+    signals: dict[str, Any]
+    scored_paths: list[dict[str, Any]]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "selected_paths": [str(path) for path in self.selected_paths],
+            "discovered_paths": [str(path) for path in self.discovered_paths],
+            "reason": self.reason,
+            "signals": self.signals,
+            "scored_paths": self.scored_paths,
+        }
+
+
+@dataclass(frozen=True)
 class ProductRunResult:
     state: RunState
     trace_path: Path
@@ -72,6 +90,8 @@ def run_product_matter(
     verbose: bool = True,
     parent_trace_path: str | None = None,
     user_nudge: str | None = None,
+    selected_paths: list[str] | None = None,
+    plan_note: str | None = None,
     event_callback: Callable[[dict[str, Any]], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> ProductRunResult:
@@ -91,6 +111,12 @@ def run_product_matter(
     corpus_paths = discover_corpus_paths(paths, max_files=max_files)
     if not corpus_paths:
         raise ValueError("at least one supported document path is required")
+    scope_decision = plan_product_corpus_scope(
+        objective=objective,
+        paths=corpus_paths,
+        selected_paths=selected_paths,
+        plan_note=plan_note,
+    )
     emit_pre_event(
         pre_events,
         event_callback,
@@ -100,6 +126,49 @@ def run_product_matter(
         document_count=len(corpus_paths),
         sample_documents=[path.name for path in corpus_paths[:12]],
         omitted_document_count=max(0, len(corpus_paths) - 12),
+        next_step="Choose the best first-read set before extracting text.",
+    )
+    if len(scope_decision.selected_paths) < len(scope_decision.discovered_paths):
+        emit_pre_event(
+            pre_events,
+            event_callback,
+            "SCOPE",
+            "Selected first-read documents",
+            summary=(
+                f"Selected {len(scope_decision.selected_paths)} likely relevant document(s) "
+                f"before reading the full corpus."
+            ),
+            reason=scope_decision.reason,
+            selected_documents=[path.name for path in scope_decision.selected_paths[:12]],
+            omitted_document_count=max(0, len(scope_decision.selected_paths) - 12),
+            skipped_document_count=len(scope_decision.discovered_paths) - len(scope_decision.selected_paths),
+            steer_hint=(
+                "Use a steering note like 'focus on the 2024 10-K' or 'include quarterly reports too' "
+                "if this first-read set is wrong."
+            ),
+            next_step="Read only the selected first-read documents.",
+        )
+    else:
+        emit_pre_event(
+            pre_events,
+            event_callback,
+            "SCOPE",
+            "Using full corpus",
+            summary="No narrow document target was clear, so the run will read the full selected corpus.",
+            reason=scope_decision.reason,
+            next_step="Read documents and extract searchable text.",
+        )
+    active_corpus_paths = scope_decision.selected_paths
+    check_product_cancel(should_cancel)
+    emit_pre_event(
+        pre_events,
+        event_callback,
+        "SCOPE",
+        "Ready to read active corpus",
+        summary=f"Active first-read corpus: {len(active_corpus_paths)} document(s).",
+        document_count=len(active_corpus_paths),
+        sample_documents=[path.name for path in active_corpus_paths[:12]],
+        omitted_document_count=max(0, len(active_corpus_paths) - 12),
         next_step="Read documents and extract searchable text.",
     )
     check_product_cancel(should_cancel)
@@ -111,7 +180,7 @@ def run_product_matter(
         benchmark="product_matter",
         task_id=task_id,
         question=objective.strip(),
-        context_files=[str(path) for path in corpus_paths],
+        context_files=[str(path) for path in active_corpus_paths],
         answer_schema={
             "type": "product_legal_work_product",
             "requires_citations": True,
@@ -124,8 +193,11 @@ def run_product_matter(
             "live_synthesis": live_synthesis,
             "parent_trace_path": parent_trace_path,
             "user_nudge": user_nudge,
+            "plan_note": plan_note,
             "conversation_history_turns": len(normalized_history),
             "conversation_history_policy": "synthesis_only_user_question_and_final_answer",
+            "discovered_context_files": [str(path) for path in corpus_paths],
+            "corpus_scope_decision": scope_decision.to_dict(),
         },
     )
     state = RunState(task=task, config=config, output_dir=str(Path(output_dir) / task_id))
@@ -136,11 +208,11 @@ def run_product_matter(
         "started product matter run",
         matter=task_id,
         summary=f"Started matter run for {matter_id}.",
-        next_step="Read the selected corpus.",
+        next_step="Read the active first-read corpus.",
     )
 
     state.documents, state.chunks = load_documents(
-        [str(path) for path in corpus_paths],
+        [str(path) for path in active_corpus_paths],
         max_chars_per_doc=max_chars_per_doc,
         source_posture="user_provided_corpus",
         progress_callback=lambda event: log.emit(
@@ -395,6 +467,424 @@ def discover_corpus_paths(paths: list[str], *, max_files: int | None = DEFAULT_P
             if max_files is not None and len(discovered) >= max_files:
                 return discovered
     return discovered
+
+
+def plan_product_corpus_scope(
+    *,
+    objective: str,
+    paths: list[Path],
+    selected_paths: list[str] | None = None,
+    plan_note: str | None = None,
+) -> CorpusScopeDecision:
+    resolved_paths = [path.resolve() for path in paths]
+    path_by_key = {str(path).lower(): path for path in resolved_paths}
+    if selected_paths:
+        approved: list[Path] = []
+        for raw_path in selected_paths:
+            key = str(Path(raw_path).expanduser().resolve()).lower()
+            if key in path_by_key and path_by_key[key] not in approved:
+                approved.append(path_by_key[key])
+        if approved:
+            return CorpusScopeDecision(
+                selected_paths=approved,
+                discovered_paths=resolved_paths,
+                reason="User-approved first-read paths from the editable plan.",
+                signals=build_objective_profile(objective, plan_note=plan_note),
+                scored_paths=score_corpus_paths(objective, resolved_paths, plan_note=plan_note)[:40],
+            )
+
+    profile = build_objective_profile(objective, plan_note=plan_note)
+    scored = score_corpus_paths(objective, resolved_paths, plan_note=plan_note, profile=profile)
+    if not resolved_paths:
+        selected = []
+    elif profile["force_full_corpus"]:
+        selected = resolved_paths
+    else:
+        selected = select_first_read_paths(scored, total_paths=len(resolved_paths), profile=profile)
+    if not selected:
+        selected = resolved_paths
+    if len(selected) == len(resolved_paths):
+        reason = "No confident narrow first-read set was inferable from the objective and corpus structure."
+    else:
+        reason = explain_scope_reason(profile, selected, len(resolved_paths))
+    return CorpusScopeDecision(
+        selected_paths=selected,
+        discovered_paths=resolved_paths,
+        reason=reason,
+        signals=profile,
+        scored_paths=scored[:80],
+    )
+
+
+def build_product_plan_preview(
+    *,
+    objective: str,
+    paths: list[str],
+    max_files: int | None = DEFAULT_PRODUCT_MAX_FILES,
+    selected_paths: list[str] | None = None,
+    plan_note: str | None = None,
+    top_k: int = 12,
+) -> dict[str, Any]:
+    corpus_paths = discover_corpus_paths(paths, max_files=max_files)
+    if not corpus_paths:
+        raise ValueError("at least one supported document path is required")
+    scope = plan_product_corpus_scope(
+        objective=objective,
+        paths=corpus_paths,
+        selected_paths=selected_paths,
+        plan_note=plan_note,
+    )
+    profile = scope.signals
+    return {
+        "objective": objective.strip(),
+        "plan_note": plan_note or "",
+        "interpreted_goal": objective.strip(),
+        "document_strategy": scope.reason,
+        "first_read_paths": [str(path) for path in scope.selected_paths],
+        "first_read_count": len(scope.selected_paths),
+        "discovered_count": len(scope.discovered_paths),
+        "not_read_first_count": max(0, len(scope.discovered_paths) - len(scope.selected_paths)),
+        "likely_document_families": profile.get("requested_families", []),
+        "detected_years": profile.get("years", []),
+        "needed_information": infer_needed_information(profile),
+        "search_queries": build_path_level_queries(objective, profile),
+        "top_candidates": scope.scored_paths[:20],
+        "retrieval": {"top_k": top_k},
+    }
+
+
+def build_objective_profile(objective: str, *, plan_note: str | None = None) -> dict[str, Any]:
+    combined = f"{objective}\n{plan_note or ''}"
+    lowered = combined.lower()
+    tokens = tokenize(combined)
+    years = sorted({int(match) for match in re.findall(r"\b(?:19|20)\d{2}\b", combined)})
+    requested_families = infer_requested_document_families(lowered, tokens)
+    return {
+        "tokens": tokens,
+        "years": years,
+        "requested_families": requested_families,
+        "force_full_corpus": any(
+            phrase in lowered
+            for phrase in [
+                "all documents",
+                "all files",
+                "entire corpus",
+                "everything",
+                "read all",
+                "whole folder",
+            ]
+        ),
+        "has_focus_language": any(term in lowered for term in ["focus", "only", "first", "start with", "prioritize"]),
+        "raw": combined,
+    }
+
+
+def infer_requested_document_families(lowered: str, tokens: list[str]) -> list[str]:
+    families: list[str] = []
+    token_set = set(tokens)
+    family_terms = [
+        (
+            "annual_report",
+            {
+                "10-k",
+                "10k",
+                "annual",
+                "fiscal",
+                "fy",
+                "eps",
+                "earnings",
+                "revenue",
+                "income",
+                "profit",
+                "loss",
+                "shares",
+                "stockholder",
+                "stockholders",
+            },
+        ),
+        ("quarterly_report", {"10-q", "10q", "quarter", "quarterly", "q1", "q2", "q3", "q4"}),
+        ("current_report", {"8-k", "8k", "current", "event", "press", "release", "announced"}),
+        (
+            "agreement",
+            {
+                "agreement",
+                "contract",
+                "amendment",
+                "clause",
+                "msa",
+                "lease",
+                "credit",
+                "loan",
+                "indenture",
+                "guaranty",
+                "warranty",
+                "termination",
+                "indemnity",
+                "indemnification",
+                "covenant",
+            },
+        ),
+        ("governance", {"board", "minutes", "consent", "resolution", "charter", "bylaws", "governance"}),
+        ("table_or_workbook", {"schedule", "spreadsheet", "table", "xlsx", "workbook", "ledger", "list"}),
+        (
+            "research_paper",
+            {
+                "abstract",
+                "article",
+                "biomedical",
+                "clinical",
+                "cohort",
+                "conclusion",
+                "doi",
+                "experiment",
+                "finding",
+                "journal",
+                "literature",
+                "method",
+                "methods",
+                "paper",
+                "papers",
+                "publication",
+                "research",
+                "result",
+                "results",
+                "study",
+                "trial",
+            },
+        ),
+        (
+            "regulatory_or_policy",
+            {
+                "policy",
+                "regulation",
+                "regulatory",
+                "rule",
+                "guidance",
+                "notice",
+                "order",
+                "statute",
+                "section",
+                "agency",
+            },
+        ),
+        (
+            "litigation",
+            {
+                "complaint",
+                "motion",
+                "brief",
+                "deposition",
+                "exhibit",
+                "filing",
+                "docket",
+                "declaration",
+                "affidavit",
+                "transcript",
+            },
+        ),
+        ("email", {"email", "eml", "message", "correspondence"}),
+        ("presentation", {"presentation", "deck", "slides", "pptx"}),
+    ]
+    for family, hints in family_terms:
+        if token_set & hints or any(hint in lowered for hint in hints if "-" in hint):
+            families.append(family)
+    return families
+
+
+def infer_needed_information(profile: dict[str, Any]) -> list[str]:
+    families = set(profile.get("requested_families", []))
+    items = ["the user's requested answer", "the most likely source documents", "supporting source excerpts"]
+    if "annual_report" in families or "quarterly_report" in families:
+        items.extend(["the relevant reporting period", "the requested financial metric", "the source table or note"])
+    if "agreement" in families:
+        items.extend(["the controlling provision", "any exceptions or amendments", "the applicable party or obligation"])
+    if "governance" in families:
+        items.extend(["the relevant board action", "date and authority", "supporting minutes, consent, or charter text"])
+    if "research_paper" in families:
+        items.extend(["the relevant paper or study", "the method or population", "the finding or conclusion"])
+    if "regulatory_or_policy" in families:
+        items.extend(["the controlling rule or policy", "the applicable section", "exceptions or effective dates"])
+    if "litigation" in families:
+        items.extend(["the relevant filing or exhibit", "the procedural posture", "the specific factual or legal assertion"])
+    return list(dict.fromkeys(items))
+
+
+def build_path_level_queries(objective: str, profile: dict[str, Any]) -> list[str]:
+    queries = [objective.strip(), " ".join(profile.get("tokens", []))]
+    families = profile.get("requested_families", [])
+    years = " ".join(str(year) for year in profile.get("years", []))
+    if families:
+        queries.append(" ".join(families + ([years] if years else [])))
+    return [query for query in queries if query.strip()]
+
+
+def score_corpus_paths(
+    objective: str,
+    paths: list[Path],
+    *,
+    plan_note: str | None = None,
+    profile: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    profile = profile or build_objective_profile(objective, plan_note=plan_note)
+    fiscal_year_by_accession = infer_sec_report_years_from_indices(paths)
+    rows = [score_one_path(path, profile, fiscal_year_by_accession) for path in paths]
+    return sorted(rows, key=lambda row: (-int(row["score"]), str(row["path"]).lower()))
+
+
+def score_one_path(
+    path: Path,
+    profile: dict[str, Any],
+    fiscal_year_by_accession: dict[str, int],
+) -> dict[str, Any]:
+    path_text = normalize_path_text(path)
+    filename = path.name.lower()
+    tokens = [token for token in profile.get("tokens", []) if len(token) >= 3]
+    years = list(profile.get("years", []))
+    families = list(profile.get("requested_families", []))
+    score = 0
+    reasons: list[str] = []
+
+    matched_tokens = [token for token in tokens if token in path_text]
+    if matched_tokens:
+        score += min(12, len(set(matched_tokens)) * 2)
+        reasons.append(f"path matched query terms: {', '.join(sorted(set(matched_tokens))[:6])}")
+
+    family_score = score_path_family(path_text, families)
+    if family_score:
+        score += family_score
+        reasons.append("path matched likely document family")
+
+    if years:
+        path_years = {int(match) for match in re.findall(r"\b(?:19|20)\d{2}\b", path_text)}
+        matched_years = sorted(set(years) & path_years)
+        if matched_years:
+            score += 8 * len(matched_years)
+            reasons.append(f"path matched year(s): {', '.join(str(year) for year in matched_years)}")
+        accession = accession_from_path(path)
+        fiscal_year = fiscal_year_by_accession.get(accession or "")
+        if fiscal_year and fiscal_year in years:
+            score += 22
+            reasons.append(f"index maps accession to fiscal/report year {fiscal_year}")
+        if "annual_report" in families and any(year + 1 in path_years for year in years):
+            score += 7
+            reasons.append("annual report filing date may follow the fiscal year")
+
+    if filename in {"index.md", "index.csv"}:
+        score += 3
+        reasons.append("index file can explain the folder structure")
+        if families and not any(family in {"table_or_workbook"} for family in families):
+            score -= 2
+
+    return {
+        "path": str(path),
+        "filename": path.name,
+        "score": score,
+        "reasons": reasons or ["no strong path-level match"],
+    }
+
+
+def score_path_family(path_text: str, families: list[str]) -> int:
+    score = 0
+    family_path_terms = {
+        "annual_report": ["10-k", "10_k", "10k", "annual-report", "annual-reports", "annual reports"],
+        "quarterly_report": ["10-q", "10_q", "10q", "quarterly", "quarterly-results"],
+        "current_report": ["8-k", "8_k", "8k", "news-release", "news-releases", "press-release"],
+        "agreement": ["agreement", "agreements", "contract", "contracts", "amendment", "guaranty", "lease"],
+        "governance": ["board", "minutes", "consent", "charter", "bylaws", "governance"],
+        "table_or_workbook": ["schedule", "table", "workbook", "spreadsheet", ".xlsx", ".xlsm", ".csv"],
+        "research_paper": [
+            "paper",
+            "papers",
+            "research",
+            "study",
+            "studies",
+            "journal",
+            "article",
+            "clinical",
+            "trial",
+            "biomedical",
+            "abstract",
+            "methods",
+            "results",
+        ],
+        "regulatory_or_policy": ["policy", "regulation", "regulatory", "rule", "guidance", "notice", "order", "statute"],
+        "litigation": ["complaint", "motion", "brief", "deposition", "exhibit", "filing", "docket", "transcript"],
+        "email": [".eml", "email", "correspondence"],
+        "presentation": [".pptx", "presentation", "deck", "slides"],
+    }
+    for family in families:
+        terms = family_path_terms.get(family, [])
+        if any(term in path_text for term in terms):
+            score += 14
+    return score
+
+
+def select_first_read_paths(
+    scored: list[dict[str, Any]],
+    *,
+    total_paths: int,
+    profile: dict[str, Any],
+) -> list[Path]:
+    if not scored:
+        return []
+    top_score = int(scored[0]["score"])
+    if top_score < 10:
+        return []
+    focused = bool(profile.get("has_focus_language") or profile.get("years") or profile.get("requested_families"))
+    if not focused and total_paths <= 12:
+        return [Path(str(row["path"])) for row in scored]
+    floor = max(8, top_score - 8)
+    limit = 18 if focused else 30
+    selected_rows = [row for row in scored if int(row["score"]) >= floor and int(row["score"]) > 0]
+    if not selected_rows:
+        selected_rows = [scored[0]]
+    selected_rows = selected_rows[:limit]
+    return [Path(str(row["path"])) for row in selected_rows]
+
+
+def explain_scope_reason(profile: dict[str, Any], selected: list[Path], total_paths: int) -> str:
+    parts = []
+    families = profile.get("requested_families") or []
+    years = profile.get("years") or []
+    if families:
+        parts.append("matched likely document family: " + ", ".join(families))
+    if years:
+        parts.append("matched requested year(s): " + ", ".join(str(year) for year in years))
+    if not parts:
+        parts.append("matched objective terms in the corpus structure")
+    return f"{'; '.join(parts)}. First-read set is {len(selected)} of {total_paths} discovered document(s)."
+
+
+def normalize_path_text(path: Path) -> str:
+    text = str(path).lower().replace("\\", "/")
+    return re.sub(r"[_\s]+", "-", text)
+
+
+def accession_from_path(path: Path) -> str | None:
+    match = re.search(r"\b\d{10}-\d{2}-\d{6}\b", path.name)
+    return match.group(0) if match else None
+
+
+def infer_sec_report_years_from_indices(paths: list[Path]) -> dict[str, int]:
+    index_paths = [
+        path
+        for path in paths
+        if path.name.lower() == "index.md" and any(segment.lower() in {"10-k", "10-q"} for segment in path.parts)
+    ]
+    report_years: dict[str, int] = {}
+    for index_path in index_paths[:20]:
+        try:
+            text = index_path.read_text(encoding="utf-8", errors="replace")[:200_000]
+        except OSError:
+            continue
+        for line in text.splitlines():
+            accession_match = re.search(r"\b\d{10}-\d{2}-\d{6}\b", line)
+            if not accession_match:
+                continue
+            date_match = re.search(r"(?:19|20)\d{2}(?:1231|0630|0930|0331)", line)
+            if date_match:
+                report_years[accession_match.group(0)] = int(date_match.group(0)[:4])
+    return report_years
 
 
 def sanitize_matter_id(value: str) -> str:

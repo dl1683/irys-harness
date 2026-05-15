@@ -11,7 +11,13 @@ from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 from .config import HarnessConfig
-from .product import ProductRunCancelled, compare_product_traces, run_product_matter, sanitize_matter_id
+from .product import (
+    ProductRunCancelled,
+    build_product_plan_preview,
+    compare_product_traces,
+    run_product_matter,
+    sanitize_matter_id,
+)
 from .trace import load_trace, trace_summary
 
 
@@ -103,6 +109,7 @@ def build_handler(
         def do_POST(self) -> None:  # noqa: N802 - stdlib handler API.
             parsed = urlparse(self.path)
             if parsed.path not in {
+                "/api/plan",
                 "/api/run",
                 "/api/run-async",
                 "/api/rerun",
@@ -125,6 +132,18 @@ def build_handler(
                                 initial_dir=str(payload.get("initial_dir") or ""),
                             )
                         }
+                    )
+                    return
+                if parsed.path == "/api/plan":
+                    self.send_json(
+                        build_product_plan_preview(
+                            objective=str(payload.get("objective", "")),
+                            paths=parse_paths(payload.get("paths", [])),
+                            max_files=parse_optional_int(payload.get("max_files")),
+                            selected_paths=parse_paths(payload.get("selected_paths", [])) or None,
+                            plan_note=str(payload.get("plan_note") or ""),
+                            top_k=int(payload.get("top_k", 12) or 12),
+                        )
                     )
                     return
                 if parsed.path == "/api/run-async":
@@ -172,6 +191,8 @@ def build_handler(
                     live_synthesis=bool(payload.get("live_synthesis", False)),
                     top_k=int(payload.get("top_k", 12) or 12),
                     max_files=parse_optional_int(payload.get("max_files")),
+                    selected_paths=parse_paths(payload.get("selected_paths", [])) or None,
+                    plan_note=str(payload.get("plan_note") or ""),
                     verbose=False,
                 )
                 response = result.to_dict()
@@ -280,6 +301,8 @@ def start_product_run_job(
                     verbose=False,
                     event_callback=event_callback,
                     should_cancel=should_cancel,
+                    selected_paths=parse_paths(payload.get("selected_paths", [])) or None,
+                    plan_note=str(payload.get("plan_note") or ""),
                 )
                 response = result.to_dict()
                 response["summary"] = trace_summary(result.state.to_trace())
@@ -420,7 +443,11 @@ def rerun_from_trace(
     nudge = str(payload.get("nudge") or "").strip()
     if not nudge:
         raise ValueError("nudge is required")
-    paths = [str(item) for item in task.get("context_files", []) if str(item).strip()]
+    paths = [
+        str(item)
+        for item in (metadata.get("discovered_context_files") or task.get("context_files", []))
+        if str(item).strip()
+    ]
     if not paths:
         raise ValueError("parent trace does not contain context_files")
     base_matter_id = str(metadata.get("matter_id") or task.get("task_id") or "matter")
@@ -429,6 +456,7 @@ def rerun_from_trace(
     matter_id = sanitize_matter_id(f"{base_matter_id}-nudge-{suffix}")
     paths.extend(parse_paths(payload.get("paths", [])))
     objective = f"{original_objective}\n\nUser steering note: {nudge}"
+    plan_note = str(payload.get("plan_note") or nudge)
     result = run_product_matter(
         objective=objective,
         paths=paths,
@@ -444,6 +472,8 @@ def rerun_from_trace(
         verbose=False,
         parent_trace_path=str(parent_path),
         user_nudge=nudge,
+        selected_paths=parse_paths(payload.get("selected_paths", [])) or None,
+        plan_note=plan_note,
         event_callback=event_callback,
         should_cancel=should_cancel,
     )
@@ -738,6 +768,31 @@ INDEX_HTML = r"""<!doctype html>
       color: var(--muted);
       margin-top: 4px;
     }
+    .hint {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+      margin-top: 6px;
+    }
+    .empty {
+      color: var(--muted);
+      font-size: 13px;
+      border: 1px dashed var(--line);
+      border-radius: 6px;
+      padding: 10px;
+      background: #fff;
+    }
+    details {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 10px;
+      background: #fff;
+    }
+    summary {
+      cursor: pointer;
+      font-weight: 700;
+      color: #2f3b46;
+    }
     pre {
       margin: 0;
       white-space: pre-wrap;
@@ -809,7 +864,7 @@ INDEX_HTML = r"""<!doctype html>
         <input id="topk" type="number" min="1" max="50" value="12" />
       </div>
       <div class="row">
-        <button id="run">Run</button>
+        <button id="run">Run Approved Plan</button>
         <button class="secondary" id="stopRun" disabled>Stop Run</button>
         <button class="secondary" id="clear">Clear</button>
       </div>
@@ -817,6 +872,17 @@ INDEX_HTML = r"""<!doctype html>
     <section>
       <h2>Objective</h2>
       <textarea id="objective" class="objective"></textarea>
+      <div class="row">
+        <button class="secondary" id="planRun">Review Plan</button>
+      </div>
+      <h2 style="margin-top:16px">Plan</h2>
+      <div class="list" id="planPreview">
+        <div class="empty">Choose a corpus and objective, then review the plan before running.</div>
+      </div>
+      <label for="firstReadPaths">First-Read Documents</label>
+      <textarea id="firstReadPaths" placeholder="Review Plan fills this with the files Irys intends to read first. Edit it before running if the plan is wrong."></textarea>
+      <label for="planNote">Plan Correction</label>
+      <textarea id="planNote" placeholder="Correct the plan here: focus on 10-Ks, start with the latest amendment, ignore draft folders, include quarterly reports, or compare all agreements."></textarea>
       <div class="metric-grid">
         <div class="metric"><b>Documents</b><span id="docCount">0</span></div>
         <div class="metric"><b>Chunks</b><span id="chunkCount">0</span></div>
@@ -827,6 +893,12 @@ INDEX_HTML = r"""<!doctype html>
       </div>
       <h2>Answer</h2>
       <div class="answer" id="answer"></div>
+      <h2 style="margin-top:16px">Source Review</h2>
+      <div class="list" id="sourceSummary"></div>
+      <h2 style="margin-top:16px">Sources Used</h2>
+      <div class="list" id="sourcesUsed"></div>
+      <h2 style="margin-top:16px">Open Questions</h2>
+      <div class="list" id="openQuestions"></div>
       <h2 style="margin-top:16px">Chat History</h2>
       <div class="list" id="chatHistory"></div>
     </section>
@@ -835,10 +907,11 @@ INDEX_HTML = r"""<!doctype html>
       <div class="item" id="currentStep"><strong>Idle</strong><small>No run has started.</small></div>
       <h2 style="margin-top:16px">What Irys Is Doing</h2>
       <div class="list" id="liveEvents"></div>
-      <label for="nudge">Nudge</label>
-      <textarea id="nudge"></textarea>
+      <label for="nudge">Steer the Next Pass</label>
+      <textarea id="nudge" placeholder="Example: focus on the 2024 10-K only, ignore Form 4s, compare against the latest amendment, read the guaranty more closely, or answer only the EPS question."></textarea>
+      <div class="hint">This keeps the same matter and reruns with your correction. Add paths below only when the next pass needs more documents.</div>
       <label for="rerunPaths">Additional Corpus Paths</label>
-      <textarea id="rerunPaths"></textarea>
+      <textarea id="rerunPaths" placeholder="Optional: add another local file or folder path for the next pass."></textarea>
       <div class="row">
         <button class="secondary" id="chooseRerunFolder">Choose Folder</button>
         <button class="secondary" id="chooseRerunFile">Choose File</button>
@@ -847,9 +920,9 @@ INDEX_HTML = r"""<!doctype html>
       <div class="row">
         <button class="secondary" id="rerunTrace">Apply Nudge</button>
       </div>
-      <h2 style="margin-top:16px">Diagnosis</h2>
+      <h2 style="margin-top:16px">Run Health</h2>
       <div class="list" id="diagnosis"></div>
-      <h2 style="margin-top:16px">Past Messages</h2>
+      <h2 style="margin-top:16px">Saved Runs</h2>
       <div class="list" id="traceList"></div>
       <details style="margin-top:16px">
         <summary>Advanced run details</summary>
@@ -860,24 +933,28 @@ INDEX_HTML = r"""<!doctype html>
           <button class="secondary" id="listTraces">List Saved Runs</button>
         </div>
       </details>
-      <h2 style="margin-top:16px">Comparison</h2>
+      <h2 style="margin-top:16px">Run Comparison</h2>
       <div class="list" id="comparison"></div>
-      <h2 style="margin-top:16px">Events</h2>
-      <div class="list" id="events"></div>
-      <h2 style="margin-top:16px">Documents</h2>
-      <div class="list" id="documents"></div>
-      <h2 style="margin-top:16px">Artifacts</h2>
-      <div class="list" id="artifacts"></div>
-      <h2 style="margin-top:16px">Evidence</h2>
-      <div class="list" id="evidence"></div>
-      <h2 style="margin-top:16px">Answer Sources</h2>
-      <div class="list" id="answerSources"></div>
+      <details style="margin-top:16px">
+        <summary>Advanced diagnostic data</summary>
+        <h2 style="margin-top:16px">Raw Events</h2>
+        <div class="list" id="events"></div>
+        <h2 style="margin-top:16px">Document Inventory</h2>
+        <div class="list" id="documents"></div>
+        <h2 style="margin-top:16px">Artifacts</h2>
+        <div class="list" id="artifacts"></div>
+        <h2 style="margin-top:16px">Evidence Records</h2>
+        <div class="list" id="evidence"></div>
+        <h2 style="margin-top:16px">Answer Source Map</h2>
+        <div class="list" id="answerSources"></div>
+      </details>
     </section>
   </main>
   <script>
     const $ = (id) => document.getElementById(id);
     const status = $("status");
     const run = $("run");
+    const planRun = $("planRun");
     const stopRun = $("stopRun");
     const loadTrace = $("loadTrace");
     const rerunTrace = $("rerunTrace");
@@ -891,6 +968,9 @@ INDEX_HTML = r"""<!doctype html>
     let conversationByChat = {};
     let activeJobPoll = null;
     let activeJobId = "";
+    let currentPlan = null;
+    let currentPlanNote = "";
+    let currentPlanObjective = "";
     $("clear").addEventListener("click", () => {
       $("objective").value = "";
       $("answer").innerHTML = "";
@@ -898,9 +978,18 @@ INDEX_HTML = r"""<!doctype html>
       $("tracepath").value = "";
       $("nudge").value = "";
       $("rerunPaths").value = "";
+      $("firstReadPaths").value = "";
+      $("planNote").value = "";
+      $("planPreview").innerHTML = emptyState("Choose a corpus and objective, then review the plan before running.");
+      currentPlan = null;
+      currentPlanNote = "";
+      currentPlanObjective = "";
       $("diagnosis").innerHTML = "";
       $("currentStep").innerHTML = "<strong>Idle</strong><small>No run has started.</small>";
       $("liveEvents").innerHTML = "";
+      $("sourceSummary").innerHTML = "";
+      $("sourcesUsed").innerHTML = "";
+      $("openQuestions").innerHTML = "";
       $("traceList").innerHTML = "";
       $("comparison").innerHTML = "";
       $("events").innerHTML = "";
@@ -934,10 +1023,29 @@ INDEX_HTML = r"""<!doctype html>
     chooseRerunFolder.addEventListener("click", () => choosePath("folder", "rerunPaths"));
     chooseRerunFile.addEventListener("click", () => choosePath("file", "rerunPaths"));
     chooseRerunFiles.addEventListener("click", () => choosePath("files", "rerunPaths"));
+    planRun.addEventListener("click", async () => {
+      planRun.disabled = true;
+      status.textContent = "Planning";
+      try {
+        const plan = await requestPlan({paths: pathPayload($("paths").value)});
+        currentPlan = plan;
+        renderPlan(plan);
+        status.textContent = `Plan ready: ${plan.first_read_count || 0} first-read document(s)`;
+      } catch (error) {
+        status.textContent = error.message;
+      } finally {
+        planRun.disabled = false;
+      }
+    });
     run.addEventListener("click", async () => {
       run.disabled = true;
       status.textContent = "Running";
       try {
+        if (planNeedsRefresh()) {
+          const plan = await requestPlan({paths: pathPayload($("paths").value)});
+          currentPlan = plan;
+          renderPlan(plan);
+        }
         const response = await fetch("/api/run-async", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
@@ -948,7 +1056,9 @@ INDEX_HTML = r"""<!doctype html>
             objective: $("objective").value,
             conversation_history: activeConversationHistory(),
             live_synthesis: $("live").checked,
-            top_k: Number($("topk").value || 12)
+            top_k: Number($("topk").value || 12),
+            selected_paths: pathPayload($("firstReadPaths").value),
+            plan_note: $("planNote").value
           })
         });
         const data = await response.json();
@@ -1004,7 +1114,9 @@ INDEX_HTML = r"""<!doctype html>
             chat_id: $("chat").value,
             paths: pathPayload($("rerunPaths").value),
             live_synthesis: $("live").checked,
-            top_k: Number($("topk").value || 12)
+            top_k: Number($("topk").value || 12),
+            selected_paths: pathPayload($("firstReadPaths").value),
+            plan_note: $("planNote").value
           })
         });
         const data = await response.json();
@@ -1048,6 +1160,66 @@ INDEX_HTML = r"""<!doctype html>
         seen.add(clean.toLowerCase());
       }
       $(targetId).value = existing.join("\n");
+    }
+    async function requestPlan({paths, selected_paths = []}) {
+      const response = await fetch("/api/plan", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          objective: $("objective").value,
+          paths,
+          selected_paths,
+          plan_note: $("planNote").value,
+          top_k: Number($("topk").value || 12)
+        })
+      });
+      const data = await response.json();
+      if (!response.ok || data.error) throw new Error(data.error || "Plan failed");
+      return data;
+    }
+    function renderPlan(plan) {
+      const firstRead = plan.first_read_paths || [];
+      $("firstReadPaths").value = firstRead.join("\n");
+      currentPlan = plan;
+      currentPlanNote = $("planNote").value;
+      currentPlanObjective = $("objective").value;
+      const candidates = (plan.top_candidates || []).slice(0, 6).map(item =>
+        `- ${item.filename || item.path}: score ${item.score}; ${(item.reasons || []).join("; ")}`
+      );
+      const rows = [
+        ["Task", plan.interpreted_goal || ""],
+        ["First read", `${plan.first_read_count || 0} of ${plan.discovered_count || 0} document(s). ${plan.not_read_first_count || 0} held back for later.`],
+        ["Why these files", plan.document_strategy || ""],
+        ["Likely document types", (plan.likely_document_families || []).join(", ") || "No specific family inferred."],
+        ["Needed information", (plan.needed_information || []).join("\n")],
+        ["Top path matches", candidates.join("\n") || "No path-level candidates were scored."]
+      ];
+      $("planPreview").innerHTML = rows.map(([title, body]) => card(title, body)).join("");
+    }
+    function planNeedsRefresh() {
+      if (!pathPayload($("firstReadPaths").value).length) return true;
+      if (!currentPlan) return false;
+      return currentPlanNote !== $("planNote").value || currentPlanObjective !== $("objective").value;
+    }
+    function renderTracePlan(metadata) {
+      const scope = metadata.corpus_scope_decision || null;
+      if (!scope) return;
+      const selected = scope.selected_paths || [];
+      $("firstReadPaths").value = selected.join("\n");
+      $("planNote").value = metadata.plan_note || $("planNote").value;
+      currentPlan = {first_read_paths: selected};
+      currentPlanNote = $("planNote").value;
+      currentPlanObjective = $("objective").value;
+      const top = (scope.scored_paths || []).slice(0, 6).map(item =>
+        `- ${item.filename || item.path}: score ${item.score}; ${(item.reasons || []).join("; ")}`
+      );
+      $("planPreview").innerHTML = [
+        ["Task", $("objective").value || ""],
+        ["First read", `${selected.length} of ${(scope.discovered_paths || []).length} document(s).`],
+        ["Why these files", scope.reason || ""],
+        ["Likely document types", ((scope.signals || {}).requested_families || []).join(", ") || "No specific family inferred."],
+        ["Top path matches", top.join("\n") || "No path-level candidates were scored."]
+      ].map(([title, body]) => card(title, body)).join("");
     }
     async function pollRunJob(jobId) {
       if (!jobId) throw new Error("Missing run job id");
@@ -1107,13 +1279,12 @@ INDEX_HTML = r"""<!doctype html>
       $("matter").value = metadata.matter_id || (trace.task || {}).task_id || $("matter").value;
       $("chat").value = metadata.chat_id || $("chat").value || "main";
       $("objective").value = (trace.task || {}).question || $("objective").value;
+      renderTracePlan(metadata);
       $("answer").innerHTML = renderMarkdown(data.rendered_answer || trace.rendered_answer || "");
       updateConversationHistoryFromTrace(trace);
       $("chatHistory").innerHTML = renderChatHistory(activeConversationHistory());
-      $("diagnosis").innerHTML = Object.entries(trace.diagnosis || {}).map(([key, value]) => card(
-        key,
-        typeof value === "string" || typeof value === "number" ? String(value) : JSON.stringify(value, null, 2)
-      )).join("");
+      renderSourceReview(trace);
+      $("diagnosis").innerHTML = renderRunHealth(trace);
       $("comparison").innerHTML = renderComparison(data.comparison);
       renderLiveEvents(trace.events || []);
       $("events").innerHTML = (trace.events || []).map(event => card(
@@ -1156,6 +1327,85 @@ INDEX_HTML = r"""<!doctype html>
     }
     function card(title, body) {
       return `<div class="item"><strong>${escapeHtml(title)}</strong><small><pre>${escapeHtml(body || "")}</pre></small></div>`;
+    }
+    function emptyState(text) {
+      return `<div class="empty">${escapeHtml(text)}</div>`;
+    }
+    function renderSourceReview(trace) {
+      const packet = trace.final_packet || {};
+      const docs = Array.isArray(trace.documents) ? trace.documents : [];
+      const chunks = Array.isArray(trace.chunks) ? trace.chunks : [];
+      const evidence = Array.isArray(packet.verified_evidence) ? packet.verified_evidence : [];
+      const answerSources = Array.isArray(packet.answer_source_map) ? packet.answer_source_map : [];
+      const unresolved = Array.isArray(packet.unresolved) ? packet.unresolved : [];
+      const loadErrors = docs.filter(doc => doc && doc.load_error);
+      const retrieved = Array.isArray(packet.retrieved_chunks) ? packet.retrieved_chunks : [];
+      const summaryRows = [
+        ["Corpus read", `${docs.length} document(s), ${chunks.length} searchable chunk(s).`],
+        ["Evidence found", `${evidence.length} source item(s) carried into the answer packet.`],
+        ["Sources selected", `${retrieved.length} retrieved passage(s) were considered.`],
+        ["Open questions", unresolved.length ? `${unresolved.length} issue(s) still flagged.` : "No obvious gaps were logged."]
+      ];
+      if (loadErrors.length) {
+        summaryRows.push(["Load issues", loadErrors.map(doc => `${doc.filename || doc.path}: ${doc.load_error}`).join("\n")]);
+      }
+      $("sourceSummary").innerHTML = summaryRows.map(([title, body]) => card(title, body)).join("");
+      $("sourcesUsed").innerHTML = renderSourcesUsed(answerSources, evidence, docs);
+      $("openQuestions").innerHTML = unresolved.length
+        ? unresolved.map((item, index) => card(`Open question ${index + 1}`, item)).join("")
+        : emptyState("No open question was logged for this run.");
+    }
+    function renderSourcesUsed(answerSources, evidence, docs) {
+      if (answerSources.length) {
+        return answerSources.map((item, index) => {
+          const support = Array.isArray(item.support) ? item.support : [];
+          const supportLines = support.map(source => {
+            const docName = docNameFor(source.doc_id, docs);
+            return `- ${docName || source.doc_id || source.ref || "source"}: ${source.support || ""}`;
+          });
+          const body = [
+            item.answer_excerpt || "",
+            supportLines.length ? "\nSupport:" : "",
+            ...supportLines
+          ].filter(Boolean).join("\n");
+          return card(`Answer section ${item.section_index || index + 1}`, body);
+        }).join("");
+      }
+      if (evidence.length) {
+        return evidence.map((item, index) => {
+          const source = item.source || {};
+          const docName = docNameFor(source.doc_id, docs) || source.doc_id || "source";
+          return card(
+            `Source ${index + 1}: ${docName}`,
+            `${item.raw_support || item.claim || ""}\n${source.chunk_id ? "Chunk: " + source.chunk_id : ""}`
+          );
+        }).join("");
+      }
+      return emptyState("No source support was captured for this answer.");
+    }
+    function docNameFor(docId, docs) {
+      if (!docId) return "";
+      const match = docs.find(doc => String(doc.doc_id || "") === String(docId));
+      return match ? (match.filename || match.path || String(docId)) : "";
+    }
+    function renderRunHealth(trace) {
+      const diagnosis = trace.diagnosis || {};
+      const packet = trace.final_packet || {};
+      const metrics = trace.metrics || {};
+      const statusText = diagnosis.status === "ready_for_review"
+        ? "Ready for review"
+        : diagnosis.status === "needs_attention"
+          ? "Needs attention"
+          : (diagnosis.status || "Not diagnosed");
+      const rows = [
+        ["Status", statusText],
+        ["Evidence", `${diagnosis.evidence_count ?? (packet.verified_evidence || []).length} item(s) in the final packet.`],
+        ["Source map", `${diagnosis.answer_source_map_count ?? (packet.answer_source_map || []).length} answer section link(s).`],
+        ["Cost", `$${Number(metrics.estimated_cost || 0).toFixed(4)} for this message.`]
+      ];
+      const unresolved = Array.isArray(packet.unresolved) ? packet.unresolved : [];
+      if (unresolved.length) rows.push(["Needs review", unresolved.join("\n")]);
+      return rows.map(([title, body]) => card(title, body)).join("");
     }
     function renderComparison(comparison) {
       if (!comparison) return "";

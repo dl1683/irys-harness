@@ -13,9 +13,11 @@ from urllib.request import Request, urlopen
 from irys_harness.config import load_config
 from irys_harness.product import (
     build_answer_source_map,
+    build_product_plan_preview,
     build_product_synthesis_prompt,
     compare_product_traces,
     discover_corpus_paths,
+    plan_product_corpus_scope,
     run_product_matter,
     sanitize_matter_id,
 )
@@ -53,6 +55,91 @@ class ProductMatterTests(unittest.TestCase):
             paths = discover_corpus_paths([str(root)])
 
         self.assertEqual(len(paths), 90)
+
+    def test_product_plan_scopes_financial_lookup_to_likely_annual_report(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ten_k = root / "filings" / "sec" / "10-K"
+            ten_q = root / "filings" / "sec" / "10-Q"
+            forms = root / "filings" / "sec" / "144"
+            ten_k.mkdir(parents=True)
+            ten_q.mkdir(parents=True)
+            forms.mkdir(parents=True)
+            target = ten_k / "2025-02-20_0001561550-25-000025.pdf"
+            target.write_text("2024 annual report EPS", encoding="utf-8")
+            (ten_k / "2024-02-23_0001561550-24-000009.pdf").write_text("2023 annual report", encoding="utf-8")
+            (ten_q / "2024-11-08_0001561550-24-000175.pdf").write_text("quarterly report", encoding="utf-8")
+            (forms / "2024-12-02_0001561550-24-000199.pdf").write_text("insider sale", encoding="utf-8")
+            (ten_k / "INDEX.md").write_text(
+                "| Date | Accession | Doc | Description |\n"
+                "| 2025-02-20 | `0001561550-25-000025` | ddog-20241231.htm | 10-K |\n"
+                "| 2024-02-23 | `0001561550-24-000009` | ddog-20231231.htm | 10-K |\n",
+                encoding="utf-8",
+            )
+
+            plan = build_product_plan_preview(
+                objective="What was EPS in 2024?",
+                paths=[str(root)],
+            )
+
+            self.assertIn(str(target.resolve()), plan["first_read_paths"])
+            self.assertLess(plan["first_read_count"], plan["discovered_count"])
+            self.assertIn("annual_report", plan["likely_document_families"])
+
+    def test_product_plan_scopes_governance_question_to_board_materials(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            governance = root / "governance" / "board-minutes"
+            contracts = root / "contracts"
+            governance.mkdir(parents=True)
+            contracts.mkdir()
+            target = governance / "2024-06-01_board_minutes.txt"
+            target.write_text("Board approved the financing.", encoding="utf-8")
+            (contracts / "customer_msa.txt").write_text("ordinary contract", encoding="utf-8")
+
+            plan = build_product_plan_preview(
+                objective="Which board action approved the financing?",
+                paths=[str(root)],
+            )
+
+            self.assertEqual(plan["first_read_paths"], [str(target.resolve())])
+            self.assertIn("governance", plan["likely_document_families"])
+
+    def test_product_plan_scopes_research_question_to_papers_without_sec_bias(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            papers = root / "biomedical_papers"
+            legal = root / "agreements"
+            papers.mkdir()
+            legal.mkdir()
+            target = papers / "clinical_trial_results_compound_alpha.txt"
+            target.write_text("The clinical trial results showed response.", encoding="utf-8")
+            (legal / "license_agreement.txt").write_text("license terms", encoding="utf-8")
+
+            plan = build_product_plan_preview(
+                objective="Summarize the clinical trial results for compound alpha.",
+                paths=[str(root)],
+            )
+
+            self.assertEqual(plan["first_read_paths"], [str(target.resolve())])
+            self.assertIn("research_paper", plan["likely_document_families"])
+
+    def test_product_scope_respects_user_approved_plan_paths(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "first.txt"
+            second = root / "second.txt"
+            first.write_text("first", encoding="utf-8")
+            second.write_text("second", encoding="utf-8")
+
+            decision = plan_product_corpus_scope(
+                objective="Read the corpus.",
+                paths=[first, second],
+                selected_paths=[str(second)],
+            )
+
+            self.assertEqual(decision.selected_paths, [second.resolve()])
+            self.assertIn("User-approved", decision.reason)
 
     def test_run_product_matter_writes_trace_over_user_corpus(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -163,6 +250,13 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn("No artificial file-count or per-document character cap", INDEX_HTML)
         self.assertIn("Top K is the number of retrieved chunks", INDEX_HTML)
         self.assertIn("/api/pick-path", INDEX_HTML)
+        self.assertIn("/api/plan", INDEX_HTML)
+        self.assertIn("Review Plan", INDEX_HTML)
+        self.assertIn('id="planPreview"', INDEX_HTML)
+        self.assertIn('id="firstReadPaths"', INDEX_HTML)
+        self.assertIn('id="planNote"', INDEX_HTML)
+        self.assertIn("function renderPlan", INDEX_HTML)
+        self.assertIn("function renderTracePlan", INDEX_HTML)
         self.assertIn('id="chooseFolder"', INDEX_HTML)
         self.assertIn('id="chooseFiles"', INDEX_HTML)
         self.assertIn("function appendPaths", INDEX_HTML)
@@ -175,6 +269,8 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn("What Irys Is Doing", INDEX_HTML)
         self.assertIn('id="currentStep"', INDEX_HTML)
         self.assertIn('id="stopRun"', INDEX_HTML)
+        self.assertIn("Source Review", INDEX_HTML)
+        self.assertIn("Advanced diagnostic data", INDEX_HTML)
         self.assertIn("Advanced run details", INDEX_HTML)
         self.assertNotIn("webkitdirectory", INDEX_HTML)
         self.assertNotIn("function uploadFiles", INDEX_HTML)
