@@ -1980,7 +1980,7 @@ INDEX_HTML = r"""<!doctype html>
         appendPaths("firstReadPaths", [path]);
         firstReadPathsDirty = true;
         appendSteeringInstruction(`Read ${filenameFromPath(path)} in the next pass.`);
-        status.textContent = `Added ${filenameFromPath(path)} to the next first-read set`;
+        announceNextPassQueued(`Added ${filenameFromPath(path)} to the next first-read set.`);
         return;
       }
       if (target.matches(".deeper-source-next")) {
@@ -1989,7 +1989,7 @@ INDEX_HTML = r"""<!doctype html>
         appendPaths("firstReadPaths", [path]);
         firstReadPathsDirty = true;
         appendSteeringInstruction(`Read ${filenameFromPath(path)} more closely in the next pass.`);
-        status.textContent = `Added ${filenameFromPath(path)} for a deeper next pass`;
+        announceNextPassQueued(`Added ${filenameFromPath(path)} for a deeper next pass.`);
         return;
       }
       if (target.matches(".pin-source-next")) {
@@ -1999,7 +1999,7 @@ INDEX_HTML = r"""<!doctype html>
         appendPaths("firstReadPaths", [path]);
         firstReadPathsDirty = true;
         appendSteeringInstruction(`Keep ${filenameFromPath(path)} pinned in synthesis next pass.`);
-        status.textContent = `Pinned ${filenameFromPath(path)} for synthesis next pass`;
+        announceNextPassQueued(`Pinned ${filenameFromPath(path)} for synthesis next pass.`);
         return;
       }
       if (target.matches(".unpin-source-next")) {
@@ -2022,7 +2022,7 @@ INDEX_HTML = r"""<!doctype html>
         removePathFromFirstRead(path);
         firstReadPathsDirty = true;
         appendSteeringInstruction(`Ignore ${filenameFromPath(path)} in the next pass.`);
-        status.textContent = `Marked ${filenameFromPath(path)} to ignore next pass`;
+        announceNextPassQueued(`Marked ${filenameFromPath(path)} to ignore next pass.`);
       }
     });
     function render(data) {
@@ -2385,7 +2385,48 @@ INDEX_HTML = r"""<!doctype html>
         : "";
       $("nextPassSetup").innerHTML =
         `<strong>Next Pass Setup</strong><small><pre>${escapeHtml(details.join("\n"))}</pre></small>${listHtml}${ignoredControls}`;
+      updateCommandForQueuedNextPass();
       renderActionBoard();
+    }
+    function hasQueuedNextPassChanges() {
+      return Boolean(
+        firstReadPathsDirty ||
+        pinnedSourcePaths.length ||
+        excludedSourcePaths.length ||
+        pathPayload($("rerunPaths").value).length ||
+        $("nudge").value.trim()
+      );
+    }
+    function hasLoadedRunForCorrection() {
+      return Boolean($("tracepath").value.trim() || lastRenderedTrace);
+    }
+    function hasActiveRun() {
+      const latestEvent = lastLiveEvents.length ? lastLiveEvents[lastLiveEvents.length - 1] : null;
+      return Boolean(
+        (activeJobId && !stopRun.disabled) ||
+        (latestEvent && !isRunCompleteEvent(latestEvent) && !["ERROR", "STOP"].includes(String(latestEvent.label || "")))
+      );
+    }
+    function updateCommandForQueuedNextPass() {
+      if (!hasQueuedNextPassChanges() || hasActiveRun()) return;
+      if (hasLoadedRunForCorrection()) {
+        updateCommandStep(
+          "Next pass changes queued",
+          "Preview Steering checks the revised source plan. Run Corrected Pass executes the queued source and steering decisions."
+        );
+      } else if (pathPayload($("firstReadPaths").value).length) {
+        updateCommandStep(
+          "First-read plan edited",
+          "Review the selected documents, then Run Approved Plan. Use Preview Corrected Plan if the plan correction should re-rank the corpus first."
+        );
+      }
+    }
+    function announceNextPassQueued(message) {
+      const suffix = hasLoadedRunForCorrection()
+        ? " Next: Preview Steering or Run Corrected Pass."
+        : " Next: run the approved plan when the first-read set looks right.";
+      status.textContent = `${message}${suffix}`;
+      updateCommandForQueuedNextPass();
     }
     function pill(text, tone = "") {
       const cls = tone ? `action-pill ${tone}` : "action-pill";
