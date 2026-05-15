@@ -1434,7 +1434,7 @@ INDEX_HTML = r"""<!doctype html>
       if (!currentPlan) return false;
       return currentPlanNote !== $("planNote").value || currentPlanObjective !== $("objective").value;
     }
-    function renderTracePlan(metadata) {
+    function renderTracePlan(metadata, trace = null) {
       const scope = metadata.corpus_scope_decision || null;
       if (!scope) return;
       const selected = scope.selected_paths || [];
@@ -1442,6 +1442,7 @@ INDEX_HTML = r"""<!doctype html>
       $("planNote").value = metadata.plan_note || $("planNote").value;
       currentPlanNote = $("planNote").value;
       currentPlanObjective = $("objective").value;
+      const contract = latestAnswerContract(trace);
       const top = (scope.scored_paths || []).slice(0, 6).map(item =>
         `- ${item.filename || item.path}: score ${item.score}; ${(item.reasons || []).join("; ")}`
       );
@@ -1453,14 +1454,21 @@ INDEX_HTML = r"""<!doctype html>
       currentPlan = planLike;
       $("planPreview").innerHTML = [
         ["Task", $("objective").value || ""],
+        contract && contract.interpreted_goal ? ["Answer target", contract.interpreted_goal] : null,
+        contract && contract.needed_information ? ["Answer needs", contract.needed_information.join("\n")] : null,
+        contract && contract.search_queries ? ["Search targets", contract.search_queries.join("\n")] : null,
         ["First read", `${selected.length} of ${(scope.discovered_paths || []).length} document(s).`],
         ["Why these files", scope.reason || ""],
         ["Worker source planner", formatPlannerSummary((scope.signals || {}).source_planner || null, {})],
         ["Likely document types", ((scope.signals || {}).requested_families || []).join(", ") || "No specific family inferred."],
         ["Top path matches", top.join("\n") || "No path-level candidates were scored."]
-      ].map(([title, body]) => card(title, body)).join("");
+      ].filter(Boolean).map(([title, body]) => card(title, body)).join("");
       renderCandidateReview(scope.scored_paths || [], selected);
       renderRunBrief({plan: planLike});
+    }
+    function latestAnswerContract(trace) {
+      const versions = trace && Array.isArray(trace.answer_contract_versions) ? trace.answer_contract_versions : [];
+      return versions.length ? versions[versions.length - 1] : null;
     }
     function renderCandidateReview(candidates, selectedPaths) {
       const rows = Array.isArray(candidates) ? candidates.slice(0, 20) : [];
@@ -1586,7 +1594,7 @@ INDEX_HTML = r"""<!doctype html>
       $("matter").value = metadata.matter_id || (trace.task || {}).task_id || $("matter").value;
       $("chat").value = metadata.chat_id || $("chat").value || "main";
       $("objective").value = (trace.task || {}).question || $("objective").value;
-      renderTracePlan(metadata);
+      renderTracePlan(metadata, trace);
       excludedSourcePaths = [];
       renderRunBrief({trace, comparison: data.comparison});
       $("answer").innerHTML = renderMarkdown(data.rendered_answer || trace.rendered_answer || "");
