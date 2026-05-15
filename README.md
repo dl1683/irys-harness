@@ -17,7 +17,8 @@ Implemented:
 - model-call metrics with token and cost accounting;
 - local product matter runner with recursive folder ingestion, multi-chat matter history, live workstream events, source review, and per-message/matter cost totals;
 - editable product plan preview that ranks likely first-read documents from the objective and corpus structure before expensive document loading starts;
-- product UI workstream, source-review, held-back-document, rerun-comparison, and steering surfaces for testing matter workflows over local corpora.
+- product UI workstream, source-review, held-back-document, rerun-comparison, next-pass setup, and steering surfaces for testing matter workflows over local corpora;
+- user-readable packet-review trace events that show missing information, revised search targets, source coverage, and retrieval-expansion decisions.
 
 ## Benchmark Performance
 
@@ -49,7 +50,8 @@ Representative Agent Bench bridge smokes:
 | NoLiMa | 10 examples | 10/10 passed |
 | FACTS Grounding | 10 examples | 9/10 passed |
 | CUAD | 10 examples | 9/10 passed, 94.71% avg score |
-| L-CiteEval | 2 examples | 2/2 passed |
+| L-CiteEval | 5 examples | 5/5 passed |
+| FinanceBench | 20 examples | 19/20 passed, 89.45% avg score |
 | LongBench v2 | 10 examples | 6/10 passed |
 
 Interpretation:
@@ -202,6 +204,8 @@ The product UI supports:
 - first-read audit showing documents that were held back and one-click controls to read them in the next pass;
 - live workstream events and a phase timeline while the run is active;
 - source review, open-question summaries, and source steering to read a document more deeply, pin it into synthesis, or ignore it on the next pass;
+- next-pass setup summary showing first-read documents, pinned sources, ignored sources, added paths, and steering-note state before rerun;
+- packet-review trace lines for missing information, revised search targets, source IDs, and source coverage;
 - plain-English run comparison after reruns, including answer, source, evidence, open-question, token, and cost deltas;
 - large diagnostic panels summarized in the browser while full details remain in saved traces;
 - multiple chats per matter;
