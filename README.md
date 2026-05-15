@@ -201,7 +201,7 @@ The product UI supports:
 - steering-note plan preview before a rerun, so users can inspect changed source focus before applying it;
 - first-read audit showing documents that were held back and one-click controls to read them in the next pass;
 - live workstream events while the run is active;
-- source review and open-question summaries;
+- source review, open-question summaries, and source-ignore steering for the next pass;
 - multiple chats per matter;
 - conversation history limited to user questions and final answers;
 - per-message and matter-level cost display.
