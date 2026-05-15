@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import base64
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import re
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .config import HarnessConfig
-from .product import run_product_matter
+from .product import run_product_matter, sanitize_matter_id
 from .trace import load_trace, trace_summary
+
+
+MAX_UPLOAD_BYTES = 25_000_000
 
 
 def serve_product_ui(
@@ -66,10 +71,16 @@ def build_handler(
                     paths = [line.strip() for line in paths_raw.splitlines() if line.strip()]
                 else:
                     paths = [str(item) for item in paths_raw if str(item).strip()]
+                matter_id = str(payload.get("matter_id", "matter"))
+                upload_paths = save_uploaded_files(
+                    payload.get("uploads", []),
+                    upload_root=Path(output_dir) / "_uploads" / sanitize_matter_id(matter_id),
+                )
+                paths.extend(str(path) for path in upload_paths)
                 result = run_product_matter(
                     objective=str(payload.get("objective", "")),
                     paths=paths,
-                    matter_id=str(payload.get("matter_id", "matter")),
+                    matter_id=matter_id,
                     config=config,
                     trace_dir=trace_dir,
                     output_dir=output_dir,
@@ -126,6 +137,52 @@ def resolve_trace_path(raw_path: str, trace_dir: str | Path) -> Path:
     if root != resolved and root not in resolved.parents:
         raise ValueError("trace path must be under the configured trace directory")
     return resolved
+
+
+def save_uploaded_files(raw_uploads: Any, *, upload_root: str | Path) -> list[Path]:
+    if not raw_uploads:
+        return []
+    if not isinstance(raw_uploads, list):
+        raise ValueError("uploads must be a list")
+    root = Path(upload_root)
+    root.mkdir(parents=True, exist_ok=True)
+    paths: list[Path] = []
+    for index, item in enumerate(raw_uploads, 1):
+        if not isinstance(item, dict):
+            raise ValueError("each upload must be an object")
+        filename = safe_upload_filename(str(item.get("filename") or f"upload-{index}.txt"))
+        encoded = str(item.get("content_base64") or "")
+        if not encoded:
+            raise ValueError(f"upload {filename} is missing content_base64")
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except Exception as exc:  # noqa: BLE001 - normalize base64 parser errors.
+            raise ValueError(f"upload {filename} is not valid base64") from exc
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise ValueError(f"upload {filename} exceeds {MAX_UPLOAD_BYTES} bytes")
+        target = unique_upload_path(root, filename)
+        target.write_bytes(data)
+        paths.append(target)
+    return paths
+
+
+def safe_upload_filename(filename: str) -> str:
+    name = Path(filename).name.strip() or "upload.txt"
+    cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "-", name).strip(" .")
+    return cleaned[:120] or "upload.txt"
+
+
+def unique_upload_path(root: Path, filename: str) -> Path:
+    target = root / filename
+    if not target.exists():
+        return target
+    stem = target.stem
+    suffix = target.suffix
+    for index in range(2, 1000):
+        candidate = root / f"{stem}-{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+    raise ValueError(f"too many uploads named {filename}")
 
 
 INDEX_HTML = r"""<!doctype html>
@@ -305,6 +362,8 @@ INDEX_HTML = r"""<!doctype html>
       <input id="matter" value="local-matter" />
       <label for="paths">Corpus Paths</label>
       <textarea id="paths" spellcheck="false"></textarea>
+      <label for="files">Corpus Files</label>
+      <input id="files" type="file" multiple />
       <div class="row">
         <label class="toggle"><input id="live" type="checkbox" /> Live synthesis</label>
         <input id="topk" type="number" min="1" max="50" value="12" />
@@ -350,6 +409,7 @@ INDEX_HTML = r"""<!doctype html>
     const loadTrace = $("loadTrace");
     $("clear").addEventListener("click", () => {
       $("objective").value = "";
+      $("files").value = "";
       $("answer").textContent = "";
       $("tracepath").value = "";
       $("diagnosis").innerHTML = "";
@@ -362,12 +422,14 @@ INDEX_HTML = r"""<!doctype html>
       run.disabled = true;
       status.textContent = "Running";
       try {
+        const uploads = await readUploads($("files").files);
         const response = await fetch("/api/run", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify({
             matter_id: $("matter").value,
             paths: $("paths").value,
+            uploads,
             objective: $("objective").value,
             live_synthesis: $("live").checked,
             top_k: Number($("topk").value || 12)
@@ -399,6 +461,27 @@ INDEX_HTML = r"""<!doctype html>
         loadTrace.disabled = false;
       }
     });
+    async function readUploads(fileList) {
+      const files = Array.from(fileList || []);
+      const uploads = [];
+      for (const file of files) {
+        const dataUrl = await readAsDataUrl(file);
+        const comma = dataUrl.indexOf(",");
+        uploads.push({
+          filename: file.name,
+          content_base64: comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl
+        });
+      }
+      return uploads;
+    }
+    function readAsDataUrl(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(reader.error || new Error("File read failed"));
+        reader.readAsDataURL(file);
+      });
+    }
     function render(data) {
       const trace = data.trace || {};
       const metrics = trace.metrics || {};

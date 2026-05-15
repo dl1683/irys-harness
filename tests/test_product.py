@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+import base64
 from tempfile import TemporaryDirectory
 import unittest
 
 from irys_harness.config import load_config
 from irys_harness.product import discover_corpus_paths, run_product_matter, sanitize_matter_id
-from irys_harness.product_ui import resolve_trace_path
+from irys_harness.product_ui import resolve_trace_path, safe_upload_filename, save_uploaded_files
 
 
 class ProductMatterTests(unittest.TestCase):
@@ -88,6 +89,29 @@ class ProductMatterTests(unittest.TestCase):
             self.assertEqual(resolve_trace_path(str(trace), trace_dir), trace.resolve())
             with self.assertRaises(ValueError):
                 resolve_trace_path(str(root / "outside.json"), trace_dir)
+
+    def test_save_uploaded_files_sanitizes_and_writes_files(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            uploads = [
+                {
+                    "filename": "../credit terms.txt",
+                    "content_base64": base64.b64encode(b"notice and cure").decode("ascii"),
+                },
+                {
+                    "filename": "../credit terms.txt",
+                    "content_base64": base64.b64encode(b"second copy").decode("ascii"),
+                },
+            ]
+
+            paths = save_uploaded_files(uploads, upload_root=root / "uploads")
+
+            self.assertEqual([path.name for path in paths], ["credit terms.txt", "credit terms-2.txt"])
+            self.assertEqual(paths[0].read_text(encoding="utf-8"), "notice and cure")
+            self.assertEqual(paths[1].read_text(encoding="utf-8"), "second copy")
+
+    def test_safe_upload_filename_removes_path_and_control_chars(self) -> None:
+        self.assertEqual(safe_upload_filename(r"..\folder/bad:name?.txt"), "bad-name-.txt")
 
 
 if __name__ == "__main__":
