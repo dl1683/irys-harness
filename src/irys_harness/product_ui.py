@@ -1604,28 +1604,28 @@ INDEX_HTML = r"""<!doctype html>
       $("diagnosis").innerHTML = renderRunHealth(trace);
       $("comparison").innerHTML = renderComparison(data.comparison);
       renderLiveEvents(trace.events || []);
-      $("events").innerHTML = (trace.events || []).map(event => card(
+      $("events").innerHTML = renderLimitedCards(trace.events || [], event => card(
         event.label + " - " + event.message,
-        JSON.stringify(event.fields || {}, null, 2)
-      )).join("");
-      $("documents").innerHTML = (trace.documents || []).map(doc => card(
+        compactJsonForDisplay(event.fields || {})
+      ), {limit: 50, itemName: "event"});
+      $("documents").innerHTML = renderLimitedCards(trace.documents || [], doc => card(
         (doc.doc_id || "") + " - " + (doc.filename || ""),
         (doc.path || "") + "\nchars=" + (doc.text_chars || 0) + (doc.load_error ? "\nerror=" + doc.load_error : "")
-      )).join("");
-      $("artifacts").innerHTML = (trace.artifacts || []).map(artifact => card(
+      ), {limit: 100, itemName: "document"});
+      $("artifacts").innerHTML = renderLimitedCards(trace.artifacts || [], artifact => card(
         artifact.filename || artifact.type || "Artifact",
         (artifact.path || "") + "\ntype=" + (artifact.type || "") + "\ndiagnostic=" + Boolean(artifact.diagnostic)
-      )).join("");
+      ), {limit: 50, itemName: "artifact"});
       const evidence = ((trace.final_packet || {}).verified_evidence || []);
-      $("evidence").innerHTML = evidence.map(item => card(
+      $("evidence").innerHTML = renderLimitedCards(evidence, item => card(
         item.claim || "Evidence",
-        (item.raw_support || "") + "\n" + JSON.stringify(item.source || {}, null, 2)
-      )).join("");
+        (item.raw_support || "") + "\n" + compactJsonForDisplay(item.source || {})
+      ), {limit: 50, itemName: "evidence record"});
       const answerSources = ((trace.final_packet || {}).answer_source_map || []);
-      $("answerSources").innerHTML = answerSources.map(item => card(
+      $("answerSources").innerHTML = renderLimitedCards(answerSources, item => card(
         "Section " + (item.section_index || ""),
-        (item.answer_excerpt || "") + "\n" + JSON.stringify(item.source_refs || [], null, 2)
-      )).join("");
+        (item.answer_excerpt || "") + "\n" + compactJsonForDisplay(item.source_refs || [])
+      ), {limit: 50, itemName: "answer-source record"});
     }
     async function refreshTraceList({setStatus = false} = {}) {
       const url = "/api/traces?matter_id=" + encodeURIComponent($("matter").value) +
@@ -1643,10 +1643,38 @@ INDEX_HTML = r"""<!doctype html>
       $("matterMessages").textContent = String(summary.messages || 0);
     }
     function card(title, body) {
-      return `<div class="item"><strong>${escapeHtml(title)}</strong><small><pre>${escapeHtml(body || "")}</pre></small></div>`;
+      return `<div class="item"><strong>${escapeHtml(title)}</strong><small><pre>${escapeHtml(limitDisplayText(body || ""))}</pre></small></div>`;
     }
     function emptyState(text) {
       return `<div class="empty">${escapeHtml(text)}</div>`;
+    }
+    function limitDisplayText(value, maxChars = 2500) {
+      const text = String(value || "");
+      if (text.length <= maxChars) return text;
+      return text.slice(0, maxChars) + `\n\n... ${text.length - maxChars} more characters are saved in the trace but not rendered here.`;
+    }
+    function compactJsonForDisplay(value, {arrayLimit = 50, stringLimit = 2000} = {}) {
+      return JSON.stringify(value, (key, item) => {
+        if (typeof item === "string" && item.length > stringLimit) {
+          return item.slice(0, stringLimit) + ` ... ${item.length - stringLimit} more characters saved in trace`;
+        }
+        if (Array.isArray(item) && item.length > arrayLimit) {
+          return item.slice(0, arrayLimit).concat([`... ${item.length - arrayLimit} more item(s) saved in trace`]);
+        }
+        return item;
+      }, 2);
+    }
+    function formatInlineList(items, limit = 12) {
+      const rows = Array.isArray(items) ? items : [];
+      return rows.slice(0, limit).join(", ") + (rows.length > limit ? `, ... ${rows.length - limit} more saved in trace` : "");
+    }
+    function renderLimitedCards(items, renderer, {limit = 100, itemName = "item"} = {}) {
+      const rows = Array.isArray(items) ? items : [];
+      const visible = rows.slice(0, limit).map(renderer);
+      if (rows.length > limit) {
+        visible.push(emptyState(`${rows.length - limit} additional ${itemName}(s) are saved in the trace but not rendered here.`));
+      }
+      return visible.join("");
     }
     function renderSourceReview(trace) {
       const packet = trace.final_packet || {};
@@ -1671,18 +1699,18 @@ INDEX_HTML = r"""<!doctype html>
         if (planner) summaryRows.splice(2, 0, ["Worker source planner", formatPlannerSummary(planner, {})]);
       }
       if (loadErrors.length) {
-        summaryRows.push(["Load issues", loadErrors.map(doc => `${doc.filename || doc.path}: ${doc.load_error}`).join("\n")]);
+        summaryRows.push(["Load issues", formatSimpleList(loadErrors.map(doc => `${doc.filename || doc.path}: ${doc.load_error}`), 20)]);
       }
       $("sourceSummary").innerHTML = summaryRows.map(([title, body]) => card(title, body)).join("");
       $("heldBackSources").innerHTML = renderHeldBackSources(scope);
       $("sourcesUsed").innerHTML = renderSourcesUsed(answerSources, evidence, docs);
       $("openQuestions").innerHTML = unresolved.length
-        ? unresolved.map((item, index) => card(`Open question ${index + 1}`, item)).join("")
+        ? renderLimitedCards(unresolved, (item, index) => card(`Open question ${index + 1}`, item), {limit: 25, itemName: "open question"})
         : emptyState("No open question was logged for this run.");
     }
     function renderSourcesUsed(answerSources, evidence, docs) {
       if (answerSources.length) {
-        return answerSources.map((item, index) => {
+        return renderLimitedCards(answerSources, (item, index) => {
           const support = Array.isArray(item.support) ? item.support : [];
           const supportLines = support.map(source => {
             const docName = docNameFor(source.doc_id, docs);
@@ -1695,10 +1723,10 @@ INDEX_HTML = r"""<!doctype html>
             ...supportLines
           ].filter(Boolean).join("\n");
           return sourceCard(`Answer section ${item.section_index || index + 1}`, body, sourcePath);
-        }).join("");
+        }, {limit: 50, itemName: "answer source"});
       }
       if (evidence.length) {
-        return evidence.map((item, index) => {
+        return renderLimitedCards(evidence, (item, index) => {
           const source = item.source || {};
           const docName = docNameFor(source.doc_id, docs) || source.doc_id || "source";
           return sourceCard(
@@ -1706,7 +1734,7 @@ INDEX_HTML = r"""<!doctype html>
             `${item.raw_support || item.claim || ""}\n${source.chunk_id ? "Chunk: " + source.chunk_id : ""}`,
             docPathFor(source.doc_id, docs)
           );
-        }).join("");
+        }, {limit: 50, itemName: "source"});
       }
       return emptyState("No source support was captured for this answer.");
     }
@@ -1714,7 +1742,7 @@ INDEX_HTML = r"""<!doctype html>
       const action = path
         ? `<button class="secondary ignore-source-next" data-path="${escapeAttr(path)}">Ignore next pass</button>`
         : "";
-      return `<div class="item"><strong>${escapeHtml(title)}</strong><small><pre>${escapeHtml(body || "")}</pre></small>${action}</div>`;
+      return `<div class="item"><strong>${escapeHtml(title)}</strong><small><pre>${escapeHtml(limitDisplayText(body || "", 2000))}</pre></small>${action}</div>`;
     }
     function renderHeldBackSources(scope) {
       const discovered = Array.isArray(scope.discovered_paths) ? scope.discovered_paths : [];
@@ -1886,9 +1914,9 @@ INDEX_HTML = r"""<!doctype html>
       if ((unresolved.removed || []).length) rows.push(["Cleared open questions", formatSimpleList(unresolved.removed)]);
       return rows.map(([title, body]) => card(title, body)).join("");
     }
-    function formatSimpleList(items) {
-      return (items || []).slice(0, 12).map(item => `- ${item}`).join("\n") +
-        ((items || []).length > 12 ? `\n- ... ${(items || []).length - 12} more` : "");
+    function formatSimpleList(items, limit = 12) {
+      return (items || []).slice(0, limit).map(item => `- ${item}`).join("\n") +
+        ((items || []).length > limit ? `\n- ... ${(items || []).length - limit} more` : "");
     }
     function formatEvidenceDelta(items) {
       return (items || []).slice(0, 8).map(item => {
@@ -1957,32 +1985,34 @@ INDEX_HTML = r"""<!doctype html>
       if (fields.user_nudge) lines.push(`Your instruction: ${fields.user_nudge}`);
       if (fields.source_selection_mode) lines.push(`Source plan: ${formatSourceSelectionMode(fields.source_selection_mode)}`);
       if (fields.reason) lines.push(`Why: ${fields.reason}`);
-      if (fields.search_queries) lines.push(`Search targets: ${fields.search_queries.join("; ")}`);
-      if (fields.queries) lines.push(`Search targets: ${fields.queries.join("; ")}`);
-      if (fields.selected_documents) lines.push(`Reading first: ${fields.selected_documents.join(", ")}`);
+      if (fields.search_queries) lines.push(`Search targets: ${formatInlineList(fields.search_queries, 12)}`);
+      if (fields.queries) lines.push(`Search targets: ${formatInlineList(fields.queries, 12)}`);
+      if (fields.selected_documents) lines.push(`Reading first: ${formatInlineList(fields.selected_documents, 12)}`);
       if (fields.skipped_document_count) lines.push(`Held back for now: ${fields.skipped_document_count} document(s).`);
       if (fields.selected_sources) {
         lines.push("Sources selected:");
-        for (const source of fields.selected_sources) {
+        for (const source of fields.selected_sources.slice(0, 12)) {
           lines.push(`- ${source.document || source.chunk_id}: ${source.preview || ""}`);
         }
+        if (fields.selected_sources.length > 12) lines.push(`- ... ${fields.selected_sources.length - 12} more saved in trace`);
       }
       if (fields.evidence_preview) {
         lines.push("Evidence found:");
-        for (const item of fields.evidence_preview) {
+        for (const item of fields.evidence_preview.slice(0, 12)) {
           lines.push(`- ${item.support || item.claim || ""}`);
         }
+        if (fields.evidence_preview.length > 12) lines.push(`- ... ${fields.evidence_preview.length - 12} more saved in trace`);
       }
       if (fields.analysis_preview) lines.push(`Worker notes: ${fields.analysis_preview}`);
       if (fields.answer_preview) lines.push(`Draft preview: ${fields.answer_preview}`);
-      if (fields.sample_documents) lines.push(`Examples: ${fields.sample_documents.join(", ")}`);
+      if (fields.sample_documents) lines.push(`Examples: ${formatInlineList(fields.sample_documents, 12)}`);
       if (fields.omitted_document_count) lines.push(`Plus ${fields.omitted_document_count} more.`);
       if (fields.steer_hint) lines.push(`Steer: ${fields.steer_hint}`);
       if (fields.next_step) lines.push(`Next: ${fields.next_step}`);
       if (!lines.length) {
         for (const [key, value] of Object.entries(fields)) {
           if (key === "summary") continue;
-          lines.push(`${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`);
+          lines.push(`${key}: ${typeof value === "string" ? limitDisplayText(value, 2000) : compactJsonForDisplay(value)}`);
         }
       }
       return lines.join("\n");
