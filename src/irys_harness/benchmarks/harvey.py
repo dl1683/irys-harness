@@ -536,6 +536,21 @@ class HarveyLabAdapter(BenchmarkAdapter):
                 state.draft_answer = build_anemic_synthesis_fallback_answer(state, result.text)
             else:
                 state.draft_answer = result.text
+            coverage_safety_net = build_source_inventory_synthesis_safety_net(state, state.draft_answer)
+            if coverage_safety_net:
+                state.final_packet["source_inventory_safety_net"] = coverage_safety_net["diagnostics"]
+                state.extraction_records.append(
+                    {
+                        "mode": "source_inventory_synthesis_safety_net",
+                        "summary": coverage_safety_net["diagnostics"],
+                    }
+                )
+                state.draft_answer = "\n\n".join(
+                    [
+                        str(state.draft_answer or "").strip(),
+                        coverage_safety_net["text"],
+                    ]
+                ).strip()
             state.final_packet["draft_answer"] = state.draft_answer
             state.final_packet["unresolved"] = []
         state.rendered_answer = json.dumps(
@@ -3728,6 +3743,241 @@ def build_anemic_synthesis_fallback_answer(state: RunState, short_draft: str) ->
     )
 
 
+def build_source_inventory_synthesis_safety_net(state: RunState, draft_answer: str) -> dict[str, Any] | None:
+    """Promote high-recall worker rows that synthesis is likely to omit into the work product.
+
+    This is intentionally Harvey-only. Broad diligence, extraction, red-flag, and reconciliation
+    tasks often have hundreds of relevant worker rows; the final model may produce a coherent memo
+    while silently dropping score-critical rows. The safety net turns the worker-layer source state
+    into an explicit issue-coverage supplement rather than leaving those rows buried in trace-only
+    appendices.
+    """
+    if not needs_action_source_inventory_digest(state):
+        return None
+    criteria_count = int(state.task.answer_schema.get("criteria_count") or 0)
+    packet = state.final_packet or {}
+    worker_packet = str(packet.get("cheap_worker_summary") or "")
+    if criteria_count < 40 and len(worker_packet) < 60000:
+        return None
+    draft = str(draft_answer or "")
+    if not draft.strip() or "Synthesis quality fallback: structured worker packet" in draft:
+        return None
+    if "Source-by-source issue coverage supplement" in draft:
+        return None
+    rows = select_source_inventory_safety_net_rows(
+        state,
+        worker_packet=worker_packet,
+        draft_answer=draft,
+        row_limit=MAX_SOURCE_INVENTORY_SAFETY_NET_ROWS,
+        char_limit=MAX_SOURCE_INVENTORY_SAFETY_NET_CHARS,
+    )
+    if len(rows) < 6:
+        return None
+    lines = [
+        "## Source-by-source issue coverage supplement",
+        "",
+        (
+            "The following worker-extracted source rows are included as part of the requested work product "
+            "so material source-specific issues, calculations, deadlines, and discrepancies are not lost "
+            "when the narrative memo is synthesized."
+        ),
+        "",
+    ]
+    for index, row in enumerate(rows, start=1):
+        lines.extend(
+            [
+                f"{index}. Source: {row['source']}",
+                f"   Required use: {row['required_use']}",
+                f"   Extracted row: {row['text']}",
+                "",
+            ]
+        )
+    text = "\n".join(lines).strip()
+    return {
+        "text": text,
+        "diagnostics": {
+            "activated": True,
+            "row_count": len(rows),
+            "text_chars": len(text),
+            "worker_packet_chars": len(worker_packet),
+            "draft_answer_chars": len(draft),
+            "criteria_count": criteria_count,
+            "reason": "high_recall_source_inventory_rows_promoted_after_synthesis",
+        },
+    }
+
+
+def select_source_inventory_safety_net_rows(
+    state: RunState,
+    *,
+    worker_packet: str,
+    draft_answer: str,
+    row_limit: int,
+    char_limit: int,
+) -> list[dict[str, str]]:
+    relevance_tokens = task_relevance_tokens(state)
+    draft_keys = set(re.findall(r"[a-z0-9]{4,}", str(draft_answer or "").lower()))
+    candidates: list[tuple[int, int, str, dict[str, str]]] = []
+    seen: set[str] = set()
+    for sequence, raw in enumerate(str(worker_packet or "").splitlines(), start=1):
+        line = " ".join(raw.strip().strip("|").split())
+        if not line or is_source_inventory_safety_net_header(line):
+            continue
+        if len(line) > 1800:
+            line = compact_digest_text(line, limit=1800)
+        if not is_action_source_candidate_line(line):
+            continue
+        key = normalize_issue_key(line)
+        if key in seen:
+            continue
+        seen.add(key)
+        score = score_source_inventory_safety_net_line(
+            line=line,
+            relevance_tokens=relevance_tokens,
+            draft_keys=draft_keys,
+        )
+        if score <= 0:
+            continue
+        source = extract_source_inventory_safety_net_source(line)
+        candidates.append(
+            (
+                score,
+                sequence,
+                source,
+                {
+                    "source": source,
+                    "required_use": action_source_required_use(line, ""),
+                    "text": compact_digest_text(line, limit=900),
+                },
+            )
+        )
+    selected: list[dict[str, str]] = []
+    selected_keys: set[str] = set()
+    doc_counts: dict[str, int] = {}
+    char_count = 0
+    for _score, _sequence, source, row in sorted(candidates, key=lambda item: (-item[0], item[1])):
+        if len(selected) >= row_limit or char_count >= char_limit:
+            break
+        key = normalize_issue_key(row["text"])
+        if key in selected_keys:
+            continue
+        doc_key = source or "unknown"
+        if doc_counts.get(doc_key, 0) >= 3 and len(selected) < max(20, row_limit // 2):
+            continue
+        selected.append(row)
+        selected_keys.add(key)
+        doc_counts[doc_key] = doc_counts.get(doc_key, 0) + 1
+        char_count += sum(len(value) for value in row.values())
+    for _score, _sequence, source, row in sorted(candidates, key=lambda item: (-item[0], item[1])):
+        if len(selected) >= row_limit or char_count >= char_limit:
+            break
+        key = normalize_issue_key(row["text"])
+        if key in selected_keys:
+            continue
+        selected.append(row)
+        selected_keys.add(key)
+        char_count += sum(len(value) for value in row.values())
+    return selected
+
+
+def is_source_inventory_safety_net_header(line: str) -> bool:
+    lower = line.lower()
+    if set(line.replace("|", "").replace("-", "").strip()) <= {""}:
+        return True
+    header_terms = [
+        "row type",
+        "source role",
+        "extracted source row",
+        "required artifact use",
+        "doc id filename",
+        "why it matters",
+    ]
+    return any(term in lower for term in header_terms)
+
+
+def score_source_inventory_safety_net_line(
+    *,
+    line: str,
+    relevance_tokens: set[str],
+    draft_keys: set[str],
+) -> int:
+    lower = line.lower()
+    line_keys = set(re.findall(r"[a-z0-9]{4,}", lower))
+    novelty = len(line_keys - draft_keys)
+    if novelty < 3:
+        return 0
+    score = min(24, novelty)
+    score += min(18, 3 * len(relevance_tokens.intersection(line_keys)))
+    if "|" in line:
+        score += 8
+    if re.search(r"\$[0-9]|[0-9]+(?:\.\d+)?%", line):
+        score += 10
+    if re.search(r"\b(?:section|schedule|exhibit|article|item|account|policy|clause)\s+[a-z0-9_.()-]+", lower):
+        score += 8
+    high_signal_terms = [
+        "critical",
+        "high",
+        "risk",
+        "issue",
+        "missing",
+        "omitted",
+        "inconsistent",
+        "silent",
+        "consent",
+        "termination",
+        "default",
+        "non-renewal",
+        "deadline",
+        "excluded",
+        "overstatement",
+        "understatement",
+        "fraud",
+        "false claims",
+        "debarment",
+        "indebtedness",
+        "restricted cash",
+        "prepaid",
+        "change of control",
+        "prior invention",
+        "invention assignment",
+        "laboratory notebook",
+        "named inventor",
+        "trade secret",
+        "piia",
+        "piiaa",
+    ]
+    score += 6 * sum(1 for term in high_signal_terms if term in lower)
+    if re.search(r"\bdoc_\d{4}\b", lower):
+        score += 6
+    if any(
+        term in lower
+        for term in [
+            "key findings",
+            "issue matrix",
+            "red flag",
+            "recommended action",
+            "recommendation",
+            "required artifact use",
+            "deal protection",
+            "closing condition",
+        ]
+    ):
+        score += 24
+    if re.search(r"\b[\w.-]+\.docx\b", lower) and any(term in lower for term in ["key findings", "issue matrix", "red flag"]):
+        score += 50
+    return score if score >= 18 else 0
+
+
+def extract_source_inventory_safety_net_source(line: str) -> str:
+    doc_ids = re.findall(r"\bdoc_\d{4}(?:_chunk_\d{4})?\b", line)
+    if doc_ids:
+        return ", ".join(dict.fromkeys(doc_ids))
+    filenames = re.findall(r"[\w.-]+\.(?:docx|xlsx|pdf|csv|txt)", line, flags=re.IGNORECASE)
+    if filenames:
+        return ", ".join(dict.fromkeys(filenames[:3]))
+    return "worker packet"
+
+
 def build_artifact_preservation_appendix(
     *,
     numeric_digest: str,
@@ -5231,6 +5481,8 @@ MAX_ARTIFACT_DERIVED_ROWS = 40
 MAX_STRUCTURED_FINANCE_ASSET_ISSUE_ROWS = 90
 MAX_ACTION_SOURCE_DOCUMENT_ROWS = 80
 MAX_ACTION_SOURCE_INVENTORY_ROWS = 180
+MAX_SOURCE_INVENTORY_SAFETY_NET_ROWS = 120
+MAX_SOURCE_INVENTORY_SAFETY_NET_CHARS = 90000
 
 
 BANKRUPTCY_DISTRIBUTION_TOPIC_FAMILIES: list[tuple[str, list[str]]] = [
@@ -17076,10 +17328,55 @@ def build_action_source_item_rows(state: RunState) -> list[list[str]]:
                     ],
                 )
             )
-    return [
-        row
-        for _score, _sequence, row in sorted(rows, key=lambda item: (-item[0], item[1]))
-    ]
+    return select_balanced_action_source_item_rows(rows, row_limit=MAX_ACTION_SOURCE_INVENTORY_ROWS)
+
+
+def select_balanced_action_source_item_rows(
+    rows: list[tuple[int, int, list[str]]],
+    *,
+    row_limit: int,
+) -> list[list[str]]:
+    ranked = sorted(rows, key=lambda item: (-item[0], item[1]))
+    selected: list[tuple[int, int, list[str]]] = []
+    selected_keys: set[str] = set()
+    doc_counts: dict[str, int] = {}
+
+    def add_row(item: tuple[int, int, list[str]]) -> bool:
+        _score, _sequence, row = item
+        key = normalize_issue_key(" ".join(row))
+        if key in selected_keys:
+            return False
+        selected.append(item)
+        selected_keys.add(key)
+        doc_key = extract_action_source_row_doc_key(row)
+        doc_counts[doc_key] = doc_counts.get(doc_key, 0) + 1
+        return True
+
+    for per_doc_cap in (2, 4):
+        for item in ranked:
+            if len(selected) >= row_limit:
+                break
+            doc_key = extract_action_source_row_doc_key(item[2])
+            if doc_counts.get(doc_key, 0) >= per_doc_cap:
+                continue
+            add_row(item)
+        if len(selected) >= row_limit:
+            break
+
+    for item in ranked:
+        if len(selected) >= row_limit:
+            break
+        add_row(item)
+
+    return [row for _score, _sequence, row in selected]
+
+
+def extract_action_source_row_doc_key(row: list[str]) -> str:
+    source = str(row[-1] if row else "")
+    match = re.search(r"\bdoc_\d{4}\b", source)
+    if match:
+        return match.group(0)
+    return source or "unknown"
 
 
 def infer_action_source_role(filename: str, text: str) -> str:
@@ -17157,6 +17454,11 @@ def is_action_source_candidate_line(line: str) -> bool:
         return True
     if re.search(r"\b(?:cost base|markup|margin|royalty|charge|management fee|toll manufacturing|r&d|distribution)\b", lower):
         return True
+    if re.search(
+        r"\b(?:prior inventions?|invention assignment|laboratory notebooks?|named inventor|co-?founder|trade secret|piiaa?|employment agreement)\b",
+        lower,
+    ):
+        return True
     if re.search(r"\b(?:liability cap|service credit|sla|security incident|subprocessor|arbitration|insurance|termination fee)\b", lower):
         return True
     if re.search(r"\b(?:gmp|liquidated damages|lien waiver|change order|warranty|force majeure|environmental indemnity)\b", lower):
@@ -17183,6 +17485,11 @@ def score_action_source_line(*, line: str, role: str, relevance_tokens: set[str]
         score += 10
     if re.search(r"\b(?:beneficiary|fiduciary|exculpation|indemnification|liability|termination|security|warranty|lien|markup|cost base)\b", lower):
         score += 12
+    if re.search(
+        r"\b(?:prior inventions?|invention assignment|laboratory notebooks?|named inventor|co-?founder|trade secret|piiaa?|employment agreement)\b",
+        lower,
+    ):
+        score += 18
     if any(term in lower for term in ["missing", "omitted", "inconsistent", "deceased", "silent", "no consent", "does not"]):
         score += 12
     return score if score >= 14 else 0

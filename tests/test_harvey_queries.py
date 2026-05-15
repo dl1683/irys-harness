@@ -12,6 +12,7 @@ from irys_harness.benchmarks.harvey import (
     build_deliverable_contract,
     build_deliverable_atom_map,
     build_self_contained_deliverable_coverage_pack,
+    build_action_source_item_rows,
     build_document_review_privilege_digest,
     build_pre_synthesis_packet_creator_prompt,
     build_synthesis_prompt,
@@ -23,6 +24,7 @@ from irys_harness.benchmarks.harvey import (
     is_encoded_artifact_answer,
     is_anemic_synthesis_answer,
     build_anemic_synthesis_fallback_answer,
+    build_source_inventory_synthesis_safety_net,
     build_metadata_queries,
     build_numeric_audit_worker_prompt,
     build_provision_comparison_worker_prompt,
@@ -4371,6 +4373,85 @@ class HarveyQueryTests(unittest.TestCase):
         fallback = build_anemic_synthesis_fallback_answer(state, short_draft)
         self.assertIn("CCO reporting structure lacks board independence", fallback)
         self.assertIn("34 business days", fallback)
+
+    def test_source_inventory_safety_net_promotes_rows_missing_from_synthesis(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="corporate-ma/summarize-key-legal-issues-from-data-room-document-review",
+            question="Prepare a due diligence memorandum from the data room documents.",
+            answer_schema={"deliverables": ["due-diligence-memorandum.docx"], "criteria_count": 54},
+            metadata={"practice_area": "corporate-ma"},
+        )
+        state = RunState(task=task, config=load_config(), documents=[])
+        state.final_packet = {
+            "cheap_worker_summary": "\n".join(
+                [
+                    "| source row | Section 5.3 | Cascadia may terminate on change of control; exclusive supply of rhenium diboride is critical | Seek written consent | doc_0002 |",
+                    "| source row | Schedule 2.06 | Prepaid Income Taxes of $310,000 must be excluded from Current Assets | Quantify reduction | doc_0004 |",
+                    "| source row | Debt Schedule | $275,000 restricted cash appears in Other Current Assets but cash is excluded | Quantify reduction | doc_0005 |",
+                    "| source row | Section 8 | Alderley invention-assignment tail overlaps with pre-departure research concepts | Request IP ownership/FTO opinion | doc_0020 |",
+                    "| source row | Contract Schedule | Northvale MSA expiration and non-renewal risk affects 23% revenue concentration | Add retention protection | doc_0024 |",
+                    "| source row | Environmental Summary | Akron facility TCE REC creates remediation and indemnity issue | Require escrow/indemnity | doc_0025 |",
+                ]
+            ),
+        }
+        draft = "Memo narrative discusses PetroCoast and GreenSource only."
+
+        safety_net = build_source_inventory_synthesis_safety_net(state, draft)
+
+        self.assertIsNotNone(safety_net)
+        text = safety_net["text"]
+        self.assertIn("Source-by-source issue coverage supplement", text)
+        self.assertIn("rhenium diboride", text)
+        self.assertIn("Prepaid Income Taxes", text)
+        self.assertIn("Northvale", text)
+        self.assertGreaterEqual(safety_net["diagnostics"]["row_count"], 6)
+
+    def test_action_source_inventory_balances_rows_across_documents(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="corporate-ma/review-data-room-red-flag-review",
+            question="Identify all material red flags from the data room.",
+            answer_schema={"deliverables": ["red-flag-memorandum.docx"], "criteria_count": 68},
+            metadata={"practice_area": "corporate-ma"},
+        )
+        state = RunState(
+            task=task,
+            config=load_config(),
+            documents=[
+                {"doc_id": "doc_0001", "filename": "dominant-schedule.xlsx"},
+                {"doc_id": "doc_0002", "filename": "founder-employment-agreement.docx"},
+            ],
+        )
+        dominant_lines = [
+            f"| Issue {index} | Section {index}.1 | ${index},000 exposure | Critical consent deadline |"
+            for index in range(220)
+        ]
+        state.chunks = [
+            {
+                "doc_id": "doc_0001",
+                "chunk_id": "doc_0001_chunk_0000",
+                "index": 0,
+                "text": "\n".join(dominant_lines),
+            },
+            {
+                "doc_id": "doc_0002",
+                "chunk_id": "doc_0002_chunk_0000",
+                "index": 0,
+                "text": (
+                    "Section 8 inventions assignment by Dr. Raj Anand to Alderley Chemical Corp. "
+                    "continues for twelve months and creates a missing IP ownership risk tied to "
+                    "laboratory notebook concepts."
+                ),
+            },
+        ]
+
+        rows = build_action_source_item_rows(state)
+        joined = json.dumps(rows)
+
+        self.assertLessEqual(len(rows), 180)
+        self.assertIn("doc_0002", joined)
+        self.assertIn("Alderley Chemical", joined)
 
     def test_antitrust_digest_routes_protective_order_compliance_and_expert_rows(self) -> None:
         protective_task = BenchmarkTask(
