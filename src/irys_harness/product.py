@@ -1778,6 +1778,9 @@ def review_product_packet_with_cheap_worker(
             continue_retrieval=review.get("continue_retrieval"),
             revised_queries=review.get("revised_queries", []),
             missing_information=review.get("missing_information", []),
+            coverage_risks=review.get("coverage_risks", []),
+            relevant_source_ids=review.get("relevant_source_ids", []),
+            low_value_source_ids=review.get("low_value_source_ids", []),
             next_step="Use the reviewed packet or run an additional retrieval pass.",
         )
         return review

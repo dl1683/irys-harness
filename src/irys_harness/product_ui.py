@@ -2447,10 +2447,20 @@ INDEX_HTML = r"""<!doctype html>
       if (fields.planner) lines.push(`Planner: ${fields.planner === "cheap_worker" ? "cheap worker source planner" : fields.planner}`);
       if (fields.source_selection_mode) lines.push(`Source plan: ${formatSourceSelectionMode(fields.source_selection_mode)}`);
       if (fields.reason) lines.push(`Why: ${fields.reason}`);
+      if (fields.continue_retrieval !== undefined) {
+        lines.push(`Retrieval decision: ${fields.continue_retrieval ? "look for more evidence before drafting" : "current packet is enough to draft"}`);
+      }
       if (fields.search_queries) lines.push(`Search targets: ${formatInlineList(fields.search_queries, 12)}`);
       if (fields.queries) lines.push(`Search targets: ${formatInlineList(fields.queries, 12)}`);
+      if (fields.revised_queries) lines.push(`Revised search targets: ${formatInlineList(fields.revised_queries, 12)}`);
+      if (fields.missing_information) lines.push(`Missing information: ${formatInlineList(fields.missing_information, 12)}`);
+      if (fields.coverage_risks) lines.push(`Coverage risks: ${formatInlineList(fields.coverage_risks, 12)}`);
+      if (fields.relevant_source_ids) lines.push(`Relevant source IDs: ${formatInlineList(fields.relevant_source_ids, 16)}`);
+      if (fields.low_value_source_ids) lines.push(`Low-value source IDs: ${formatInlineList(fields.low_value_source_ids, 16)}`);
       if (fields.selected_documents) lines.push(`Reading first: ${formatInlineList(fields.selected_documents, 12)}`);
+      if (fields.pinned_documents) lines.push(`Pinned documents: ${formatInlineList(fields.pinned_documents, 12)}`);
       if (fields.skipped_document_count) lines.push(`Held back for now: ${fields.skipped_document_count} document(s).`);
+      if (fields.source_coverage) lines.push(`Source coverage: ${formatSourceCoverageSummary(fields.source_coverage)}`);
       if (fields.selected_sources) {
         lines.push("Sources selected:");
         for (const source of fields.selected_sources.slice(0, 12)) {
@@ -2483,6 +2493,22 @@ INDEX_HTML = r"""<!doctype html>
       if (mode === "replan_from_nudge") return "re-planning from your steering note";
       if (mode === "locked_by_user") return "using the first-read documents you locked";
       return String(mode || "");
+    }
+    function formatSourceCoverageSummary(coverage) {
+      const rows = coverage && typeof coverage === "object" ? coverage : {};
+      const representedDocs = Array.isArray(rows.represented_documents) ? rows.represented_documents : [];
+      const missingDocs = Array.isArray(rows.missing_documents) ? rows.missing_documents : [];
+      const covered = Number(rows.represented_document_count || representedDocs.length || 0);
+      const uncovered = Number(rows.missing_document_count || missingDocs.length || 0);
+      const parts = [];
+      if (covered || uncovered) parts.push(`${covered} covered, ${uncovered} not retrieved`);
+      if (representedDocs.length) {
+        parts.push("retrieved: " + representedDocs.slice(0, 6).map(item => item.filename || item.doc_id || item.document || "").filter(Boolean).join(", "));
+      }
+      if (missingDocs.length) {
+        parts.push("not retrieved: " + missingDocs.slice(0, 6).map(item => item.filename || item.doc_id || item.document || item).filter(Boolean).join(", "));
+      }
+      return parts.join("\n") || compactJsonForDisplay(coverage);
     }
     function activeChatKey() {
       return `${$("matter").value || "local-matter"}::${$("chat").value || "main"}`;
