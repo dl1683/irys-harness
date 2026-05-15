@@ -31,6 +31,7 @@ from irys_harness.product_ui import (
     parse_paths,
     pick_local_paths,
     rerun_from_trace,
+    rerun_context_paths,
     rerun_plan_from_trace,
     resolve_trace_path,
     selected_paths_for_rerun_payload,
@@ -417,6 +418,9 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn("Ignore next pass", INDEX_HTML)
         self.assertIn("function sourceCard", INDEX_HTML)
         self.assertIn("function removePathFromFirstRead", INDEX_HTML)
+        self.assertIn("excludedSourcePaths", INDEX_HTML)
+        self.assertIn("excluded_paths", INDEX_HTML)
+        self.assertIn("function addExcludedSourcePath", INDEX_HTML)
         self.assertIn('id="heldBackSources"', INDEX_HTML)
         self.assertIn("function renderHeldBackSources", INDEX_HTML)
         self.assertIn("include-held-back", INDEX_HTML)
@@ -673,6 +677,23 @@ class ProductMatterTests(unittest.TestCase):
 
         payload["selected_paths_locked"] = True
         self.assertEqual(selected_paths_for_rerun_payload(payload), ["old-first-read.txt"])
+
+    def test_rerun_context_paths_honor_excluded_paths(self) -> None:
+        parent = {
+            "task": {
+                "context_files": ["old-source.txt", "keep-source.txt"],
+                "metadata": {"discovered_context_files": ["old-source.txt", "keep-source.txt"]},
+            }
+        }
+        payload = {
+            "paths": ["new-source.txt"],
+            "excluded_paths": ["old-source.txt"],
+            "selected_paths": ["old-source.txt", "keep-source.txt"],
+            "selected_paths_locked": True,
+        }
+
+        self.assertEqual(rerun_context_paths(parent, payload), ["keep-source.txt", "new-source.txt"])
+        self.assertEqual(selected_paths_for_rerun_payload(payload), ["keep-source.txt"])
 
     def test_rerun_plan_note_keeps_current_steering_note(self) -> None:
         note = build_rerun_plan_note("Prior correction: ignore drafts.", "Focus on the 2024 10-K.")

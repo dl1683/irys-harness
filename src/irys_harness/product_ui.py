@@ -457,18 +457,13 @@ def rerun_from_trace(
     nudge = str(payload.get("nudge") or "").strip()
     if not nudge:
         raise ValueError("nudge is required")
-    paths = [
-        str(item)
-        for item in (metadata.get("discovered_context_files") or task.get("context_files", []))
-        if str(item).strip()
-    ]
+    paths = rerun_context_paths(parent, payload)
     if not paths:
         raise ValueError("parent trace does not contain context_files")
     base_matter_id = str(metadata.get("matter_id") or task.get("task_id") or "matter")
     chat_id = str(payload.get("chat_id") or metadata.get("chat_id") or "main")
     suffix = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
     matter_id = sanitize_matter_id(f"{base_matter_id}-nudge-{suffix}")
-    paths.extend(parse_paths(payload.get("paths", [])))
     objective = f"{original_objective}\n\nUser steering note: {nudge}"
     plan_note = build_rerun_plan_note(payload.get("plan_note"), nudge)
     result = run_product_matter(
@@ -514,12 +509,7 @@ def rerun_plan_from_trace(
     nudge = str(payload.get("nudge") or "").strip()
     if not nudge:
         raise ValueError("nudge is required")
-    paths = [
-        str(item)
-        for item in (metadata.get("discovered_context_files") or task.get("context_files", []))
-        if str(item).strip()
-    ]
-    paths.extend(parse_paths(payload.get("paths", [])))
+    paths = rerun_context_paths(parent, payload)
     if not paths:
         raise ValueError("parent trace does not contain context_files")
     objective = f"{original_objective}\n\nUser steering note: {nudge}"
@@ -538,8 +528,40 @@ def rerun_plan_from_trace(
 def selected_paths_for_rerun_payload(payload: dict[str, Any]) -> list[str] | None:
     selected_paths = parse_paths(payload.get("selected_paths", []))
     if selected_paths and bool(payload.get("selected_paths_locked", False)):
-        return selected_paths
+        return filter_excluded_paths(selected_paths, payload)
     return None
+
+
+def rerun_context_paths(parent: dict[str, Any], payload: dict[str, Any]) -> list[str]:
+    task = parent.get("task") or {}
+    metadata = task.get("metadata") or {}
+    paths = [
+        str(item)
+        for item in (metadata.get("discovered_context_files") or task.get("context_files", []))
+        if str(item).strip()
+    ]
+    paths.extend(parse_paths(payload.get("paths", [])))
+    return filter_excluded_paths(paths, payload)
+
+
+def filter_excluded_paths(paths: list[str], payload: dict[str, Any]) -> list[str]:
+    excluded = {normalized_path_key(path) for path in parse_paths(payload.get("excluded_paths", []))}
+    output: list[str] = []
+    seen: set[str] = set()
+    for raw_path in paths:
+        key = normalized_path_key(raw_path)
+        if not key or key in excluded or key in seen:
+            continue
+        output.append(raw_path)
+        seen.add(key)
+    return output
+
+
+def normalized_path_key(path: str) -> str:
+    raw = str(path or "").strip()
+    if not raw:
+        return ""
+    return str(Path(raw).expanduser().resolve()).lower()
 
 
 def build_rerun_plan_note(raw_plan_note: Any, nudge: str) -> str:
@@ -1112,6 +1134,7 @@ INDEX_HTML = r"""<!doctype html>
     let currentPlanObjective = "";
     let firstReadPathsDirty = false;
     let suppressFirstReadDirty = false;
+    let excludedSourcePaths = [];
     $("clear").addEventListener("click", () => {
       $("objective").value = "";
       $("answer").innerHTML = "";
@@ -1127,6 +1150,7 @@ INDEX_HTML = r"""<!doctype html>
       currentPlan = null;
       currentPlanNote = "";
       currentPlanObjective = "";
+      excludedSourcePaths = [];
       $("diagnosis").innerHTML = "";
       $("currentStep").innerHTML = "<strong>Idle</strong><small>No run has started.</small>";
       $("liveEvents").innerHTML = "";
@@ -1282,6 +1306,7 @@ INDEX_HTML = r"""<!doctype html>
             top_k: Number($("topk").value || 12),
             selected_paths: firstReadPathsDirty ? pathPayload($("firstReadPaths").value) : [],
             selected_paths_locked: firstReadPathsDirty,
+            excluded_paths: excludedSourcePaths,
             plan_note: $("planNote").value
           })
         });
@@ -1313,6 +1338,7 @@ INDEX_HTML = r"""<!doctype html>
             top_k: Number($("topk").value || 12),
             selected_paths: firstReadPathsDirty ? pathPayload($("firstReadPaths").value) : [],
             selected_paths_locked: firstReadPathsDirty,
+            excluded_paths: excludedSourcePaths,
             plan_note: $("planNote").value
           })
         });
@@ -1532,6 +1558,7 @@ INDEX_HTML = r"""<!doctype html>
       }
       if (target.matches(".include-held-back")) {
         const path = target.getAttribute("data-path") || "";
+        removeExcludedSourcePath(path);
         appendPaths("firstReadPaths", [path]);
         firstReadPathsDirty = true;
         if (!$("nudge").value.trim()) $("nudge").value = `Read ${filenameFromPath(path)} in the next pass.`;
@@ -1540,6 +1567,7 @@ INDEX_HTML = r"""<!doctype html>
       }
       if (target.matches(".ignore-source-next")) {
         const path = target.getAttribute("data-path") || "";
+        addExcludedSourcePath(path);
         removePathFromFirstRead(path);
         firstReadPathsDirty = true;
         if (!$("nudge").value.trim()) $("nudge").value = `Ignore ${filenameFromPath(path)} in the next pass.`;
@@ -1559,6 +1587,7 @@ INDEX_HTML = r"""<!doctype html>
       $("chat").value = metadata.chat_id || $("chat").value || "main";
       $("objective").value = (trace.task || {}).question || $("objective").value;
       renderTracePlan(metadata);
+      excludedSourcePaths = [];
       renderRunBrief({trace, comparison: data.comparison});
       $("answer").innerHTML = renderMarkdown(data.rendered_answer || trace.rendered_answer || "");
       updateConversationHistoryFromTrace(trace);
@@ -1729,6 +1758,16 @@ INDEX_HTML = r"""<!doctype html>
       const target = String(path || "").toLowerCase();
       const kept = pathPayload($("firstReadPaths").value).filter(item => String(item || "").toLowerCase() !== target);
       setFirstReadPaths(kept, {dirty: true});
+    }
+    function addExcludedSourcePath(path) {
+      const clean = String(path || "").trim();
+      if (!clean) return;
+      const key = clean.toLowerCase();
+      if (!excludedSourcePaths.some(item => String(item || "").toLowerCase() === key)) excludedSourcePaths.push(clean);
+    }
+    function removeExcludedSourcePath(path) {
+      const key = String(path || "").toLowerCase();
+      excludedSourcePaths = excludedSourcePaths.filter(item => String(item || "").toLowerCase() !== key);
     }
     function renderRunHealth(trace) {
       const diagnosis = trace.diagnosis || {};
