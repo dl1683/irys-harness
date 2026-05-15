@@ -935,10 +935,6 @@ INDEX_HTML = r"""<!doctype html>
       <div class="list" id="runBrief">
         <div class="empty">The brief will explain the current plan, what Irys is doing, and what you can change next.</div>
       </div>
-      <h2 style="margin-top:16px">Plan</h2>
-      <div class="list" id="planPreview">
-        <div class="empty">Choose a corpus and objective, then review the plan before running.</div>
-      </div>
       <h2 style="margin-top:16px">First-Read Review</h2>
       <div class="list" id="candidateReview">
         <div class="empty">Review Plan will show the highest-ranked documents here. Check or uncheck what Irys should read first.</div>
@@ -952,6 +948,10 @@ INDEX_HTML = r"""<!doctype html>
       <textarea id="firstReadPaths" placeholder="Review Plan fills this with the files Irys intends to read first. Edit it before running if the plan is wrong."></textarea>
       <label for="planNote">Plan Correction</label>
       <textarea id="planNote" placeholder="Correct the plan here: focus on 10-Ks, start with the latest amendment, ignore draft folders, include quarterly reports, or compare all agreements."></textarea>
+      <h2 style="margin-top:16px">Detailed Plan</h2>
+      <div class="list" id="planPreview">
+        <div class="empty">Choose a corpus and objective, then review the plan before running.</div>
+      </div>
       <div class="metric-grid">
         <div class="metric"><b>Documents</b><span id="docCount">0</span></div>
         <div class="metric"><b>Chunks</b><span id="chunkCount">0</span></div>
@@ -1596,7 +1596,7 @@ INDEX_HTML = r"""<!doctype html>
     function renderRunBrief({plan = null, trace = null, events = null, comparison = null} = {}) {
       const rows = [];
       const objective = String(((trace || {}).task || {}).question || $("objective").value || currentPlanObjective || "").trim();
-      if (objective) rows.push(["Question", objective]);
+      if (objective && trace) rows.push(["Question", objective]);
       if (trace) {
         const packet = trace.final_packet || {};
         const metadata = (trace.task || {}).metadata || {};
@@ -1613,10 +1613,11 @@ INDEX_HTML = r"""<!doctype html>
         rows.push(["Recommended next action", recommendedNextAction(trace, comparison)]);
       } else if (plan) {
         const firstRead = plan.first_read_paths || [];
-        rows.push(["Planned first read", `${firstRead.length} document(s) selected first out of ${plan.discovered_count || "the discovered corpus"}.`]);
-        if (firstRead.length) rows.push(["Files Irys will start with", firstRead.slice(0, 8).map(path => `- ${filenameFromPath(path)}`).join("\n") + (firstRead.length > 8 ? `\n- ... ${firstRead.length - 8} more` : "")]);
+        const firstReadLines = firstRead.length
+          ? firstRead.slice(0, 8).map(path => `- ${filenameFromPath(path)}`).join("\n") + (firstRead.length > 8 ? `\n- ... ${firstRead.length - 8} more` : "")
+          : "No narrow first-read set yet.";
+        rows.push(["Planned first read", `${firstRead.length} document(s) selected first out of ${plan.discovered_count || "the discovered corpus"}.\nStart with:\n${firstReadLines}`]);
         rows.push(["Why these documents", plan.document_strategy || ((plan.source_planner || {}).reason) || "Irys ranked source paths against the question and document names."]);
-        if ((plan.needed_information || []).length) rows.push(["What Irys will look for", (plan.needed_information || []).join("\n")]);
         rows.push(["What you can change", "Uncheck irrelevant first-read documents, add missing files, or write a Plan Correction before running."]);
       }
       if (Array.isArray(events) && events.length) {
