@@ -1790,11 +1790,22 @@ INDEX_HTML = r"""<!doctype html>
         ["Status", statusText],
         ["Evidence", `${diagnosis.evidence_count ?? (packet.verified_evidence || []).length} item(s) in the final packet.`],
         ["Source map", `${diagnosis.answer_source_map_count ?? (packet.answer_source_map || []).length} answer section link(s).`],
-        ["Cost", `$${Number(metrics.estimated_cost || 0).toFixed(4)} for this message.`]
+        ["Cost", `$${Number(metrics.estimated_cost || 0).toFixed(4)} for this message.`],
+        ["Tokens by tier", formatTierMetric(metrics.tokens_by_tier || {})],
+        ["Cost by tier", formatTierMetric(metrics.cost_by_tier || {}, {currency: true})]
       ];
       const unresolved = Array.isArray(packet.unresolved) ? packet.unresolved : [];
       if (unresolved.length) rows.push(["Needs review", unresolved.join("\n")]);
       return rows.map(([title, body]) => card(title, body)).join("");
+    }
+    function formatTierMetric(values, {currency = false} = {}) {
+      const entries = Object.entries(values || {}).filter(([, value]) => Number(value || 0) !== 0);
+      if (!entries.length) return "No model usage was recorded for this run.";
+      return entries.map(([tier, value]) => {
+        const label = tier.replace(/_/g, " ");
+        const formatted = currency ? "$" + Number(value || 0).toFixed(4) : String(value || 0);
+        return `${label}: ${formatted}`;
+      }).join("\n");
     }
     function renderRunBrief({plan = null, trace = null, events = null, comparison = null} = {}) {
       const rows = [];
