@@ -15,6 +15,7 @@ from irys_harness.product import (
     sanitize_matter_id,
 )
 from irys_harness.product_ui import (
+    INDEX_HTML,
     parse_paths,
     rerun_from_trace,
     resolve_trace_path,
@@ -66,6 +67,9 @@ class ProductMatterTests(unittest.TestCase):
             self.assertEqual(trace["diagnosis"]["status"], "ready_for_review")
             self.assertEqual(trace["diagnosis"]["evidence_count"], 1)
             self.assertGreaterEqual(trace["diagnosis"]["answer_source_map_count"], 1)
+            self.assertTrue(Path(trace["artifacts"][0]["path"]).exists())
+            self.assertTrue(trace["artifacts"][0]["diagnostic"])
+            self.assertEqual(result.to_dict()["artifacts"][0]["filename"], "answer.md")
 
     def test_run_product_matter_flags_no_matching_evidence(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -126,6 +130,11 @@ class ProductMatterTests(unittest.TestCase):
 
     def test_safe_upload_filename_removes_path_and_control_chars(self) -> None:
         self.assertEqual(safe_upload_filename(r"..\folder/bad:name?.txt"), "bad-name-.txt")
+
+    def test_product_ui_renders_answer_markdown_online(self) -> None:
+        self.assertIn('class="answer" id="answer"', INDEX_HTML)
+        self.assertIn("function renderMarkdown", INDEX_HTML)
+        self.assertNotIn('<pre id="answer"></pre>', INDEX_HTML)
 
     def test_rerun_from_trace_links_parent_and_nudge(self) -> None:
         with TemporaryDirectory() as tmp:

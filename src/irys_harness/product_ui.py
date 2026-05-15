@@ -425,6 +425,25 @@ INDEX_HTML = r"""<!doctype html>
       padding: 14px;
       background: var(--panel);
     }
+    .answer h1, .answer h2, .answer h3 {
+      margin: 14px 0 8px;
+      color: var(--ink);
+      text-transform: none;
+    }
+    .answer h1 { font-size: 20px; }
+    .answer h2 { font-size: 17px; }
+    .answer h3 { font-size: 15px; }
+    .answer p { margin: 0 0 10px; line-height: 1.55; }
+    .answer ul, .answer ol { margin: 0 0 12px 22px; padding: 0; }
+    .answer li { margin: 5px 0; line-height: 1.5; }
+    .answer code {
+      background: #e9edf2;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 1px 4px;
+      font-family: Consolas, Monaco, monospace;
+      font-size: 12px;
+    }
     @media (max-width: 1100px) {
       main { grid-template-columns: 1fr; }
       section { border-right: 0; border-bottom: 1px solid var(--line); }
@@ -464,7 +483,7 @@ INDEX_HTML = r"""<!doctype html>
         <div class="metric"><b>Cost</b><span id="cost">$0.00</span></div>
       </div>
       <h2>Answer</h2>
-      <div class="answer"><pre id="answer"></pre></div>
+      <div class="answer" id="answer"></div>
     </section>
     <section>
       <h2>Trace</h2>
@@ -490,6 +509,8 @@ INDEX_HTML = r"""<!doctype html>
       <div class="list" id="events"></div>
       <h2 style="margin-top:16px">Documents</h2>
       <div class="list" id="documents"></div>
+      <h2 style="margin-top:16px">Artifacts</h2>
+      <div class="list" id="artifacts"></div>
       <h2 style="margin-top:16px">Evidence</h2>
       <div class="list" id="evidence"></div>
       <h2 style="margin-top:16px">Answer Sources</h2>
@@ -505,7 +526,7 @@ INDEX_HTML = r"""<!doctype html>
     $("clear").addEventListener("click", () => {
       $("objective").value = "";
       $("files").value = "";
-      $("answer").textContent = "";
+      $("answer").innerHTML = "";
       $("tracepath").value = "";
       $("nudge").value = "";
       $("rerunPaths").value = "";
@@ -514,6 +535,7 @@ INDEX_HTML = r"""<!doctype html>
       $("comparison").innerHTML = "";
       $("events").innerHTML = "";
       $("documents").innerHTML = "";
+      $("artifacts").innerHTML = "";
       $("evidence").innerHTML = "";
       $("answerSources").innerHTML = "";
       status.textContent = "";
@@ -619,7 +641,7 @@ INDEX_HTML = r"""<!doctype html>
       $("cost").textContent = "$" + Number(metrics.estimated_cost || 0).toFixed(4);
       $("matter").value = (trace.task || {}).task_id || $("matter").value;
       $("objective").value = (trace.task || {}).question || $("objective").value;
-      $("answer").textContent = data.rendered_answer || trace.rendered_answer || "";
+      $("answer").innerHTML = renderMarkdown(data.rendered_answer || trace.rendered_answer || "");
       $("diagnosis").innerHTML = Object.entries(trace.diagnosis || {}).map(([key, value]) => card(
         key,
         typeof value === "string" || typeof value === "number" ? String(value) : JSON.stringify(value, null, 2)
@@ -632,6 +654,10 @@ INDEX_HTML = r"""<!doctype html>
       $("documents").innerHTML = (trace.documents || []).map(doc => card(
         (doc.doc_id || "") + " - " + (doc.filename || ""),
         (doc.path || "") + "\nchars=" + (doc.text_chars || 0) + (doc.load_error ? "\nerror=" + doc.load_error : "")
+      )).join("");
+      $("artifacts").innerHTML = (trace.artifacts || []).map(artifact => card(
+        artifact.filename || artifact.type || "Artifact",
+        (artifact.path || "") + "\ntype=" + (artifact.type || "") + "\ndiagnostic=" + Boolean(artifact.diagnostic)
       )).join("");
       const evidence = ((trace.final_packet || {}).verified_evidence || []);
       $("evidence").innerHTML = evidence.map(item => card(
@@ -662,6 +688,72 @@ INDEX_HTML = r"""<!doctype html>
       ];
       if (comparison.status === "unavailable") rows.push(["Comparison unavailable", comparison.error || "unknown error"]);
       return rows.map(([title, body]) => card(title, body)).join("");
+    }
+    function renderMarkdown(markdown) {
+      const lines = String(markdown || "").split(/\r?\n/);
+      const html = [];
+      let listType = "";
+      let paragraph = [];
+      const closeList = () => {
+        if (listType) {
+          html.push(`</${listType}>`);
+          listType = "";
+        }
+      };
+      const flushParagraph = () => {
+        if (paragraph.length) {
+          html.push(`<p>${formatInline(paragraph.join(" "))}</p>`);
+          paragraph = [];
+        }
+      };
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          flushParagraph();
+          closeList();
+          continue;
+        }
+        const heading = trimmed.match(/^(#{1,3})\s+(.+)$/);
+        if (heading) {
+          flushParagraph();
+          closeList();
+          const level = heading[1].length;
+          html.push(`<h${level}>${formatInline(heading[2])}</h${level}>`);
+          continue;
+        }
+        const bullet = trimmed.match(/^[-*]\s+(.+)$/);
+        if (bullet) {
+          flushParagraph();
+          if (listType !== "ul") {
+            closeList();
+            listType = "ul";
+            html.push("<ul>");
+          }
+          html.push(`<li>${formatInline(bullet[1])}</li>`);
+          continue;
+        }
+        const numbered = trimmed.match(/^\d+[.)]\s+(.+)$/);
+        if (numbered) {
+          flushParagraph();
+          if (listType !== "ol") {
+            closeList();
+            listType = "ol";
+            html.push("<ol>");
+          }
+          html.push(`<li>${formatInline(numbered[1])}</li>`);
+          continue;
+        }
+        paragraph.push(trimmed);
+      }
+      flushParagraph();
+      closeList();
+      return html.join("");
+    }
+    function formatInline(value) {
+      return escapeHtml(value)
+        .replace(/`([^`]+)`/g, "<code>$1</code>")
+        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+        .replace(/\*([^*]+)\*/g, "<em>$1</em>");
     }
     function escapeHtml(value) {
       return String(value)

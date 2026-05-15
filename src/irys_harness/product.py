@@ -43,6 +43,7 @@ class ProductRunResult:
             "rendered_answer": self.state.rendered_answer,
             "documents": self.state.documents,
             "events": self.state.events,
+            "artifacts": self.state.artifacts,
             "metrics": self.state.metrics.to_dict(),
         }
 
@@ -181,6 +182,7 @@ def run_product_matter(
         state.rendered_answer or "",
         state.final_packet.get("verified_evidence", []),
     )
+    state.artifacts.append(write_product_answer_artifact(state, diagnostic=not live_synthesis))
     state.diagnosis = build_product_diagnosis(state)
     trace_path = TraceWriter(trace_dir).write(state)
     log.emit("SAVE", "trace saved", trace=str(trace_path))
@@ -456,6 +458,22 @@ Return:
 - CONDITIONS_OR_REQUIREMENTS: notice, timing, approval, threshold, document, or procedural requirements.
 - GAPS: facts missing from the corpus that the drafter should not invent.
 - DRAFTING_NOTES: constraints for a clean user-facing answer."""
+
+
+def write_product_answer_artifact(state: RunState, *, diagnostic: bool) -> dict[str, Any]:
+    if not state.output_dir:
+        raise ValueError("state.output_dir is required for product artifact writing")
+    output_dir = Path(state.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / "answer.md"
+    path.write_text(state.rendered_answer or "", encoding="utf-8")
+    return {
+        "type": "diagnostic_preview_markdown" if diagnostic else "answer_markdown",
+        "path": str(path),
+        "filename": path.name,
+        "diagnostic": diagnostic,
+        "chars": len(state.rendered_answer or ""),
+    }
 
 
 def build_answer_source_map(answer: str, evidence_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
