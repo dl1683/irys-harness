@@ -298,6 +298,84 @@ class ProductMatterTests(unittest.TestCase):
             self.assertEqual(plan["source_planner"]["selected_directories"], [str(emails.resolve())])
             self.assertNotIn(str(rulebook.resolve()), plan["first_read_paths"])
 
+    def test_cheap_worker_source_planner_stages_large_indexed_directory(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            releases = root / "news_releases"
+            releases.mkdir()
+            index = releases / "INDEX.md"
+            index.write_text("Release index with dates and titles.", encoding="utf-8")
+            for item in range(75):
+                (releases / f"release-{item:03d}.txt").write_text("announcement body", encoding="utf-8")
+            rules = root / "background_rules"
+            rules.mkdir()
+            rulebook = rules / "generic_policy.txt"
+            rulebook.write_text("Generic background rule.", encoding="utf-8")
+
+            class FakeRouter:
+                def __init__(self, config: object) -> None:
+                    self.config = config
+
+                def generate(self, **kwargs: object) -> SimpleNamespace:
+                    return SimpleNamespace(
+                        text=json.dumps(
+                            {
+                                "selected_paths": [],
+                                "selected_directories": [str(releases.resolve())],
+                                "rejected_paths": [str(rulebook.resolve())],
+                                "should_read_full_corpus": False,
+                                "reason": "Compare announcements through the release directory.",
+                                "needed_information": ["announcement dates", "announcement themes"],
+                                "confidence": "medium",
+                            }
+                        ),
+                        usage=ModelCallRecord(
+                            module="product_source_planner",
+                            tier=ModelTier.CHEAP_WORKER,
+                            model="fake-cheap-worker",
+                            input_tokens=120,
+                            output_tokens=35,
+                            estimated_cost=0.0002,
+                        ),
+                    )
+
+            with patch("irys_harness.product.GeminiModelRouter", FakeRouter):
+                plan = build_product_plan_preview(
+                    objective="Compare the 2023 and 2024 announcements. How did priorities change?",
+                    paths=[str(root)],
+                    config=load_config(),
+                    use_llm_planning=True,
+                )
+
+            self.assertEqual(plan["first_read_paths"], [str(index.resolve())])
+            self.assertEqual(plan["source_planner"]["status"], "used")
+            self.assertEqual(plan["source_planner"]["selected_count"], 1)
+            self.assertEqual(plan["source_planner"]["staged_directories"][0]["document_count"], 76)
+            self.assertIn("manifest", plan["source_planner"]["staged_directories"][0]["strategy"])
+
+    def test_product_plan_fallback_scopes_announcement_comparison(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            releases = root / "ir" / "news-releases"
+            releases.mkdir(parents=True)
+            index = releases / "INDEX.md"
+            index.write_text("Release index with dated announcement titles.", encoding="utf-8")
+            for item in range(75):
+                (releases / f"release-{item:03d}.txt").write_text("announcement body", encoding="utf-8")
+            background = root / "policies"
+            background.mkdir()
+            for item in range(20):
+                (background / f"policy-{item:03d}.txt").write_text("generic policy", encoding="utf-8")
+
+            plan = build_product_plan_preview(
+                objective="Compare the announcements in 2023 and 2024. How did priorities change?",
+                paths=[str(root)],
+            )
+
+            self.assertLess(plan["first_read_count"], plan["discovered_count"])
+            self.assertIn(str(index.resolve()), plan["first_read_paths"])
+            self.assertTrue(all("news-releases" in path for path in plan["first_read_paths"]))
+
     def test_source_planner_prompt_uses_bounded_inventory(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -522,6 +600,40 @@ class ProductMatterTests(unittest.TestCase):
 
         self.assertEqual(retrieved[0].doc_id, "doc_0002")
         self.assertIn("diluted was $0.52", retrieved[0].text)
+
+    def test_product_retrieval_boosts_announcement_inventory_for_priority_questions(self) -> None:
+        documents = [
+            {"doc_id": "doc_0001", "filename": "quarterly-filing.txt"},
+            {"doc_id": "doc_0002", "filename": "INDEX.md"},
+        ]
+        chunks = [
+            {
+                "doc_id": "doc_0001",
+                "chunk_id": "doc_0001_chunk_0000",
+                "text": "2023 2024 company financial statements convertible senior notes accounting policy " * 60,
+            },
+            {
+                "doc_id": "doc_0002",
+                "chunk_id": "doc_0002_chunk_0000",
+                "text": (
+                    "# Datadog press releases\n"
+                    "- datadog-announces-bits-ai-assistant-help-engineers-quickly.pdf\n"
+                    "- datadog-and-microsoft-announce-strategic-partnership.pdf\n"
+                    "- datadog-acquires-eppo-expand-its-ai-product-analytics.pdf\n"
+                    "- datadog-adds-identity-vulnerability-and-app-level-findings.pdf\n"
+                ),
+            },
+        ]
+
+        retrieved = retrieve_product_chunks(
+            chunks,
+            ["Compare 2023 and 2024 announcements. How did company priorities change?"],
+            documents,
+            top_k=1,
+        )
+
+        self.assertEqual(retrieved[0].doc_id, "doc_0002")
+        self.assertIn("press releases", retrieved[0].text)
 
     def test_packet_review_can_select_supplemental_held_back_documents(self) -> None:
         with TemporaryDirectory() as tmp:

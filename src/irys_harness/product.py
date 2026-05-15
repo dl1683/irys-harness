@@ -39,6 +39,8 @@ MAX_SOURCE_PLANNER_CANDIDATE_PATHS = 240
 MAX_SOURCE_PLANNER_DIRECTORY_ROWS = 80
 MAX_SOURCE_PLANNER_OUTPUT_TOKENS = 4096
 MAX_SUPPLEMENTAL_FIRST_READ_DOCS = 12
+MAX_SOURCE_PLANNER_DIRECTORY_FULL_EXPANSION = 40
+SOURCE_MANIFEST_FILENAMES = {"index.md", "index.csv"}
 
 
 class ProductRunCancelled(RuntimeError):
@@ -850,18 +852,20 @@ def plan_with_cheap_source_planner(
             max_output_tokens=MAX_SOURCE_PLANNER_OUTPUT_TOKENS,
         )
         payload = parse_json_object(result.text)
-        selected_paths = unique_paths(
-            [
-                *resolve_planner_selected_paths(payload, paths),
-                *resolve_planner_selected_directories(payload, paths),
-            ]
-        )
+        directory_paths, staged_directories = resolve_planner_selected_directories(payload, paths)
+        selected_paths = unique_paths([*resolve_planner_selected_paths(payload, paths), *directory_paths])
         if payload.get("should_read_full_corpus") is True:
             selected_paths = paths
         status = "used" if selected_paths else "empty_selection"
+        reason = str(payload.get("reason") or payload.get("document_strategy") or "")
+        if staged_directories:
+            reason = (
+                reason.strip()
+                + " Large selected directories were staged through index or manifest files before full-document reading."
+            ).strip()
         return selected_paths, {
             "status": status,
-            "reason": str(payload.get("reason") or payload.get("document_strategy") or ""),
+            "reason": reason,
             "confidence": str(payload.get("confidence") or ""),
             "should_read_full_corpus": bool(payload.get("should_read_full_corpus")),
             "selected_count": len(selected_paths),
@@ -869,6 +873,7 @@ def plan_with_cheap_source_planner(
             "selected_directories": [str(item) for item in payload.get("selected_directories", [])[:50]]
             if isinstance(payload.get("selected_directories"), list)
             else [],
+            "staged_directories": staged_directories,
             "rejected_paths": [str(item) for item in payload.get("rejected_paths", [])[:50]]
             if isinstance(payload.get("rejected_paths"), list)
             else [],
@@ -897,6 +902,7 @@ def build_source_planner_prompt(
         "Decide which files should be read first for the user's objective. Use semantic judgment over path names, "
         "folder structure, file types, dates, and deterministic hints. Prefer high-quality work product over minimal token use.\n"
         "If the objective likely requires broad comparison or the candidate list is too ambiguous, set should_read_full_corpus true.\n"
+        "If a broad folder has an index, manifest, or file list, prefer selecting that index first and then specific documents after review, rather than selecting hundreds of files blindly.\n"
         "Do not overfit to finance or legal filings; this may be legal, finance, biomedical, governance, email, research, or another document set.\n\n"
         f"User objective:\n{objective.strip()}\n\n"
         f"User plan correction:\n{(plan_note or '').strip() or '- None.'}\n\n"
@@ -1024,10 +1030,10 @@ def resolve_planner_selected_paths(payload: dict[str, Any], paths: list[Path]) -
     return selected
 
 
-def resolve_planner_selected_directories(payload: dict[str, Any], paths: list[Path]) -> list[Path]:
+def resolve_planner_selected_directories(payload: dict[str, Any], paths: list[Path]) -> tuple[list[Path], list[dict[str, Any]]]:
     raw_items = payload.get("selected_directories", [])
     if not isinstance(raw_items, list):
-        return []
+        return [], []
     resolved_paths = [path.resolve() for path in paths]
     known_dirs = {str(path.parent.resolve()).lower(): path.parent.resolve() for path in resolved_paths}
     selected_dirs: list[Path] = []
@@ -1044,19 +1050,32 @@ def resolve_planner_selected_directories(payload: dict[str, Any], paths: list[Pa
             selected_dirs.append(candidate)
 
     if not selected_dirs:
-        return []
+        return [], []
 
     selected_paths: list[Path] = []
+    staged_directories: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for path in resolved_paths:
-        parent = path.parent.resolve()
-        if not any(path_is_relative_to(parent, directory) for directory in selected_dirs):
-            continue
-        key = str(path).lower()
-        if key not in seen:
-            selected_paths.append(path)
-            seen.add(key)
-    return selected_paths
+    for directory in selected_dirs:
+        directory_paths = [path for path in resolved_paths if path_is_relative_to(path.parent.resolve(), directory)]
+        manifest_paths = [path for path in directory_paths if path.name.lower() in SOURCE_MANIFEST_FILENAMES]
+        if len(directory_paths) > MAX_SOURCE_PLANNER_DIRECTORY_FULL_EXPANSION and manifest_paths:
+            staged_directories.append(
+                {
+                    "directory": str(directory),
+                    "document_count": len(directory_paths),
+                    "strategy": "read_manifest_before_full_directory",
+                    "manifest_paths": [str(path) for path in manifest_paths],
+                }
+            )
+            candidates = manifest_paths
+        else:
+            candidates = directory_paths
+        for path in candidates:
+            key = str(path).lower()
+            if key not in seen:
+                selected_paths.append(path)
+                seen.add(key)
+    return selected_paths, staged_directories
 
 
 def path_is_relative_to(path: Path, parent: Path) -> bool:
@@ -1184,7 +1203,22 @@ def infer_requested_document_families(lowered: str, tokens: list[str]) -> list[s
             },
         ),
         ("quarterly_report", {"10-q", "10q", "quarter", "quarterly", "q1", "q2", "q3", "q4"}),
-        ("current_report", {"8-k", "8k", "current", "event", "press", "release", "announced"}),
+        (
+            "current_report",
+            {
+                "8-k",
+                "8k",
+                "announcement",
+                "announcements",
+                "announced",
+                "current",
+                "event",
+                "news",
+                "press",
+                "release",
+                "releases",
+            },
+        ),
         (
             "agreement",
             {
@@ -1634,7 +1668,9 @@ def build_product_queries(objective: str, documents: list[dict[str, Any]]) -> li
             ]
         )
     if "current_report" in families:
-        queries.append("press release announcement financial results business highlights priorities")
+        queries.append(
+            "press release news release announcement announces launches expands acquires partnership product platform priorities"
+        )
     if profile.get("issue_discovery"):
         queries.append("email correspondence timeline issue dispute problem parties events")
     if "agreement" in families:
@@ -1669,8 +1705,24 @@ def retrieve_product_chunks(
                 continue
             per_doc_hits.extend(retrieve_chunks(doc_chunks, queries, top_k=per_doc_limit))
 
+    boost_hits = [
+        RetrievedChunk(
+            chunk_id=str(chunk.get("chunk_id") or ""),
+            doc_id=str(chunk.get("doc_id") or ""),
+            score=0.0,
+            text=str(chunk.get("text") or ""),
+        )
+        for chunk in chunks
+        if product_retrieval_boost(str(chunk.get("text") or ""), queries) > 0
+    ]
+    boost_hits = sorted(
+        boost_hits,
+        key=lambda hit: product_retrieval_boost(hit.text, queries),
+        reverse=True,
+    )[: max(top_k * 2, 40)]
+
     by_key: dict[tuple[str, str], RetrievedChunk] = {}
-    for item in [*global_hits, *per_doc_hits]:
+    for item in [*global_hits, *per_doc_hits, *boost_hits]:
         boosted = boost_product_retrieval_score(item, queries)
         by_key[(boosted.doc_id, boosted.chunk_id)] = boosted
 
@@ -1707,12 +1759,12 @@ def retrieve_product_chunks(
 
 def boost_product_retrieval_score(item: RetrievedChunk, queries: list[str]) -> RetrievedChunk:
     boost = product_retrieval_boost(item.text, queries)
-    if boost <= 0:
+    if boost == 0:
         return item
     return RetrievedChunk(
         chunk_id=item.chunk_id,
         doc_id=item.doc_id,
-        score=float(item.score) + boost,
+        score=max(0.0, float(item.score) + boost),
         text=item.text,
     )
 
@@ -1741,6 +1793,36 @@ def product_retrieval_boost(text: str, queries: list[str]) -> float:
             boost += 6.0
         if "fiscal year" in text_lower or "year ended" in text_lower or "full year" in text_lower:
             boost += 2.0
+    if any(
+        term in query_text
+        for term in ["announcement", "announcements", "news release", "press release", "priorities", "priority"]
+    ):
+        announcement_phrases = [
+            "press releases",
+            "news releases",
+            "announces",
+            "announced",
+            "launches",
+            "launched",
+            "expands",
+            "expanded",
+            "acquires",
+            "acquired",
+            "partnership",
+            "integration",
+            "platform",
+            "product",
+            "security",
+            "ai",
+            "observability",
+        ]
+        for phrase in announcement_phrases:
+            if phrase in text_lower:
+                boost += 2.0
+        if ".pdf" in text_lower and ("announces" in text_lower or "press releases" in text_lower):
+            boost += 20.0
+        if "financial statements" in text_lower or "convertible senior notes" in text_lower:
+            boost -= 18.0
     return boost
 
 
