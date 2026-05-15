@@ -738,19 +738,21 @@ def build_deliverable_contract(state: RunState) -> dict[str, Any]:
         suffix = Path(str(filename)).suffix.lower()
         workbook_sheets = build_workbook_sheet_plan(str(filename), haystack) if suffix == ".xlsx" else []
         artifact_role = infer_artifact_role(str(filename), haystack)
-        plans.append(
-            {
-                "filename": str(filename),
-                "extension": suffix,
-                "artifact_kind": "workbook" if suffix == ".xlsx" else "document",
-                "artifact_role": artifact_role,
-                "drafting_mode": infer_drafting_mode(artifact_role, suffix),
-                "required_sections": build_required_sections(str(filename), haystack, workbook_sheets),
-                "workbook_sheets": workbook_sheets,
-                "evidence_focus": build_evidence_focus(haystack),
-                "artifact_goal": build_artifact_goal(str(filename), artifact_role),
-            }
-        )
+        plan = {
+            "filename": str(filename),
+            "extension": suffix,
+            "artifact_kind": "workbook" if suffix == ".xlsx" else "document",
+            "artifact_role": artifact_role,
+            "drafting_mode": infer_drafting_mode(artifact_role, suffix),
+            "required_sections": build_required_sections(str(filename), haystack, workbook_sheets),
+            "workbook_sheets": workbook_sheets,
+            "evidence_focus": build_evidence_focus(haystack),
+            "artifact_goal": build_artifact_goal(str(filename), artifact_role),
+        }
+        source_form_mode = infer_source_form_mode(str(filename), haystack, artifact_role)
+        if source_form_mode != "none":
+            plan["source_form_mode"] = source_form_mode
+        plans.append(plan)
     package_plan = build_package_plan(plans, haystack)
     return {
         "version": 1,
@@ -776,6 +778,10 @@ def build_deliverable_contract(state: RunState) -> dict[str, Any]:
     }
 
 
+def strip_none_values(value: dict[str, Any]) -> dict[str, Any]:
+    return {key: item for key, item in value.items() if item is not None}
+
+
 def build_package_plan(deliverable_plans: list[dict[str, Any]], haystack: str) -> dict[str, Any]:
     roles = [str(item.get("artifact_role", "")) for item in deliverable_plans]
     package_kind = infer_package_kind(roles, haystack, deliverable_count=len(deliverable_plans))
@@ -784,14 +790,17 @@ def build_package_plan(deliverable_plans: list[dict[str, Any]], haystack: str) -
         "deliverable_count": len(deliverable_plans),
         "requires_file_by_file_allocation": len(deliverable_plans) > 1,
         "deliverable_roles": [
-            {
-                "filename": item.get("filename"),
-                "artifact_role": item.get("artifact_role"),
-                "drafting_mode": item.get("drafting_mode"),
-                "artifact_goal": item.get("artifact_goal"),
-                "required_section_count": len(item.get("required_sections", []) or []),
-                "workbook_sheet_count": len(item.get("workbook_sheets", []) or []),
-            }
+            strip_none_values(
+                {
+                    "filename": item.get("filename"),
+                    "artifact_role": item.get("artifact_role"),
+                    "drafting_mode": item.get("drafting_mode"),
+                    "source_form_mode": item.get("source_form_mode"),
+                    "artifact_goal": item.get("artifact_goal"),
+                    "required_section_count": len(item.get("required_sections", []) or []),
+                    "workbook_sheet_count": len(item.get("workbook_sheets", []) or []),
+                }
+            )
             for item in deliverable_plans
         ],
         "shared_state_policy": [
@@ -819,14 +828,17 @@ def build_deliverable_atom_map(
         if not filename:
             continue
         atoms = select_deliverable_atoms(filename, plan, source_text, max_atoms=max_atoms)
-        mapped[filename] = {
-            "artifact_role": plan.get("artifact_role"),
-            "drafting_mode": plan.get("drafting_mode"),
-            "required_sections": list(plan.get("required_sections", []) or [])[:12],
-            "atom_count": len(atoms),
-            "coverage_risk": "high" if not atoms else "medium" if len(atoms) < 2 else "low",
-            "atoms": atoms,
-        }
+        mapped[filename] = strip_none_values(
+            {
+                "artifact_role": plan.get("artifact_role"),
+                "drafting_mode": plan.get("drafting_mode"),
+                "source_form_mode": plan.get("source_form_mode"),
+                "required_sections": list(plan.get("required_sections", []) or [])[:12],
+                "atom_count": len(atoms),
+                "coverage_risk": "high" if not atoms else "medium" if len(atoms) < 2 else "low",
+                "atoms": atoms,
+            }
+        )
     if not mapped:
         return {}
     return {
@@ -870,18 +882,21 @@ def build_self_contained_deliverable_coverage_pack(
         )
         section_names = [str(section) for section in plan.get("required_sections", []) or []]
         file_entries.append(
-            {
-                "filename": filename,
-                "artifact_role": plan.get("artifact_role"),
-                "drafting_mode": plan.get("drafting_mode"),
-                "artifact_goal": plan.get("artifact_goal"),
-                "required_sections": section_names[:14],
-                "self_contained_requirement": build_self_contained_requirement(plan),
-                "file_specific_rows": atoms,
-                "role_or_section_rows": role_rows,
-                "shared_rows_to_repeat_if_relevant": package_rows[:6],
-                "coverage_risk": "high" if not atoms and not role_rows else "medium" if len(atoms) + len(role_rows) < 3 else "low",
-            }
+            strip_none_values(
+                {
+                    "filename": filename,
+                    "artifact_role": plan.get("artifact_role"),
+                    "drafting_mode": plan.get("drafting_mode"),
+                    "source_form_mode": plan.get("source_form_mode"),
+                    "artifact_goal": plan.get("artifact_goal"),
+                    "required_sections": section_names[:14],
+                    "self_contained_requirement": build_self_contained_requirement(plan),
+                    "file_specific_rows": atoms,
+                    "role_or_section_rows": role_rows,
+                    "shared_rows_to_repeat_if_relevant": package_rows[:6],
+                    "coverage_risk": "high" if not atoms and not role_rows else "medium" if len(atoms) + len(role_rows) < 3 else "low",
+                }
+            )
         )
     if not file_entries:
         return {}
@@ -907,8 +922,19 @@ def build_role_coverage_keywords(plan: dict[str, Any]) -> list[str]:
     for text in [role, mode, sections, goal]:
         keywords.extend(token for token in re.findall(r"[a-z][a-z0-9]{3,}", text.lower()) if token)
     role_key = str(plan.get("artifact_role") or "")
-    if role_key in {"operative_instrument", "legal_agreement", "limited_partnership_agreement", "fee_letter"}:
+    if role_key in {
+        "operative_instrument",
+        "legal_agreement",
+        "limited_partnership_agreement",
+        "fee_letter",
+        "commitment_letter",
+        "board_resolution_or_consent",
+    }:
         keywords.extend(["clause", "section", "provision", "drafting", "operative", "signature", "schedule"])
+        if role_key == "commitment_letter":
+            keywords.extend(["commitment", "facility", "lender", "conditions", "term sheet", "funding"])
+        if role_key == "board_resolution_or_consent":
+            keywords.extend(["board", "resolution", "consent", "officer", "authorization", "bylaws", "quorum", "vote"])
     elif role_key in {"court_motion", "court_stipulation_or_order", "court_filing_or_response"}:
         keywords.extend(["caption", "relief", "order", "motion", "argument", "facts", "reservation", "signature"])
     elif role_key in {"issues_memo", "analysis_memo"}:
@@ -946,7 +972,14 @@ def select_package_wide_coverage_rows(source_text: str, *, max_rows: int) -> lis
 
 def build_self_contained_requirement(plan: dict[str, Any]) -> str:
     role = str(plan.get("artifact_role") or "")
-    if role in {"operative_instrument", "legal_agreement", "limited_partnership_agreement", "fee_letter"}:
+    if role in {
+        "operative_instrument",
+        "legal_agreement",
+        "limited_partnership_agreement",
+        "fee_letter",
+        "commitment_letter",
+        "board_resolution_or_consent",
+    }:
         return "Include operative clause text plus any source-backed drafting notes needed to understand why the provisions are drafted that way."
     if role in {"court_motion", "court_stipulation_or_order", "court_filing_or_response"}:
         return "Include caption, relief or ordered terms, factual support, procedural mechanics, reservations, and signature mechanics inside this filing."
@@ -966,6 +999,8 @@ DENSE_ARTIFACT_FULL_CONTEXT_ROLES = {
     "legal_agreement",
     "limited_partnership_agreement",
     "fee_letter",
+    "commitment_letter",
+    "board_resolution_or_consent",
     "private_placement_memorandum",
     "compliance_manual",
     "regulated_form_or_filing",
@@ -1252,6 +1287,7 @@ def is_internal_contract_or_control_line(line: str) -> bool:
     if re.match(
         r'^"?('
         r"artifact_goal|artifact_role|drafting_mode|filename|package_kind|deliverable_count|"
+        r"source_form_mode|"
         r"required_section_count|required_sections|workbook_sheet_count|workbook_sheets|"
         r"deliverable_roles|shared_state_policy|deliverable_contract|package_plan|"
         r"mode|source|version|coverage_risk|atom_count|max_atoms_per_deliverable"
@@ -1363,9 +1399,22 @@ def infer_package_kind(roles: list[str], haystack: str, *, deliverable_count: in
         return "court_motion_plus_issues_package"
     if "court_motion" in role_set:
         return "court_motion_package" if deliverable_count > 1 else "court_motion"
-    if any(role in role_set for role in ["operative_instrument", "legal_agreement", "fee_letter", "limited_partnership_agreement"]) and "issues_memo" in role_set:
+    if any(
+        role in role_set
+        for role in [
+            "operative_instrument",
+            "legal_agreement",
+            "fee_letter",
+            "commitment_letter",
+            "board_resolution_or_consent",
+            "limited_partnership_agreement",
+        ]
+    ) and "issues_memo" in role_set:
         return "instrument_plus_issues_package"
-    if any(role in role_set for role in ["operative_instrument", "legal_agreement", "fee_letter"]):
+    if any(
+        role in role_set
+        for role in ["operative_instrument", "legal_agreement", "fee_letter", "commitment_letter", "board_resolution_or_consent"]
+    ):
         return "legal_instrument_package" if deliverable_count > 1 else "legal_instrument"
     if deliverable_count > 1:
         return "multi_deliverable_package"
@@ -1380,6 +1429,8 @@ def infer_artifact_role(filename: str, haystack: str) -> str:
     lower = filename.lower()
     stem = Path(lower).stem
     suffix = Path(lower).suffix
+    normalized_stem = stem.replace("_", "-")
+    stem_tokens = set(re.split(r"[-\s]+", normalized_stem))
     if suffix == ".xlsx":
         if "financial" in stem:
             return "financial_statement_workbook"
@@ -1424,16 +1475,28 @@ def infer_artifact_role(filename: str, haystack: str) -> str:
         return "regulated_form_or_filing"
     if "motion" in stem:
         return "court_motion"
-    analysis_like_stem = any(term in stem for term in ["memo", "memorandum", "report", "assessment", "analysis", "comparison", "review", "markup"])
+    analysis_deliverable_stem = any(
+        term in stem
+        for term in ["memo", "memorandum", "report", "assessment", "analysis", "comparison", "review", "summary"]
+    )
+    analysis_like_stem = analysis_deliverable_stem or "markup" in stem
     if (any(term in stem for term in ["stipulation", "agreed-order", "proposed-order"]) or stem.endswith("-order")) and not analysis_like_stem:
         return "court_stipulation_or_order"
     if any(term in stem for term in ["complaint", "answer", "brief", "objection", "application"]):
         return "court_filing_or_response"
+    if is_board_action_filename(normalized_stem) and not analysis_deliverable_stem:
+        return "board_resolution_or_consent"
+    if "commitment-letter" in normalized_stem and not analysis_deliverable_stem:
+        return "commitment_letter"
+    if is_source_form_agreement_filename(normalized_stem, stem_tokens) and not analysis_deliverable_stem:
+        return "legal_agreement"
     if any(term in stem for term in ["redline", "redlined", "rider"]) and not analysis_like_stem:
         return "operative_instrument"
     if analysis_like_stem:
         return "analysis_memo"
     if "checklist" in stem or "tracker" in stem or "log" in stem:
+        return "checklist_tracker"
+    if "deal-points-library" in normalized_stem or "terms-library" in normalized_stem:
         return "checklist_tracker"
     if stem == "disclosure-schedule-master" or "disclosure-schedule-master" in stem:
         return "disclosure_schedule_master"
@@ -1447,13 +1510,100 @@ def infer_artifact_role(filename: str, haystack: str) -> str:
         return "limited_partnership_agreement"
     if "ppm" in stem or "private-placement-memorandum" in stem:
         return "private_placement_memorandum"
-    if "compliance-manual" in stem or "policy-manual" in stem:
+    if is_policy_or_playbook_filename(normalized_stem):
         return "compliance_manual"
     if any(term in stem for term in ["agreement", "contract", "indenture", "lease", "will", "trust"]):
         return "operative_instrument"
     if any(term in haystack for term in ["proxy statement", "form 8-k", "form 10", "quarterly report"]):
         return "regulated_form_or_filing"
     return "analysis_memo"
+
+
+def is_source_form_agreement_filename(normalized_stem: str, stem_tokens: set[str]) -> bool:
+    if {"spa", "apa", "msa", "nda", "tsa"} & stem_tokens:
+        return True
+    return any(
+        term in normalized_stem
+        for term in [
+            "stock-purchase-agreement",
+            "asset-purchase-agreement",
+            "purchase-agreement",
+            "merger-agreement",
+            "transition-services-agreement",
+            "services-agreement",
+            "supply-agreement",
+            "credit-agreement",
+            "loan-agreement",
+            "security-agreement",
+            "joint-development-agreement",
+            "license-agreement",
+            "investors-rights-agreement",
+            "shareholders-agreement",
+            "operating-agreement",
+            "limited-liability-company-agreement",
+            "indenture",
+            "lease-agreement",
+            "lease",
+        ]
+    )
+
+
+def is_board_action_filename(normalized_stem: str) -> bool:
+    return any(
+        term in normalized_stem
+        for term in [
+            "board-resolution",
+            "board-resolutions",
+            "board-consent",
+            "board-written-consent",
+            "written-consent",
+            "director-consent",
+            "member-consent",
+            "manager-consent",
+            "shareholder-consent",
+            "stockholder-consent",
+        ]
+    )
+
+
+def is_policy_or_playbook_filename(normalized_stem: str) -> bool:
+    return any(
+        term in normalized_stem
+        for term in [
+            "compliance-manual",
+            "policy-manual",
+            "acceptable-use-policy",
+            "ai-policy",
+            "privacy-policy",
+            "security-policy",
+            "retention-policy",
+            "code-of-conduct",
+            "playbook",
+        ]
+    )
+
+
+def infer_source_form_mode(filename: str, haystack: str, artifact_role: str) -> str:
+    if artifact_role in {"issues_memo", "analysis_memo"} or artifact_role.endswith("_workbook"):
+        return "none"
+    lower = filename.lower()
+    stem = Path(lower).stem.replace("_", "-")
+    combined = f"{stem} {haystack}"
+    if artifact_role.startswith("disclosure_schedule"):
+        return "disclosure_schedule"
+    if artifact_role == "board_resolution_or_consent":
+        return "board_action"
+    if artifact_role == "commitment_letter":
+        return "commitment_letter"
+    if artifact_role == "compliance_manual":
+        return "policy_or_playbook" if is_policy_or_playbook_filename(stem) else "compliance_manual"
+    if "precedent" in combined and artifact_role in {"legal_agreement", "operative_instrument"}:
+        return "agreement_from_precedent"
+    if any(term in combined for term in ["redline", "redlined", "markup", "blackline"]):
+        return "redline_or_markup"
+    if artifact_role in {"legal_agreement", "operative_instrument", "limited_partnership_agreement", "fee_letter"}:
+        return "source_form_artifact"
+    return "none"
 
 
 def is_regulated_filing_filename(stem: str) -> bool:
@@ -1537,6 +1687,8 @@ def infer_drafting_mode(artifact_role: str, suffix: str) -> str:
         return "certificate_drafting"
     if artifact_role == "consent_letter":
         return "consent_letter_drafting"
+    if artifact_role in {"commitment_letter", "board_resolution_or_consent"}:
+        return "operative_legal_drafting"
     if artifact_role in {"opinion_outline", "transfer_pricing_memo"}:
         return "issue_analysis"
     if artifact_role in {"court_motion", "court_stipulation_or_order", "court_filing_or_response"}:
@@ -1551,6 +1703,8 @@ def infer_drafting_mode(artifact_role: str, suffix: str) -> str:
         return "schedule_exception_drafting"
     if artifact_role in {
         "fee_letter",
+        "commitment_letter",
+        "board_resolution_or_consent",
         "legal_agreement",
         "limited_partnership_agreement",
         "operative_instrument",
@@ -1568,6 +1722,8 @@ def build_artifact_goal(filename: str, artifact_role: str) -> str:
         "disclosure_schedule_master": "Create the master disclosure schedule cover, general provisions, table of contents, and schedule index.",
         "disclosure_schedule": "Draft schedule-specific exceptions keyed to the governing representation and source facts.",
         "fee_letter": "Draft operative fee-letter provisions with exact fee triggers, rates, payment timing, flex terms, and confidentiality/survival language.",
+        "commitment_letter": "Draft the actual commitment letter with parties, facility terms, conditions, commitments, approvals, closing mechanics, and signatures.",
+        "board_resolution_or_consent": "Draft the actual board, director, member, manager, shareholder, or stockholder consent/resolution with recitals, approvals, authorizations, delegations, and signatures.",
         "legal_agreement": "Draft operative agreement provisions, not only a memo about the agreement.",
         "limited_partnership_agreement": "Draft the complete LPA article structure with operative fund terms and source-derived economics.",
         "private_placement_memorandum": "Draft a regulated offering document body with section-by-section disclosure coverage.",
@@ -2444,6 +2600,30 @@ def build_artifact_required_sections(filename: str, haystack: str) -> list[str]:
             "Signature blocks",
             "Issues and source notes appendix",
         ]
+    if role == "commitment_letter":
+        return [
+            "Commitment Letter",
+            "Parties, addressees, and transaction reference",
+            "Facility, commitment, and lender roles",
+            "Conditions precedent and required approvals",
+            "Commitment period, expiration, funding, and closing mechanics",
+            "Fees, expenses, indemnities, confidentiality, and assignments",
+            "Exhibits, annexes, and term sheet references",
+            "Signature blocks",
+            "Source-backed drafting notes appendix",
+        ]
+    if role == "board_resolution_or_consent":
+        return [
+            "Board consent or resolution title",
+            "Company, directors or approving body, and meeting or written-consent posture",
+            "Recitals and source facts",
+            "Approval of transaction or document package",
+            "Authority to execute agreements, certificates, filings, and ancillary documents",
+            "Officer delegations and ratification",
+            "Voting, abstention, quorum, conflict, and bylaw mechanics",
+            "Secretary certification and signature blocks",
+            "Source-backed drafting notes appendix",
+        ]
     if role == "legal_agreement" and "investors-rights" in stem:
         return [
             "Amended and Restated Investors' Rights Agreement",
@@ -2458,6 +2638,19 @@ def build_artifact_required_sections(filename: str, haystack: str) -> list[str]:
             "Transfer, termination, and amendment provisions",
             "Signature blocks",
             "Drafting notes appendix",
+        ]
+    if role == "legal_agreement":
+        return [
+            "Agreement title",
+            "Parties, recitals, and defined terms",
+            "Core transaction or commercial provisions",
+            "Representations and warranties",
+            "Covenants and interim operating obligations",
+            "Conditions and closing mechanics",
+            "Indemnity, liability limitations, and remedies",
+            "Termination, survival, notices, and miscellaneous provisions",
+            "Schedules, exhibits, and signature blocks",
+            "Source-backed drafting notes appendix",
         ]
     if role == "limited_partnership_agreement":
         return [
@@ -3132,6 +3325,8 @@ def needs_worker_packet_safety_net_for_synthesis(state: RunState) -> bool:
             "operative_instrument",
             "legal_agreement",
             "limited_partnership_agreement",
+            "commitment_letter",
+            "board_resolution_or_consent",
             "court_motion",
             "court_stipulation_or_order",
             "court_filing_or_response",

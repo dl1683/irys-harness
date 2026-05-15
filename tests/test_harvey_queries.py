@@ -1091,6 +1091,67 @@ class HarveyQueryTests(unittest.TestCase):
         haystack = "Prepare redlined lease and rider documents for a tenant-side negotiation package."
         self.assertEqual(infer_artifact_role("redlined-rider.docx", haystack), "operative_instrument")
 
+    def test_precedent_spa_deliverable_is_not_treated_as_analysis_memo(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="corporate-ma/draft-ma-agreement-from-precedent/scenario-01",
+            question="Draft an SPA from precedent and prepare a drafting issues memo.",
+            context_files=[],
+            answer_schema={"deliverables": ["draft-spa-clearfield.docx", "drafting-issues-memo.docx"], "criteria_count": 120},
+            metadata={"practice_area": "corporate-ma"},
+        )
+        state = RunState(task=task, config=load_config(), documents=[])
+        contract = build_deliverable_contract(state)
+        roles = {item["filename"]: item for item in contract["deliverables"]}
+
+        self.assertEqual(roles["draft-spa-clearfield.docx"]["artifact_role"], "legal_agreement")
+        self.assertEqual(roles["draft-spa-clearfield.docx"]["source_form_mode"], "agreement_from_precedent")
+        self.assertIn("Agreement title", roles["draft-spa-clearfield.docx"]["required_sections"])
+        self.assertEqual(roles["drafting-issues-memo.docx"]["artifact_role"], "issues_memo")
+        self.assertIn(
+            "dense_artifact_full_context_synthesis_path",
+            pre_synthesis_packet_creator_skip_reasons(state, deliverable_contract=contract),
+        )
+
+    def test_policy_artifact_and_policy_memo_are_split_by_filename_role(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="corporate-governance/draft-internal-ai-acceptable-use-policy",
+            question="Draft an internal AI acceptable use policy and an executive summary memo.",
+            context_files=[],
+            answer_schema={"deliverables": ["ai-acceptable-use-policy.docx", "policy-executive-summary-memo.docx"]},
+            metadata={"practice_area": "corporate-governance"},
+        )
+        state = RunState(task=task, config=load_config(), documents=[])
+        contract = build_deliverable_contract(state)
+        roles = {item["filename"]: item for item in contract["deliverables"]}
+
+        self.assertEqual(roles["ai-acceptable-use-policy.docx"]["artifact_role"], "compliance_manual")
+        self.assertEqual(roles["ai-acceptable-use-policy.docx"]["source_form_mode"], "policy_or_playbook")
+        self.assertIn("Policies and procedures by compliance area", roles["ai-acceptable-use-policy.docx"]["required_sections"])
+        self.assertEqual(roles["policy-executive-summary-memo.docx"]["artifact_role"], "analysis_memo")
+
+    def test_commitment_letter_and_board_resolution_get_source_form_roles(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="banking-finance/draft-credit-facility-package",
+            question="Draft a commitment letter, board resolution, and issues memorandum for a credit facility.",
+            context_files=[],
+            answer_schema={"deliverables": ["commitment-letter.docx", "board-resolution-credit-facility.docx", "issues-memorandum.docx"]},
+            metadata={"practice_area": "banking-finance"},
+        )
+        state = RunState(task=task, config=load_config(), documents=[])
+        contract = build_deliverable_contract(state)
+        roles = {item["filename"]: item for item in contract["deliverables"]}
+
+        self.assertEqual(roles["commitment-letter.docx"]["artifact_role"], "commitment_letter")
+        self.assertEqual(roles["commitment-letter.docx"]["source_form_mode"], "commitment_letter")
+        self.assertIn("Commitment Letter", roles["commitment-letter.docx"]["required_sections"])
+        self.assertEqual(roles["board-resolution-credit-facility.docx"]["artifact_role"], "board_resolution_or_consent")
+        self.assertEqual(roles["board-resolution-credit-facility.docx"]["source_form_mode"], "board_action")
+        self.assertIn("Board consent or resolution title", roles["board-resolution-credit-facility.docx"]["required_sections"])
+        self.assertEqual(roles["issues-memorandum.docx"]["artifact_role"], "issues_memo")
+
     def test_comparison_matrix_workbook_preserves_issue_matrix_shape(self) -> None:
         sheets = build_workbook_sheet_plan(
             "comparison-matrix.xlsx",
