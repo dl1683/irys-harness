@@ -48,6 +48,7 @@ def attach_harvey_scores(trace: dict[str, Any], scores: dict[str, Any]) -> dict[
             "scored_at": scores.get("scored_at"),
             "n_passed": n_passed,
             "n_criteria": n_criteria,
+            "criteria_results": scores.get("criteria_results", []),
         },
     }
     metrics = dict(updated.get("metrics", {}) or {})

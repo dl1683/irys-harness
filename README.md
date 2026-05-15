@@ -26,6 +26,18 @@ Check the local environment:
 python -m irys_harness doctor
 ```
 
+Run the product matter flow over user-provided documents:
+
+```bash
+python -m irys_harness product-run --objective "Summarize the key obligations." --path ./matter-docs --matter-id acme-review
+```
+
+Serve the local product UI:
+
+```bash
+python -m irys_harness product-ui --host 127.0.0.1 --port 8765
+```
+
 Open and close a local experiment record:
 
 ```bash

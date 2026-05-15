@@ -578,6 +578,65 @@ class HarveyQueryTests(unittest.TestCase):
         self.assertIn("Ticking fee start date and calculation", roles["fee-letter.docx"]["required_sections"])
         self.assertIn("Cross-document inconsistencies", roles["issues-memorandum.docx"]["required_sections"])
 
+    def test_package_plan_treats_amendment_draft_as_operative_instrument(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="banking-finance/draft-amendment-to-credit-agreement",
+            question=(
+                "Review the credit agreement and term sheet; draft the Third Amendment and "
+                "prepare an issues memo. Output: issues-memorandum.docx and third-amendment-draft.docx."
+            ),
+            context_files=[],
+            answer_schema={"deliverables": ["issues-memorandum.docx", "third-amendment-draft.docx"]},
+            metadata={"practice_area": "banking-finance"},
+        )
+        state = RunState(task=task, config=load_config(), documents=[])
+        contract = build_deliverable_contract(state)
+        roles = {item["filename"]: item for item in contract["deliverables"]}
+
+        self.assertEqual(contract["package_plan"]["package_kind"], "instrument_plus_issues_package")
+        self.assertEqual(roles["third-amendment-draft.docx"]["artifact_role"], "operative_instrument")
+        self.assertEqual(roles["third-amendment-draft.docx"]["drafting_mode"], "operative_legal_drafting")
+        self.assertEqual(roles["third-amendment-draft.docx"]["source_form_mode"], "source_form_artifact")
+        self.assertIn("Operative agreement title", roles["third-amendment-draft.docx"]["required_sections"])
+        self.assertNotIn("Key findings", roles["third-amendment-draft.docx"]["required_sections"])
+
+    def test_package_plan_treats_equity_incentive_plan_as_operative_instrument(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="capital-markets/draft-equity-incentive-plan",
+            question="Draft the 2025 equity incentive plan and a drafting memorandum.",
+            context_files=[],
+            answer_schema={"deliverables": ["2025-equity-incentive-plan.docx", "drafting-memorandum.docx"]},
+            metadata={"practice_area": "capital-markets"},
+        )
+        state = RunState(task=task, config=load_config(), documents=[])
+        contract = build_deliverable_contract(state)
+        roles = {item["filename"]: item for item in contract["deliverables"]}
+
+        self.assertEqual(roles["2025-equity-incentive-plan.docx"]["artifact_role"], "operative_instrument")
+        self.assertEqual(roles["2025-equity-incentive-plan.docx"]["drafting_mode"], "operative_legal_drafting")
+        self.assertIn("Share reserve and share-count adjustments", roles["2025-equity-incentive-plan.docx"]["required_sections"])
+        self.assertEqual(roles["drafting-memorandum.docx"]["artifact_role"], "analysis_memo")
+
+    def test_capital_closing_checklist_contract_does_not_inherit_tax_sections(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="capital-markets/compare-closing-documents-against-closing-checklist",
+            question=(
+                "Compare closing documents against the master closing checklist for a senior notes offering, "
+                "including certificates, comfort letters, opinions, CUSIPs, and tax opinion issues."
+            ),
+            context_files=[],
+            answer_schema={"deliverables": ["closing-discrepancy-report.docx"]},
+            metadata={"practice_area": "capital-markets"},
+        )
+        state = RunState(task=task, config=load_config(), documents=[])
+        contract = build_deliverable_contract(state)
+        plan = contract["deliverables"][0]
+
+        self.assertNotIn("Tax issue matrix", plan["required_sections"])
+
     def test_package_plan_builds_disclosure_schedule_artifacts_without_criteria(self) -> None:
         task = BenchmarkTask(
             benchmark="harvey_lab_sample",

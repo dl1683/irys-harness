@@ -58,6 +58,7 @@ def load_documents(
     chunk_size_chars: int = 4000,
     chunk_overlap_chars: int = 400,
     max_chars_per_doc: int | None = 200_000,
+    source_posture: str = "benchmark_provided_context",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     documents: list[dict[str, Any]] = []
     chunks: list[dict[str, Any]] = []
@@ -68,6 +69,7 @@ def load_documents(
             doc_id=f"doc_{index:04d}",
             converter=converter,
             max_chars=max_chars_per_doc,
+            source_posture=source_posture,
         )
         documents.append(document.to_dict())
         doc_chunks = chunk_text(
@@ -86,6 +88,7 @@ def load_document(
     doc_id: str,
     converter: MarkItDown | None = None,
     max_chars: int | None = 200_000,
+    source_posture: str = "benchmark_provided_context",
 ) -> tuple[DocumentRecord, str]:
     try:
         text = convert_to_text(path, converter=converter)
@@ -98,7 +101,7 @@ def load_document(
                 filename=path.name,
                 extension=path.suffix.lower(),
                 bytes=path.stat().st_size if path.exists() else None,
-                source_posture="benchmark_provided_context",
+                source_posture=source_posture,
                 text_chars=len(text),
             ),
             text,
@@ -111,7 +114,7 @@ def load_document(
                 filename=path.name,
                 extension=path.suffix.lower(),
                 bytes=path.stat().st_size if path.exists() else None,
-                source_posture="benchmark_provided_context",
+                source_posture=source_posture,
                 load_error=f"{type(exc).__name__}: {exc}",
             ),
             "",

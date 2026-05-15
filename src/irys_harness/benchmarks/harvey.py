@@ -1488,6 +1488,10 @@ def infer_artifact_role(filename: str, haystack: str) -> str:
         return "board_resolution_or_consent"
     if "commitment-letter" in normalized_stem and not analysis_deliverable_stem:
         return "commitment_letter"
+    if is_operative_amendment_filename(normalized_stem) and not analysis_deliverable_stem:
+        return "operative_instrument"
+    if is_operative_plan_filename(normalized_stem, haystack) and not analysis_deliverable_stem:
+        return "operative_instrument"
     if is_source_form_agreement_filename(normalized_stem, stem_tokens) and not analysis_deliverable_stem:
         return "legal_agreement"
     if any(term in stem for term in ["redline", "redlined", "rider"]) and not analysis_like_stem:
@@ -1544,6 +1548,47 @@ def is_source_form_agreement_filename(normalized_stem: str, stem_tokens: set[str
             "indenture",
             "lease-agreement",
             "lease",
+        ]
+    )
+
+
+def is_operative_amendment_filename(normalized_stem: str) -> bool:
+    return "amendment" in normalized_stem and any(
+        term in normalized_stem
+        for term in [
+            "draft",
+            "credit-agreement",
+            "loan-agreement",
+            "agreement",
+            "indenture",
+            "lease",
+            "charter",
+            "certificate",
+        ]
+    )
+
+
+def is_operative_plan_filename(normalized_stem: str, haystack: str) -> bool:
+    if any(
+        term in normalized_stem
+        for term in [
+            "equity-incentive-plan",
+            "incentive-plan",
+            "management-incentive-plan",
+            "mip",
+            "plan-of-reorganization",
+            "reorganization-plan",
+        ]
+    ):
+        return True
+    return normalized_stem.endswith("-plan") and any(
+        term in haystack
+        for term in [
+            "draft",
+            "equity incentive",
+            "management incentive",
+            "reorganization plan",
+            "operative plan",
         ]
     )
 
@@ -1967,7 +2012,7 @@ def has_litigation_dispute_resolution_terms(text: str) -> bool:
 
 def has_tax_controversy_terms(text: str) -> bool:
     lower = text.lower()
-    if re.search(r"\btax\b", lower):
+    if lower.startswith("tax/") or " tax/" in lower:
         return True
     return any(
         term in lower
@@ -2650,6 +2695,21 @@ def build_artifact_required_sections(filename: str, haystack: str) -> list[str]:
             "Indemnity, liability limitations, and remedies",
             "Termination, survival, notices, and miscellaneous provisions",
             "Schedules, exhibits, and signature blocks",
+            "Source-backed drafting notes appendix",
+        ]
+    if role == "operative_instrument" and any(term in stem for term in ["equity-incentive-plan", "incentive-plan", "mip"]):
+        return [
+            "Equity incentive plan title",
+            "Purpose, effective date, and term",
+            "Share reserve and share-count adjustments",
+            "Administration and eligibility",
+            "Award types and individual limits",
+            "Options and SARs",
+            "Restricted stock, RSUs, and performance awards",
+            "Change in control and corporate transactions",
+            "Tax, withholding, Section 409A, and compliance provisions",
+            "Amendment, termination, and shareholder approval mechanics",
+            "Signature, adoption, and approval blocks",
             "Source-backed drafting notes appendix",
         ]
     if role == "limited_partnership_agreement":

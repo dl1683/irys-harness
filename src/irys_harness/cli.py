@@ -23,6 +23,8 @@ from .doctor import run_doctor
 from .env import load_dotenv_if_present
 from .experiments import close_experiment, open_experiment, read_experiment
 from .harvey_pipeline import HarveyPipelineResult, run_harvey_batch
+from .product import run_product_matter
+from .product_ui import serve_product_ui
 from .state import RunState
 from .trace import TraceWriter, attach_harvey_scores, diagnose_trace, load_trace, save_trace, trace_summary
 
@@ -88,6 +90,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = sub.add_parser("doctor", help="Check local harness environment")
     doctor.set_defaults(func=cmd_doctor)
+
+    product_run = sub.add_parser("product-run", help="Run the product matter flow over user-provided documents")
+    product_run.add_argument("--objective", required=True)
+    product_run.add_argument("--path", action="append", default=[])
+    product_run.add_argument("--matter-id", default="local-matter")
+    product_run.add_argument("--trace-dir", default="traces/product")
+    product_run.add_argument("--output-dir", default="outputs/product")
+    product_run.add_argument("--config", default=None)
+    product_run.add_argument("--top-k", type=int, default=12)
+    product_run.add_argument("--max-files", type=int, default=80)
+    product_run.add_argument("--live-synthesis", action="store_true")
+    product_run.set_defaults(func=cmd_product_run)
+
+    product_ui = sub.add_parser("product-ui", help="Serve the local product matter UI")
+    product_ui.add_argument("--host", default="127.0.0.1")
+    product_ui.add_argument("--port", type=int, default=8765)
+    product_ui.add_argument("--trace-dir", default="traces/product")
+    product_ui.add_argument("--output-dir", default="outputs/product")
+    product_ui.add_argument("--config", default=None)
+    product_ui.set_defaults(func=cmd_product_ui)
 
     harvey_eval = sub.add_parser("prepare-harvey-eval", help="Package a Harvey trace for Harvey LAB evaluator")
     harvey_eval.add_argument("--trace", required=True)
@@ -565,6 +587,37 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     checks = run_doctor()
     print_json({"checks": [check.to_dict() for check in checks]})
     return 0 if all(check.passed for check in checks) else 1
+
+
+def cmd_product_run(args: argparse.Namespace) -> int:
+    load_dotenv_if_present()
+    config = load_config(args.config)
+    result = run_product_matter(
+        objective=args.objective,
+        paths=args.path,
+        matter_id=args.matter_id,
+        config=config,
+        trace_dir=args.trace_dir,
+        output_dir=args.output_dir,
+        live_synthesis=bool(args.live_synthesis),
+        top_k=args.top_k,
+        max_files=args.max_files,
+    )
+    print_json(result.to_dict() | {"summary": trace_summary(result.state.to_trace())})
+    return 0
+
+
+def cmd_product_ui(args: argparse.Namespace) -> int:
+    load_dotenv_if_present()
+    config = load_config(args.config)
+    serve_product_ui(
+        host=args.host,
+        port=args.port,
+        config=config,
+        trace_dir=args.trace_dir,
+        output_dir=args.output_dir,
+    )
+    return 0
 
 
 def cmd_experiment_open(args: argparse.Namespace) -> int:
