@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 import re
 from typing import Any, Callable
@@ -30,6 +31,10 @@ SUPPORTED_PRODUCT_EXTENSIONS = {
 }
 
 DEFAULT_PRODUCT_MAX_FILES: int | None = None
+
+
+class ProductRunCancelled(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -68,12 +73,36 @@ def run_product_matter(
     parent_trace_path: str | None = None,
     user_nudge: str | None = None,
     event_callback: Callable[[dict[str, Any]], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> ProductRunResult:
     if not objective.strip():
         raise ValueError("objective is required")
+    pre_events: list[dict[str, Any]] = []
+    emit_pre_event(
+        pre_events,
+        event_callback,
+        "SCOPE",
+        "Checking selected corpus",
+        summary="Checking your selected files and folders.",
+        selected_paths=[str(path) for path in paths],
+        next_step="Find supported documents to read.",
+    )
+    check_product_cancel(should_cancel)
     corpus_paths = discover_corpus_paths(paths, max_files=max_files)
     if not corpus_paths:
         raise ValueError("at least one supported document path is required")
+    emit_pre_event(
+        pre_events,
+        event_callback,
+        "SCOPE",
+        "Found supported documents",
+        summary=f"Found {len(corpus_paths)} supported document(s).",
+        document_count=len(corpus_paths),
+        sample_documents=[path.name for path in corpus_paths[:12]],
+        omitted_document_count=max(0, len(corpus_paths) - 12),
+        next_step="Read documents and extract searchable text.",
+    )
+    check_product_cancel(should_cancel)
 
     normalized_chat_id = sanitize_chat_id(chat_id)
     normalized_history = normalize_conversation_history(conversation_history)
@@ -100,21 +129,59 @@ def run_product_matter(
         },
     )
     state = RunState(task=task, config=config, output_dir=str(Path(output_dir) / task_id))
+    state.events.extend(pre_events)
     log = EventLogger(state, verbose=verbose, event_callback=event_callback)
-    log.emit("RUN", "started product matter run", matter=task_id)
+    log.emit(
+        "RUN",
+        "started product matter run",
+        matter=task_id,
+        summary=f"Started matter run for {matter_id}.",
+        next_step="Read the selected corpus.",
+    )
 
     state.documents, state.chunks = load_documents(
         [str(path) for path in corpus_paths],
         max_chars_per_doc=max_chars_per_doc,
         source_posture="user_provided_corpus",
+        progress_callback=lambda event: log.emit(
+            str(event.get("label") or "READ"),
+            str(event.get("message") or ""),
+            **dict(event.get("fields") or {}),
+        ),
+        should_cancel=should_cancel,
     )
-    log.emit("LOAD", "loaded user corpus", documents=len(state.documents), chunks=len(state.chunks))
+    check_product_cancel(should_cancel)
+    log.emit(
+        "LOAD",
+        "loaded user corpus",
+        documents=len(state.documents),
+        chunks=len(state.chunks),
+        summary=f"Loaded {len(state.documents)} document(s) into {len(state.chunks)} searchable chunk(s).",
+        next_step="Build the answer target and decide what evidence to search for.",
+    )
 
     contract = build_product_contract(state, top_k=top_k)
     state.answer_contract_versions.append(contract)
-    log.emit("CONTRACT", "built matter contract", needed=len(contract["needed_information"]))
+    log.emit(
+        "PLAN",
+        "built matter contract",
+        needed=len(contract["needed_information"]),
+        summary="Clarified what the answer needs to establish.",
+        needed_information=contract["needed_information"],
+        search_queries=contract["search_queries"],
+        next_step="Search the loaded corpus for source support.",
+    )
 
     queries = build_product_queries(objective, state.documents)
+    log.emit(
+        "SEARCH",
+        "searching corpus",
+        summary="Searching the corpus for relevant passages.",
+        queries=queries,
+        top_k=top_k,
+        steer_hint="If these search targets miss the point, stop and rephrase the question or add a steering note.",
+    )
+    check_product_cancel(should_cancel)
     retrieved = retrieve_chunks(state.chunks, queries, top_k=top_k)
     state.retrieval_iterations.append(
         {
@@ -125,7 +192,15 @@ def run_product_matter(
             "conversation_history_used": False,
         }
     )
-    log.emit("SEARCH", "retrieved candidate chunks", chunks=len(retrieved), top_k=top_k)
+    log.emit(
+        "SEARCH",
+        "retrieved candidate chunks",
+        chunks=len(retrieved),
+        top_k=top_k,
+        summary=f"Selected {len(retrieved)} candidate passage(s) for evidence review.",
+        selected_sources=summarize_retrieved_sources(retrieved, state.documents),
+        next_step="Extract usable evidence from the selected passages.",
+    )
 
     evidence_items = build_product_evidence_items(retrieved)
     state.extraction_records.append(
@@ -142,7 +217,14 @@ def run_product_matter(
             "weak": [],
         }
     )
-    log.emit("EXTRACT", "built source evidence packet", evidence=len(evidence_items))
+    log.emit(
+        "EVIDENCE",
+        "built source evidence packet",
+        evidence=len(evidence_items),
+        summary=f"Built an evidence packet with {len(evidence_items)} item(s).",
+        evidence_preview=summarize_evidence_items(evidence_items),
+        next_step="Draft the answer from the evidence packet.",
+    )
 
     state.final_packet = {
         "mode": "product_user_corpus_packet",
@@ -158,7 +240,14 @@ def run_product_matter(
     }
 
     if live_synthesis:
+        check_product_cancel(should_cancel)
         router = GeminiModelRouter(config)
+        log.emit(
+            "ANALYZE",
+            "asking worker model to organize evidence",
+            summary="Asking a worker model to organize the evidence for drafting.",
+            next_step="Use those notes for the final answer.",
+        )
         analysis_prompt = build_product_worker_analysis_prompt(state)
         analysis = router.generate(
             module="extraction",
@@ -175,8 +264,22 @@ def run_product_matter(
             }
         )
         state.final_packet["worker_analysis"] = analysis.text
-        log.emit("ANALYZE", "generated cheap-worker product analysis", model=analysis.usage.model)
+        log.emit(
+            "ANALYZE",
+            "generated worker analysis",
+            model=analysis.usage.model,
+            summary="Worker analysis is ready.",
+            analysis_preview=compact_compare_text(analysis.text, max_chars=900),
+            next_step="Draft the final answer.",
+        )
+        check_product_cancel(should_cancel)
         prompt = build_product_synthesis_prompt(state)
+        log.emit(
+            "SYNTH",
+            "drafting final answer",
+            summary="Drafting the final answer from the evidence packet.",
+            next_step="Save the answer and source trace.",
+        )
         result = router.generate(
             module="synthesis",
             prompt=prompt,
@@ -186,11 +289,22 @@ def run_product_matter(
         state.metrics.add_call(result.usage)
         state.draft_answer = result.text
         state.rendered_answer = result.text
-        log.emit("SYNTH", "generated live answer", model=result.usage.model)
+        log.emit(
+            "SYNTH",
+            "generated live answer",
+            model=result.usage.model,
+            summary="Final answer generated.",
+            answer_preview=compact_compare_text(result.text, max_chars=900),
+        )
     else:
         state.draft_answer = build_deterministic_product_answer(state)
         state.rendered_answer = state.draft_answer
-        log.emit("SYNTH", "generated deterministic preview")
+        log.emit(
+            "SYNTH",
+            "generated deterministic preview",
+            summary="Generated a deterministic preview without model synthesis.",
+            answer_preview=compact_compare_text(state.rendered_answer, max_chars=900),
+        )
 
     state.final_packet["answer_source_map"] = build_answer_source_map(
         state.rendered_answer or "",
@@ -199,8 +313,65 @@ def run_product_matter(
     state.artifacts.append(write_product_answer_artifact(state, diagnostic=not live_synthesis))
     state.diagnosis = build_product_diagnosis(state)
     trace_path = TraceWriter(trace_dir).write(state)
-    log.emit("SAVE", "trace saved", trace=str(trace_path))
+    log.emit(
+        "SAVE",
+        "trace saved",
+        trace=str(trace_path),
+        summary="Saved the answer, evidence packet, and diagnostic trace.",
+    )
     return ProductRunResult(state=state, trace_path=trace_path)
+
+
+def emit_pre_event(
+    pre_events: list[dict[str, Any]],
+    event_callback: Callable[[dict[str, Any]], None] | None,
+    label: str,
+    message: str,
+    **fields: Any,
+) -> None:
+    event = {
+        "ts": datetime.now(UTC).isoformat(),
+        "label": label,
+        "message": message,
+        "fields": fields,
+    }
+    pre_events.append(event)
+    if event_callback:
+        event_callback(event)
+
+
+def check_product_cancel(should_cancel: Callable[[], bool] | None) -> None:
+    if should_cancel and should_cancel():
+        raise ProductRunCancelled("run stopped by user")
+
+
+def summarize_retrieved_sources(retrieved: list[Any], documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    filenames_by_doc_id = {str(doc.get("doc_id")): str(doc.get("filename") or "") for doc in documents}
+    rows = []
+    for item in retrieved[:8]:
+        rows.append(
+            {
+                "document": filenames_by_doc_id.get(item.doc_id, item.doc_id),
+                "chunk_id": item.chunk_id,
+                "score": round(float(item.score), 4),
+                "preview": compact_compare_text(item.text, max_chars=220),
+            }
+        )
+    return rows
+
+
+def summarize_evidence_items(evidence_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for item in evidence_items[:8]:
+        source = item.get("source") or {}
+        rows.append(
+            {
+                "source": source.get("chunk_id") or source.get("doc_id"),
+                "claim": compact_compare_text(item.get("claim"), max_chars=180),
+                "support": compact_compare_text(item.get("raw_support"), max_chars=260),
+            }
+        )
+    return rows
 
 
 def discover_corpus_paths(paths: list[str], *, max_files: int | None = DEFAULT_PRODUCT_MAX_FILES) -> list[Path]:

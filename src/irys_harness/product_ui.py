@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 from .config import HarnessConfig
-from .product import compare_product_traces, run_product_matter, sanitize_matter_id
+from .product import ProductRunCancelled, compare_product_traces, run_product_matter, sanitize_matter_id
 from .trace import load_trace, trace_summary
 
 
@@ -102,11 +102,21 @@ def build_handler(
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib handler API.
             parsed = urlparse(self.path)
-            if parsed.path not in {"/api/run", "/api/run-async", "/api/rerun", "/api/rerun-async", "/api/pick-path"}:
+            if parsed.path not in {
+                "/api/run",
+                "/api/run-async",
+                "/api/rerun",
+                "/api/rerun-async",
+                "/api/cancel-run",
+                "/api/pick-path",
+            }:
                 self.send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
                 return
             try:
                 payload = self.read_json()
+                if parsed.path == "/api/cancel-run":
+                    self.send_json(cancel_run_job(str(payload.get("job_id") or "")))
+                    return
                 if parsed.path == "/api/pick-path":
                     self.send_json(
                         {
@@ -220,14 +230,26 @@ def start_product_run_job(
         "events": [],
         "result": None,
         "error": None,
+        "cancel_requested": False,
     }
     with RUN_JOBS_LOCK:
         RUN_JOBS[job_id] = job
         prune_run_jobs_locked()
-    append_run_job_event(job_id, "RUN", "queued product matter run", mode=mode)
+    append_run_job_event(
+        job_id,
+        "RUN",
+        "queued product matter run",
+        mode=mode,
+        summary="Queued your request.",
+        next_step="Check the selected corpus.",
+    )
 
     def event_callback(event: dict[str, Any]) -> None:
         append_run_job_event(job_id, event=event)
+
+    def should_cancel() -> bool:
+        with RUN_JOBS_LOCK:
+            return bool((RUN_JOBS.get(job_id) or {}).get("cancel_requested"))
 
     def worker() -> None:
         try:
@@ -238,6 +260,7 @@ def start_product_run_job(
                     trace_dir=trace_dir,
                     output_dir=output_dir,
                     event_callback=event_callback,
+                    should_cancel=should_cancel,
                 )
             else:
                 paths = parse_paths(payload.get("paths", []))
@@ -256,6 +279,7 @@ def start_product_run_job(
                     max_files=parse_optional_int(payload.get("max_files")),
                     verbose=False,
                     event_callback=event_callback,
+                    should_cancel=should_cancel,
                 )
                 response = result.to_dict()
                 response["summary"] = trace_summary(result.state.to_trace())
@@ -264,8 +288,33 @@ def start_product_run_job(
             with RUN_JOBS_LOCK:
                 RUN_JOBS[job_id]["status"] = "completed"
                 RUN_JOBS[job_id]["result"] = response
+        except ProductRunCancelled as exc:
+            append_run_job_event(
+                job_id,
+                "STOP",
+                "run stopped",
+                summary="Stopped the run.",
+                detail=str(exc),
+            )
+            with RUN_JOBS_LOCK:
+                RUN_JOBS[job_id]["status"] = "canceled"
+                RUN_JOBS[job_id]["error"] = str(exc)
         except Exception as exc:  # noqa: BLE001 - async endpoint reports the normalized failure.
             error = f"{type(exc).__name__}: {exc}"
+            with RUN_JOBS_LOCK:
+                canceled = bool((RUN_JOBS.get(job_id) or {}).get("cancel_requested"))
+            if canceled and "canceled" in str(exc).lower():
+                append_run_job_event(
+                    job_id,
+                    "STOP",
+                    "run stopped",
+                    summary="Stopped the run.",
+                    detail=str(exc),
+                )
+                with RUN_JOBS_LOCK:
+                    RUN_JOBS[job_id]["status"] = "canceled"
+                    RUN_JOBS[job_id]["error"] = str(exc)
+                return
             append_run_job_event(job_id, "ERROR", "product matter run failed", error=error)
             with RUN_JOBS_LOCK:
                 RUN_JOBS[job_id]["status"] = "failed"
@@ -314,7 +363,36 @@ def snapshot_run_job(job_id: str) -> dict[str, Any]:
             "events": list(job.get("events", [])),
             "result": job.get("result"),
             "error": job.get("error"),
+            "cancel_requested": bool(job.get("cancel_requested")),
         }
+
+
+def cancel_run_job(job_id: str) -> dict[str, Any]:
+    if not job_id:
+        raise ValueError("job_id is required")
+    with RUN_JOBS_LOCK:
+        job = RUN_JOBS.get(job_id)
+        if job is None:
+            raise ValueError("run job not found")
+        if job.get("status") != "running":
+            return {
+                "job_id": job["job_id"],
+                "mode": job["mode"],
+                "status": job["status"],
+                "started_at": job["started_at"],
+                "events": list(job.get("events", [])),
+                "result": job.get("result"),
+                "error": job.get("error"),
+                "cancel_requested": bool(job.get("cancel_requested")),
+            }
+        job["cancel_requested"] = True
+    append_run_job_event(
+        job_id,
+        "STOP",
+        "stop requested",
+        summary="Stop requested. The current document or model call may need to finish first.",
+    )
+    return snapshot_run_job(job_id)
 
 
 def prune_run_jobs_locked(*, keep: int = 50) -> None:
@@ -332,6 +410,7 @@ def rerun_from_trace(
     trace_dir: str | Path,
     output_dir: str | Path,
     event_callback: Any = None,
+    should_cancel: Any = None,
 ) -> dict[str, Any]:
     parent_path = resolve_trace_path(str(payload.get("trace_path") or ""), trace_dir)
     parent = load_trace(parent_path)
@@ -366,6 +445,7 @@ def rerun_from_trace(
         parent_trace_path=str(parent_path),
         user_nudge=nudge,
         event_callback=event_callback,
+        should_cancel=should_cancel,
     )
     child_trace = result.state.to_trace()
     response = result.to_dict()
@@ -709,7 +789,7 @@ INDEX_HTML = r"""<!doctype html>
       <div class="item">
         <strong>How to use this test UI</strong>
         <small>
-          Use Choose Folder, Choose File, or Choose Files to open a native picker on this machine. Paste local file or folder paths into Corpus Paths one per line when that is faster. Local folders are read recursively. No artificial file-count or per-document character cap is applied to local Corpus Paths. Matter ID groups saved runs and costs. Chat ID separates parallel conversations inside the same matter. Live synthesis calls the configured Gemini models; when it is off, the UI produces a deterministic preview without model cost. Top K is the number of retrieved chunks used for the evidence packet. Message Cost is the loaded run; Matter Cost totals saved traces for the matter. Live Trace shows observable run events while work is still in progress.
+          Use Choose Folder, Choose File, or Choose Files to open a native picker on this machine. Paste local file or folder paths into Corpus Paths one per line when that is faster. Local folders are read recursively. No artificial file-count or per-document character cap is applied to local Corpus Paths. Matter ID groups saved runs and costs. Chat ID separates parallel conversations inside the same matter. Live synthesis calls the configured Gemini models; when it is off, the UI produces a deterministic preview without model cost. Top K is the number of retrieved chunks used for the evidence packet. Message Cost is the loaded run; Matter Cost totals saved traces for the matter. The workstream shows what Irys is checking, reading, searching, and drafting while the run is still in progress.
         </small>
       </div>
       <label for="matter">Matter ID</label>
@@ -730,6 +810,7 @@ INDEX_HTML = r"""<!doctype html>
       </div>
       <div class="row">
         <button id="run">Run</button>
+        <button class="secondary" id="stopRun" disabled>Stop Run</button>
         <button class="secondary" id="clear">Clear</button>
       </div>
     </section>
@@ -750,13 +831,10 @@ INDEX_HTML = r"""<!doctype html>
       <div class="list" id="chatHistory"></div>
     </section>
     <section>
-      <h2>Trace</h2>
-      <label for="tracepath">Trace Path</label>
-      <input id="tracepath" />
-      <div class="row">
-        <button class="secondary" id="loadTrace">Load Trace</button>
-        <button class="secondary" id="listTraces">List Traces</button>
-      </div>
+      <h2>Workstream</h2>
+      <div class="item" id="currentStep"><strong>Idle</strong><small>No run has started.</small></div>
+      <h2 style="margin-top:16px">What Irys Is Doing</h2>
+      <div class="list" id="liveEvents"></div>
       <label for="nudge">Nudge</label>
       <textarea id="nudge"></textarea>
       <label for="rerunPaths">Additional Corpus Paths</label>
@@ -767,14 +845,21 @@ INDEX_HTML = r"""<!doctype html>
         <button class="secondary" id="chooseRerunFiles">Choose Files</button>
       </div>
       <div class="row">
-        <button class="secondary" id="rerunTrace">Rerun</button>
+        <button class="secondary" id="rerunTrace">Apply Nudge</button>
       </div>
       <h2 style="margin-top:16px">Diagnosis</h2>
       <div class="list" id="diagnosis"></div>
-      <h2 style="margin-top:16px">Live Trace</h2>
-      <div class="list" id="liveEvents"></div>
-      <h2 style="margin-top:16px">Recent Traces</h2>
+      <h2 style="margin-top:16px">Past Messages</h2>
       <div class="list" id="traceList"></div>
+      <details style="margin-top:16px">
+        <summary>Advanced run details</summary>
+        <label for="tracepath">Saved Run Path</label>
+        <input id="tracepath" />
+        <div class="row">
+          <button class="secondary" id="loadTrace">Load Saved Run</button>
+          <button class="secondary" id="listTraces">List Saved Runs</button>
+        </div>
+      </details>
       <h2 style="margin-top:16px">Comparison</h2>
       <div class="list" id="comparison"></div>
       <h2 style="margin-top:16px">Events</h2>
@@ -793,6 +878,7 @@ INDEX_HTML = r"""<!doctype html>
     const $ = (id) => document.getElementById(id);
     const status = $("status");
     const run = $("run");
+    const stopRun = $("stopRun");
     const loadTrace = $("loadTrace");
     const rerunTrace = $("rerunTrace");
     const listTraces = $("listTraces");
@@ -804,6 +890,7 @@ INDEX_HTML = r"""<!doctype html>
     const chooseRerunFiles = $("chooseRerunFiles");
     let conversationByChat = {};
     let activeJobPoll = null;
+    let activeJobId = "";
     $("clear").addEventListener("click", () => {
       $("objective").value = "";
       $("answer").innerHTML = "";
@@ -812,6 +899,7 @@ INDEX_HTML = r"""<!doctype html>
       $("nudge").value = "";
       $("rerunPaths").value = "";
       $("diagnosis").innerHTML = "";
+      $("currentStep").innerHTML = "<strong>Idle</strong><small>No run has started.</small>";
       $("liveEvents").innerHTML = "";
       $("traceList").innerHTML = "";
       $("comparison").innerHTML = "";
@@ -821,6 +909,24 @@ INDEX_HTML = r"""<!doctype html>
       $("evidence").innerHTML = "";
       $("answerSources").innerHTML = "";
       status.textContent = "";
+    });
+    stopRun.addEventListener("click", async () => {
+      if (!activeJobId) return;
+      stopRun.disabled = true;
+      status.textContent = "Stopping";
+      try {
+        const response = await fetch("/api/cancel-run", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({job_id: activeJobId})
+        });
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || "Stop failed");
+        renderLiveEvents(data.events || []);
+        status.textContent = data.status === "canceled" ? "Stopped" : "Stop requested";
+      } catch (error) {
+        status.textContent = error.message;
+      }
     });
     chooseFolder.addEventListener("click", () => choosePath("folder", "paths"));
     chooseFile.addEventListener("click", () => choosePath("file", "paths"));
@@ -847,12 +953,15 @@ INDEX_HTML = r"""<!doctype html>
         });
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || "Run failed");
+        activeJobId = data.job_id || "";
+        stopRun.disabled = !activeJobId;
         renderLiveEvents(data.events || []);
         await pollRunJob(data.job_id);
       } catch (error) {
         status.textContent = error.message;
       } finally {
         run.disabled = false;
+        stopRun.disabled = true;
       }
     });
     loadTrace.addEventListener("click", async () => {
@@ -900,12 +1009,15 @@ INDEX_HTML = r"""<!doctype html>
         });
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || "Rerun failed");
+        activeJobId = data.job_id || "";
+        stopRun.disabled = !activeJobId;
         renderLiveEvents(data.events || []);
         await pollRunJob(data.job_id);
       } catch (error) {
         status.textContent = error.message;
       } finally {
         rerunTrace.disabled = false;
+        stopRun.disabled = true;
       }
     });
     async function choosePath(mode, targetId) {
@@ -953,6 +1065,11 @@ INDEX_HTML = r"""<!doctype html>
               await refreshTraceList({setStatus: false});
               status.textContent = (data.result || {}).trace_path || "Completed";
               $("tracepath").value = (data.result || {}).trace_path || "";
+              resolve();
+              return;
+            }
+            if (data.status === "canceled") {
+              status.textContent = "Stopped";
               resolve();
               return;
             }
@@ -1059,12 +1176,84 @@ INDEX_HTML = r"""<!doctype html>
     function renderLiveEvents(events) {
       if (!Array.isArray(events) || !events.length) {
         $("liveEvents").innerHTML = "";
+        $("currentStep").innerHTML = "<strong>Idle</strong><small>No run has started.</small>";
         return;
       }
-      $("liveEvents").innerHTML = events.map(event => card(
-        `${event.label || "EVENT"} - ${event.message || ""}`,
-        JSON.stringify(event.fields || {}, null, 2)
-      )).join("");
+      const latest = events[events.length - 1] || {};
+      $("currentStep").innerHTML = renderCurrentStep(latest);
+      $("liveEvents").innerHTML = events.slice(-30).map(renderUserEvent).join("");
+    }
+    function renderCurrentStep(event) {
+      const fields = event.fields || {};
+      const title = fields.summary || friendlyEventTitle(event);
+      const details = fields.next_step ? `Next: ${fields.next_step}` : "Waiting for the next update.";
+      return `<strong>${escapeHtml(title)}</strong><small>${escapeHtml(details)}</small>`;
+    }
+    function renderUserEvent(event) {
+      const fields = event.fields || {};
+      const title = fields.summary || friendlyEventTitle(event);
+      const body = formatUserEventFields(fields);
+      return card(title, body || friendlyEventTitle(event));
+    }
+    function friendlyEventTitle(event) {
+      const label = String(event.label || "EVENT");
+      const message = String(event.message || "");
+      const titles = {
+        SCOPE: "Checking the selected corpus.",
+        RUN: "Starting the run.",
+        READ: "Reading documents.",
+        LOAD: "Loaded the corpus.",
+        PLAN: "Planning the answer.",
+        CONTRACT: "Planning the answer.",
+        SEARCH: "Looking for relevant passages.",
+        EVIDENCE: "Building the evidence packet.",
+        EXTRACT: "Building the evidence packet.",
+        ANALYZE: "Organizing evidence.",
+        SYNTH: "Drafting the answer.",
+        SAVE: "Saving the run.",
+        DONE: "Run complete.",
+        STOP: "Run stopped.",
+        ERROR: "Run failed."
+      };
+      return titles[label] || `${label}${message ? ": " + message : ""}`;
+    }
+    function formatUserEventFields(fields) {
+      const lines = [];
+      if (fields.filename) lines.push(`Document: ${fields.filename}`);
+      if (fields.current && fields.total) lines.push(`Progress: ${fields.current} of ${fields.total}`);
+      if (fields.document_count !== undefined) lines.push(`Documents found: ${fields.document_count}`);
+      if (fields.documents !== undefined) lines.push(`Documents loaded: ${fields.documents}`);
+      if (fields.chunks !== undefined) lines.push(`Searchable chunks: ${fields.chunks}`);
+      if (fields.chunk_count !== undefined) lines.push(`Chunks from this document: ${fields.chunk_count}`);
+      if (fields.text_chars !== undefined) lines.push(`Extracted characters: ${fields.text_chars}`);
+      if (fields.load_error) lines.push(`Load issue: ${fields.load_error}`);
+      if (fields.search_queries) lines.push(`Search targets: ${fields.search_queries.join("; ")}`);
+      if (fields.queries) lines.push(`Search targets: ${fields.queries.join("; ")}`);
+      if (fields.selected_sources) {
+        lines.push("Sources selected:");
+        for (const source of fields.selected_sources) {
+          lines.push(`- ${source.document || source.chunk_id}: ${source.preview || ""}`);
+        }
+      }
+      if (fields.evidence_preview) {
+        lines.push("Evidence found:");
+        for (const item of fields.evidence_preview) {
+          lines.push(`- ${item.support || item.claim || ""}`);
+        }
+      }
+      if (fields.analysis_preview) lines.push(`Worker notes: ${fields.analysis_preview}`);
+      if (fields.answer_preview) lines.push(`Draft preview: ${fields.answer_preview}`);
+      if (fields.sample_documents) lines.push(`Examples: ${fields.sample_documents.join(", ")}`);
+      if (fields.omitted_document_count) lines.push(`Plus ${fields.omitted_document_count} more.`);
+      if (fields.steer_hint) lines.push(`Steer: ${fields.steer_hint}`);
+      if (fields.next_step) lines.push(`Next: ${fields.next_step}`);
+      if (!lines.length) {
+        for (const [key, value] of Object.entries(fields)) {
+          if (key === "summary") continue;
+          lines.push(`${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`);
+        }
+      }
+      return lines.join("\n");
     }
     function activeChatKey() {
       return `${$("matter").value || "local-matter"}::${$("chat").value || "main"}`;

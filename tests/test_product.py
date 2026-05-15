@@ -170,7 +170,12 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn("/api/run-async", INDEX_HTML)
         self.assertIn("/api/rerun-async", INDEX_HTML)
         self.assertIn("/api/run-status", INDEX_HTML)
+        self.assertIn("/api/cancel-run", INDEX_HTML)
         self.assertIn("function pollRunJob", INDEX_HTML)
+        self.assertIn("What Irys Is Doing", INDEX_HTML)
+        self.assertIn('id="currentStep"', INDEX_HTML)
+        self.assertIn('id="stopRun"', INDEX_HTML)
+        self.assertIn("Advanced run details", INDEX_HTML)
         self.assertNotIn("webkitdirectory", INDEX_HTML)
         self.assertNotIn("function uploadFiles", INDEX_HTML)
 
@@ -261,9 +266,13 @@ class ProductMatterTests(unittest.TestCase):
             self.assertEqual(status["status"], "completed")
             self.assertIn("5 day cure period", status["result"]["rendered_answer"])
             labels = [event["label"] for event in status["events"]]
+            self.assertIn("SCOPE", labels)
+            self.assertIn("READ", labels)
             self.assertIn("LOAD", labels)
             self.assertIn("SEARCH", labels)
             self.assertIn("SAVE", labels)
+            summaries = [event.get("fields", {}).get("summary", "") for event in status["events"]]
+            self.assertTrue(any("Reading document" in summary for summary in summaries))
 
     def test_list_product_traces_filters_by_matter_and_chat(self) -> None:
         with TemporaryDirectory() as tmp:

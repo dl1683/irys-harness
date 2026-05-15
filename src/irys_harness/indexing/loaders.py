@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from markitdown import MarkItDown
 from openpyxl import load_workbook
@@ -59,13 +59,31 @@ def load_documents(
     chunk_overlap_chars: int = 400,
     max_chars_per_doc: int | None = 200_000,
     source_posture: str = "benchmark_provided_context",
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     documents: list[dict[str, Any]] = []
     chunks: list[dict[str, Any]] = []
     converter = MarkItDown()
+    total = len(paths)
     for index, raw_path in enumerate(paths, 1):
+        if should_cancel and should_cancel():
+            raise RuntimeError("run canceled")
+        path = Path(raw_path)
+        emit_progress(
+            progress_callback,
+            "READ",
+            "Reading document",
+            summary=f"Reading document {index} of {total}: {path.name}",
+            current=index,
+            total=total,
+            filename=path.name,
+            path=str(path),
+            bytes=path.stat().st_size if path.exists() else None,
+            steer_hint="If this is not the right source, stop the run and remove or replace it before rerunning.",
+        )
         document, text = load_document(
-            Path(raw_path),
+            path,
             doc_id=f"doc_{index:04d}",
             converter=converter,
             max_chars=max_chars_per_doc,
@@ -79,7 +97,31 @@ def load_documents(
             chunk_overlap_chars=chunk_overlap_chars,
         )
         chunks.extend(chunk.to_dict() for chunk in doc_chunks)
+        emit_progress(
+            progress_callback,
+            "READ",
+            "Finished document",
+            summary=f"Finished {path.name}",
+            current=index,
+            total=total,
+            filename=path.name,
+            doc_id=document.doc_id,
+            text_chars=document.text_chars,
+            chunk_count=len(doc_chunks),
+            load_error=document.load_error,
+        )
     return documents, chunks
+
+
+def emit_progress(
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+    label: str,
+    message: str,
+    **fields: Any,
+) -> None:
+    if progress_callback is None:
+        return
+    progress_callback({"label": label, "message": message, "fields": fields})
 
 
 def load_document(
