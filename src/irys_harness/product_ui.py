@@ -2135,6 +2135,9 @@ INDEX_HTML = r"""<!doctype html>
       const answerSources = Array.isArray(packet.answer_source_map) ? packet.answer_source_map : [];
       const unresolved = Array.isArray(packet.unresolved) ? packet.unresolved : [];
       const pinnedSources = Array.isArray(packet.pinned_sources) ? packet.pinned_sources : [];
+      const packetReview = packet.packet_review || {};
+      const reviewerRelevant = sourceIdsToDocuments(packetReview.relevant_source_ids || [], docs);
+      const reviewerLowValue = sourceIdsToDocuments(packetReview.low_value_source_ids || [], docs);
       const loadErrors = docs.filter(doc => doc && doc.load_error);
       const retrieved = Array.isArray(packet.retrieved_chunks) ? packet.retrieved_chunks : [];
       const summaryRows = [
@@ -2149,16 +2152,60 @@ INDEX_HTML = r"""<!doctype html>
         summaryRows.splice(1, 0, ["First-read plan", scope.reason]);
         if (planner) summaryRows.splice(2, 0, ["Worker source planner", formatPlannerSummary(planner, {})]);
       }
+      if (reviewerRelevant.length) {
+        summaryRows.push(["Reviewer kept", reviewerRelevant.map(doc => `- ${doc.filename || doc.path || doc.doc_id}`).join("\n")]);
+      }
+      if (reviewerLowValue.length) {
+        summaryRows.push(["Reviewer marked low value", reviewerLowValue.map(doc => `- ${doc.filename || doc.path || doc.doc_id}`).join("\n")]);
+      }
       if (loadErrors.length) {
         summaryRows.push(["Load issues", formatSimpleList(loadErrors.map(doc => `${doc.filename || doc.path}: ${doc.load_error}`), 20)]);
       }
-      $("sourceSummary").innerHTML = summaryRows.map(([title, body]) => card(title, body)).join("");
+      $("sourceSummary").innerHTML =
+        summaryRows.map(([title, body]) => card(title, body)).join("") +
+        renderReviewerSourceActions(packetReview, docs);
       renderPinnedSources();
       $("heldBackSources").innerHTML = renderHeldBackSources(scope);
       $("sourcesUsed").innerHTML = renderSourcesUsed(answerSources, evidence, docs);
       $("openQuestions").innerHTML = unresolved.length
         ? renderLimitedCards(unresolved, (item, index) => card(`Open question ${index + 1}`, item), {limit: 25, itemName: "open question"})
         : emptyState("No open question was logged for this run.");
+    }
+    function sourceIdsToDocuments(ids, docs) {
+      const wanted = new Set((Array.isArray(ids) ? ids : []).map(id => String(id || "")));
+      if (!wanted.size) return [];
+      return (Array.isArray(docs) ? docs : []).filter(doc => wanted.has(String(doc.doc_id || "")));
+    }
+    function renderReviewerSourceActions(packetReview, docs) {
+      const relevant = sourceIdsToDocuments((packetReview || {}).relevant_source_ids || [], docs);
+      const lowValue = sourceIdsToDocuments((packetReview || {}).low_value_source_ids || [], docs);
+      const cards = [];
+      for (const doc of relevant.slice(0, 12)) {
+        const path = doc.path || "";
+        cards.push(
+          `<div class="item"><strong>${escapeHtml("Reviewer kept: " + (doc.filename || doc.doc_id || "source"))}</strong>` +
+          `<small>This source looked useful for the current answer packet.</small>` +
+          `<div class="row">` +
+          `<button class="secondary deeper-source-next" data-path="${escapeAttr(path)}">Read deeper next pass</button>` +
+          `<button class="secondary pin-source-next" data-path="${escapeAttr(path)}">Pin to synthesis</button>` +
+          `</div></div>`
+        );
+      }
+      for (const doc of lowValue.slice(0, 12)) {
+        const path = doc.path || "";
+        cards.push(
+          `<div class="item"><strong>${escapeHtml("Reviewer marked low value: " + (doc.filename || doc.doc_id || "source"))}</strong>` +
+          `<small>The packet reviewer thought this source was less useful for the current answer. You can ignore it next pass, or force Irys to read it more deeply if that judgment looks wrong.</small>` +
+          `<div class="row">` +
+          `<button class="secondary ignore-source-next" data-path="${escapeAttr(path)}">Ignore next pass</button>` +
+          `<button class="secondary deeper-source-next" data-path="${escapeAttr(path)}">Read deeper anyway</button>` +
+          `</div></div>`
+        );
+      }
+      if (relevant.length > 12 || lowValue.length > 12) {
+        cards.push(emptyState("Additional reviewer source judgments are saved in the trace."));
+      }
+      return cards.join("");
     }
     function renderSourcesUsed(answerSources, evidence, docs) {
       if (answerSources.length) {
