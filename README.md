@@ -29,8 +29,10 @@ python -m irys_harness doctor
 Run the product matter flow over user-provided documents:
 
 ```bash
-python -m irys_harness product-run --objective "Summarize the key obligations." --path ./matter-docs --matter-id acme-review
+python -m irys_harness product-run --objective "Summarize the key obligations." --path ./matter-docs --matter-id acme-review --chat-id main
 ```
+
+Product traces can carry conversation history for a matter chat. The history is limited to prior user questions and final answers; retrieval remains scoped to the current objective and active document corpus.
 
 Serve the local product UI:
 

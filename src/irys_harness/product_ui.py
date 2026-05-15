@@ -91,6 +91,8 @@ def build_handler(
                     objective=str(payload.get("objective", "")),
                     paths=paths,
                     matter_id=matter_id,
+                    chat_id=str(payload.get("chat_id") or "main"),
+                    conversation_history=payload.get("conversation_history"),
                     config=config,
                     trace_dir=trace_dir,
                     output_dir=output_dir,
@@ -148,6 +150,7 @@ def rerun_from_trace(
     parent_path = resolve_trace_path(str(payload.get("trace_path") or ""), trace_dir)
     parent = load_trace(parent_path)
     task = parent.get("task") or {}
+    metadata = task.get("metadata") or {}
     original_objective = str(task.get("question") or "")
     nudge = str(payload.get("nudge") or "").strip()
     if not nudge:
@@ -155,7 +158,8 @@ def rerun_from_trace(
     paths = [str(item) for item in task.get("context_files", []) if str(item).strip()]
     if not paths:
         raise ValueError("parent trace does not contain context_files")
-    base_matter_id = str(task.get("task_id") or "matter")
+    base_matter_id = str(metadata.get("matter_id") or task.get("task_id") or "matter")
+    chat_id = str(payload.get("chat_id") or metadata.get("chat_id") or "main")
     suffix = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
     matter_id = sanitize_matter_id(f"{base_matter_id}-nudge-{suffix}")
     paths.extend(parse_paths(payload.get("paths", [])))
@@ -169,6 +173,8 @@ def rerun_from_trace(
         objective=objective,
         paths=paths,
         matter_id=matter_id,
+        chat_id=chat_id,
+        conversation_history=conversation_history_for_rerun(parent),
         config=config,
         trace_dir=trace_dir,
         output_dir=output_dir,
@@ -191,6 +197,21 @@ def parse_paths(raw_paths: Any) -> list[str]:
     if isinstance(raw_paths, str):
         return [line.strip() for line in raw_paths.splitlines() if line.strip()]
     return [str(item).strip() for item in raw_paths or [] if str(item).strip()]
+
+
+def conversation_history_for_rerun(parent: dict[str, Any]) -> list[dict[str, str]]:
+    packet = parent.get("final_packet") or {}
+    history = [
+        {"user": str(item.get("user") or ""), "assistant": str(item.get("assistant") or "")}
+        for item in packet.get("conversation_history", []) or []
+        if isinstance(item, dict)
+    ]
+    task = parent.get("task") or {}
+    question = str(task.get("question") or "").strip()
+    answer = str(parent.get("rendered_answer") or "").strip()
+    if question or answer:
+        history.append({"user": question, "assistant": answer})
+    return history
 
 
 def comparison_from_parent(trace: dict[str, Any], *, trace_dir: str | Path) -> dict[str, Any] | None:
@@ -460,6 +481,8 @@ INDEX_HTML = r"""<!doctype html>
       <h2>Matter</h2>
       <label for="matter">Matter ID</label>
       <input id="matter" value="local-matter" />
+      <label for="chat">Chat ID</label>
+      <input id="chat" value="main" />
       <label for="paths">Corpus Paths</label>
       <textarea id="paths" spellcheck="false"></textarea>
       <label for="files">Corpus Files</label>
@@ -523,6 +546,7 @@ INDEX_HTML = r"""<!doctype html>
     const run = $("run");
     const loadTrace = $("loadTrace");
     const rerunTrace = $("rerunTrace");
+    let conversationByChat = {};
     $("clear").addEventListener("click", () => {
       $("objective").value = "";
       $("files").value = "";
@@ -550,9 +574,11 @@ INDEX_HTML = r"""<!doctype html>
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify({
             matter_id: $("matter").value,
+            chat_id: $("chat").value,
             paths: $("paths").value,
             uploads,
             objective: $("objective").value,
+            conversation_history: activeConversationHistory(),
             live_synthesis: $("live").checked,
             top_k: Number($("topk").value || 12)
           })
@@ -594,6 +620,7 @@ INDEX_HTML = r"""<!doctype html>
           body: JSON.stringify({
             trace_path: $("tracepath").value,
             nudge: $("nudge").value,
+            chat_id: $("chat").value,
             paths: $("rerunPaths").value,
             uploads,
             live_synthesis: $("live").checked,
@@ -639,9 +666,12 @@ INDEX_HTML = r"""<!doctype html>
       $("chunkCount").textContent = String((trace.chunks || []).length);
       $("tokens").textContent = String(metrics.total_tokens || 0);
       $("cost").textContent = "$" + Number(metrics.estimated_cost || 0).toFixed(4);
-      $("matter").value = (trace.task || {}).task_id || $("matter").value;
+      const metadata = ((trace.task || {}).metadata || {});
+      $("matter").value = metadata.matter_id || (trace.task || {}).task_id || $("matter").value;
+      $("chat").value = metadata.chat_id || $("chat").value || "main";
       $("objective").value = (trace.task || {}).question || $("objective").value;
       $("answer").innerHTML = renderMarkdown(data.rendered_answer || trace.rendered_answer || "");
+      updateConversationHistoryFromTrace(trace);
       $("diagnosis").innerHTML = Object.entries(trace.diagnosis || {}).map(([key, value]) => card(
         key,
         typeof value === "string" || typeof value === "number" ? String(value) : JSON.stringify(value, null, 2)
@@ -688,6 +718,22 @@ INDEX_HTML = r"""<!doctype html>
       ];
       if (comparison.status === "unavailable") rows.push(["Comparison unavailable", comparison.error || "unknown error"]);
       return rows.map(([title, body]) => card(title, body)).join("");
+    }
+    function activeChatKey() {
+      return `${$("matter").value || "local-matter"}::${$("chat").value || "main"}`;
+    }
+    function activeConversationHistory() {
+      return conversationByChat[activeChatKey()] || [];
+    }
+    function updateConversationHistoryFromTrace(trace) {
+      const packet = trace.final_packet || {};
+      const metadata = ((trace.task || {}).metadata || {});
+      const key = `${metadata.matter_id || (trace.task || {}).task_id || $("matter").value || "local-matter"}::${metadata.chat_id || $("chat").value || "main"}`;
+      const history = Array.isArray(packet.conversation_history) ? [...packet.conversation_history] : [];
+      const user = (trace.task || {}).question || "";
+      const assistant = trace.rendered_answer || "";
+      if (user || assistant) history.push({user, assistant});
+      conversationByChat[key] = history;
     }
     function renderMarkdown(markdown) {
       const lines = String(markdown || "").split(/\r?\n/);

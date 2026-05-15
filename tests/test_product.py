@@ -135,6 +135,8 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn('class="answer" id="answer"', INDEX_HTML)
         self.assertIn("function renderMarkdown", INDEX_HTML)
         self.assertNotIn('<pre id="answer"></pre>', INDEX_HTML)
+        self.assertIn('id="chat"', INDEX_HTML)
+        self.assertIn("conversation_history", INDEX_HTML)
 
     def test_rerun_from_trace_links_parent_and_nudge(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -171,6 +173,10 @@ class ProductMatterTests(unittest.TestCase):
             self.assertEqual(trace["task"]["metadata"]["user_nudge"], "Focus only on payment defaults.")
             self.assertEqual(response["comparison"]["parent_task_id"], "Parent-Matter")
             self.assertTrue(response["comparison"]["objective_changed"])
+            history = trace["final_packet"]["conversation_history"]
+            self.assertEqual(set(history[-1]), {"user", "assistant"})
+            self.assertIn("What cure period applies?", history[-1]["user"])
+            self.assertIn("5 day cure period", history[-1]["assistant"])
 
     def test_rerun_from_trace_can_add_uploaded_corpus(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -216,6 +222,40 @@ class ProductMatterTests(unittest.TestCase):
     def test_parse_paths_accepts_textarea_or_list(self) -> None:
         self.assertEqual(parse_paths(" a.txt \n\n b.txt "), ["a.txt", "b.txt"])
         self.assertEqual(parse_paths([" a.txt ", ""]), ["a.txt"])
+
+    def test_conversation_history_is_synthesis_only_not_retrieval_context(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            doc = root / "agreement.txt"
+            doc.write_text("Payment default has a 5 day cure period after notice.", encoding="utf-8")
+            result = run_product_matter(
+                objective="What cure period applies?",
+                paths=[str(doc)],
+                matter_id="Chat Matter",
+                chat_id="follow-up",
+                conversation_history=[
+                    {
+                        "user": "Prior question with NEVER_RETRIEVE_HISTORY_MARKER.",
+                        "assistant": "Prior final answer only.",
+                        "intermediate": "must not survive",
+                    }
+                ],
+                config=load_config(),
+                trace_dir=root / "traces",
+                live_synthesis=False,
+                verbose=False,
+            )
+            trace = result.state.to_trace()
+            queries = "\n".join(trace["retrieval_iterations"][0]["queries"])
+            history = trace["final_packet"]["conversation_history"]
+            prompt = build_product_synthesis_prompt(result.state)
+
+            self.assertEqual(trace["task"]["metadata"]["chat_id"], "follow-up")
+            self.assertIn("--chat-follow-up", trace["task_id"])
+            self.assertEqual(history, [{"user": "Prior question with NEVER_RETRIEVE_HISTORY_MARKER.", "assistant": "Prior final answer only."}])
+            self.assertNotIn("NEVER_RETRIEVE_HISTORY_MARKER", queries)
+            self.assertFalse(trace["retrieval_iterations"][0]["conversation_history_used"])
+            self.assertIn("NEVER_RETRIEVE_HISTORY_MARKER", prompt)
 
     def test_product_synthesis_prompt_includes_worker_analysis(self) -> None:
         with TemporaryDirectory() as tmp:

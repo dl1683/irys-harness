@@ -54,6 +54,8 @@ def run_product_matter(
     paths: list[str],
     config: HarnessConfig,
     matter_id: str = "matter",
+    chat_id: str = "main",
+    conversation_history: list[dict[str, Any]] | None = None,
     trace_dir: str | Path = "traces/product",
     output_dir: str | Path = "outputs/product",
     live_synthesis: bool = False,
@@ -70,7 +72,9 @@ def run_product_matter(
     if not corpus_paths:
         raise ValueError("at least one supported document path is required")
 
-    task_id = sanitize_matter_id(matter_id)
+    normalized_chat_id = sanitize_chat_id(chat_id)
+    normalized_history = normalize_conversation_history(conversation_history)
+    task_id = build_product_task_id(matter_id, normalized_chat_id)
     task = BenchmarkTask(
         benchmark="product_matter",
         task_id=task_id,
@@ -83,10 +87,13 @@ def run_product_matter(
         },
         metadata={
             "matter_id": matter_id,
+            "chat_id": normalized_chat_id,
             "document_boundary": "user_defined_corpus",
             "live_synthesis": live_synthesis,
             "parent_trace_path": parent_trace_path,
             "user_nudge": user_nudge,
+            "conversation_history_turns": len(normalized_history),
+            "conversation_history_policy": "synthesis_only_user_question_and_final_answer",
         },
     )
     state = RunState(task=task, config=config, output_dir=str(Path(output_dir) / task_id))
@@ -111,7 +118,8 @@ def run_product_matter(
             "iteration": 1,
             "queries": queries,
             "retrieved_chunks": [item.to_dict() for item in retrieved],
-            "reason": "Product matter retrieval from user objective, filenames, and corpus inventory.",
+            "reason": "Product matter retrieval from current objective, filenames, and corpus inventory. Conversation history is intentionally excluded from retrieval queries.",
+            "conversation_history_used": False,
         }
     )
     log.emit("SEARCH", "retrieved candidate chunks", chunks=len(retrieved), top_k=top_k)
@@ -136,6 +144,9 @@ def run_product_matter(
     state.final_packet = {
         "mode": "product_user_corpus_packet",
         "question": objective.strip(),
+        "chat_id": normalized_chat_id,
+        "conversation_history": normalized_history,
+        "conversation_history_policy": "synthesis_only_user_question_and_final_answer",
         "document_boundary": "user_defined_corpus",
         "documents": state.documents,
         "retrieved_chunks": [item.to_dict() for item in retrieved],
@@ -217,6 +228,53 @@ def sanitize_matter_id(value: str) -> str:
     return cleaned[:80] or "matter"
 
 
+def sanitize_chat_id(value: str) -> str:
+    return sanitize_matter_id(value or "main")
+
+
+def build_product_task_id(matter_id: str, chat_id: str) -> str:
+    matter = sanitize_matter_id(matter_id)
+    chat = sanitize_chat_id(chat_id)
+    if chat == "main":
+        return matter
+    return sanitize_matter_id(f"{matter}--chat-{chat}")
+
+
+def normalize_conversation_history(raw_history: list[dict[str, Any]] | None, *, max_turns: int = 12) -> list[dict[str, str]]:
+    if raw_history is None:
+        return []
+    if not isinstance(raw_history, list):
+        raise ValueError("conversation_history must be a list")
+    normalized: list[dict[str, str]] = []
+    for item in raw_history[-max_turns:]:
+        if not isinstance(item, dict):
+            continue
+        user = compact_history_text(
+            item.get("user")
+            or item.get("question")
+            or item.get("objective")
+            or item.get("user_question")
+            or ""
+        )
+        assistant = compact_history_text(
+            item.get("assistant")
+            or item.get("answer")
+            or item.get("final_answer")
+            or item.get("rendered_answer")
+            or ""
+        )
+        if user or assistant:
+            normalized.append({"user": user, "assistant": assistant})
+    return normalized
+
+
+def compact_history_text(value: Any, *, max_chars: int = 6000) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 3].rstrip() + "..."
+
+
 def build_product_contract(state: RunState, *, top_k: int) -> dict[str, Any]:
     return {
         "version": 1,
@@ -235,6 +293,7 @@ def build_product_contract(state: RunState, *, top_k: int) -> dict[str, Any]:
             "Use only user-provided corpus unless external tools are explicitly enabled.",
             "Expose which documents and chunks were used.",
             "Mark gaps instead of inventing facts.",
+            "Conversation history may inform synthesis, but must not be used as retrieval context.",
         ],
         "scoring_risks": [
             "Product run has no benchmark gold answer.",
@@ -422,6 +481,11 @@ def build_product_synthesis_prompt(state: RunState) -> str:
     packet = state.final_packet or {}
     return f"""Produce the requested legal work product or answer using only the user-provided corpus.
 
+Conversation history:
+{format_conversation_history(packet.get("conversation_history", []))}
+
+Use conversation history for continuity only. Do not treat prior answers as source evidence unless the current retrieved corpus also supports them.
+
 User objective:
 {state.task.question}
 
@@ -445,6 +509,11 @@ def build_product_worker_analysis_prompt(state: RunState) -> str:
     return f"""Analyze the retrieved user-corpus evidence for the product objective.
 
 Return compact structured notes for the final drafter. Use only the provided evidence.
+
+Conversation history:
+{format_conversation_history(packet.get("conversation_history", []))}
+
+Use conversation history for continuity only. Do not treat prior answers as source evidence unless the current evidence packet supports them.
 
 User objective:
 {state.task.question}
@@ -474,6 +543,17 @@ def write_product_answer_artifact(state: RunState, *, diagnostic: bool) -> dict[
         "diagnostic": diagnostic,
         "chars": len(state.rendered_answer or ""),
     }
+
+
+def format_conversation_history(history: list[dict[str, Any]]) -> str:
+    turns = normalize_conversation_history(history)
+    if not turns:
+        return "- None."
+    lines: list[str] = []
+    for index, turn in enumerate(turns, 1):
+        lines.append(f"Turn {index} user: {turn['user']}")
+        lines.append(f"Turn {index} final answer: {turn['assistant']}")
+    return "\n".join(lines)
 
 
 def build_answer_source_map(answer: str, evidence_items: list[dict[str, Any]]) -> list[dict[str, Any]]:

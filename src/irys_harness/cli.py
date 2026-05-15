@@ -95,6 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
     product_run.add_argument("--objective", required=True)
     product_run.add_argument("--path", action="append", default=[])
     product_run.add_argument("--matter-id", default="local-matter")
+    product_run.add_argument("--chat-id", default="main")
     product_run.add_argument("--trace-dir", default="traces/product")
     product_run.add_argument("--output-dir", default="outputs/product")
     product_run.add_argument("--config", default=None)
@@ -596,6 +597,7 @@ def cmd_product_run(args: argparse.Namespace) -> int:
         objective=args.objective,
         paths=args.path,
         matter_id=args.matter_id,
+        chat_id=args.chat_id,
         config=config,
         trace_dir=args.trace_dir,
         output_dir=args.output_dir,
