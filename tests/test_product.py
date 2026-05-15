@@ -483,6 +483,41 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn("basic $0.55", evidence[0]["raw_support"])
         self.assertIn("diluted $0.52", evidence[0]["raw_support"])
 
+    def test_product_retrieval_boosts_exact_metric_phrases(self) -> None:
+        documents = [
+            {"doc_id": "doc_0001", "filename": "tax-note.txt"},
+            {"doc_id": "doc_0002", "filename": "eps-table.txt"},
+        ]
+        chunks = [
+            {
+                "doc_id": "doc_0001",
+                "chunk_id": "doc_0001_chunk_0000",
+                "text": "2024 income tax expense deferred tax assets uncertain tax positions " * 80,
+            },
+            {
+                "doc_id": "doc_0002",
+                "chunk_id": "doc_0002_chunk_0000",
+                "text": (
+                    "For the fiscal year ended December 31, 2024, net income per share - basic was $0.55 "
+                    "and net income per share - diluted was $0.52. Weighted-average shares were used."
+                ),
+            },
+        ]
+
+        retrieved = retrieve_product_chunks(
+            chunks,
+            [
+                "Tell me about EPS in 2024",
+                "earnings per share diluted basic weighted average shares",
+                "net income loss per share diluted basic fiscal year financial highlights",
+            ],
+            documents,
+            top_k=1,
+        )
+
+        self.assertEqual(retrieved[0].doc_id, "doc_0002")
+        self.assertIn("diluted was $0.52", retrieved[0].text)
+
     def test_packet_review_can_select_supplemental_held_back_documents(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

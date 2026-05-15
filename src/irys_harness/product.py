@@ -1657,9 +1657,10 @@ def retrieve_product_chunks(
                 continue
             per_doc_hits.extend(retrieve_chunks(doc_chunks, queries, top_k=per_doc_limit))
 
-    by_key: dict[tuple[str, str], Any] = {}
+    by_key: dict[tuple[str, str], RetrievedChunk] = {}
     for item in [*global_hits, *per_doc_hits]:
-        by_key[(item.doc_id, item.chunk_id)] = item
+        boosted = boost_product_retrieval_score(item, queries)
+        by_key[(boosted.doc_id, boosted.chunk_id)] = boosted
 
     if not by_key:
         return []
@@ -1690,6 +1691,45 @@ def retrieve_product_chunks(
         if len(selected) >= top_k:
             break
     return hydrate_retrieved_chunks_with_neighbors(selected, chunks)
+
+
+def boost_product_retrieval_score(item: RetrievedChunk, queries: list[str]) -> RetrievedChunk:
+    boost = product_retrieval_boost(item.text, queries)
+    if boost <= 0:
+        return item
+    return RetrievedChunk(
+        chunk_id=item.chunk_id,
+        doc_id=item.doc_id,
+        score=float(item.score) + boost,
+        text=item.text,
+    )
+
+
+def product_retrieval_boost(text: str, queries: list[str]) -> float:
+    query_text = " ".join(str(query or "") for query in queries).lower()
+    text_lower = str(text or "").lower()
+    boost = 0.0
+    if any(term in query_text for term in ["eps", "earnings per share", "per share", "diluted", "basic"]):
+        metric_phrases = [
+            "net income per share",
+            "net loss per share",
+            "earnings per share",
+            "net income (loss) per share",
+            "income (loss) per share",
+            "per share - basic",
+            "per share - diluted",
+            "per share attributable",
+            "weighted-average shares",
+            "weighted average shares",
+        ]
+        for phrase in metric_phrases:
+            if phrase in text_lower:
+                boost += 4.0
+        if "basic" in text_lower and "diluted" in text_lower and "per share" in text_lower:
+            boost += 6.0
+        if "fiscal year" in text_lower or "year ended" in text_lower or "full year" in text_lower:
+            boost += 2.0
+    return boost
 
 
 def hydrate_retrieved_chunks_with_neighbors(retrieved: list[Any], chunks: list[dict[str, Any]]) -> list[RetrievedChunk]:
