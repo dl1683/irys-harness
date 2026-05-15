@@ -898,7 +898,7 @@ INDEX_HTML = r"""<!doctype html>
       <details class="control-help">
         <summary>What the controls mean</summary>
         <small>
-          Folders are read recursively. No artificial file-count or per-document character cap is applied to local corpus paths. Matter ID groups saved runs and costs. Chat ID keeps separate conversations inside the same matter. Smart source planning reviews the file inventory before the first read and falls back to path scoring if model planning is unavailable. Draft final answer calls the configured drafting model; when it is off, the UI produces a deterministic preview without final drafting model cost. Evidence chunks controls how many retrieved chunks are used for the answer packet. Message Cost is the loaded run; Matter Cost totals saved traces for the matter.
+          Folders are read recursively. No artificial file-count or per-document character cap is applied to local corpus paths. Matter ID groups saved runs and costs. Chat ID keeps separate conversations inside the same matter. Smart source planning reviews the file inventory before the first read and falls back to path scoring if model planning is unavailable. Draft final answer is on by default and calls the configured drafting model; turn it off only for a cheap dry run. Evidence chunks controls how many retrieved chunks are used for the answer packet. Message Cost is the loaded run; Matter Cost totals saved traces for the matter.
         </small>
       </details>
       <label for="matter">Matter ID</label>
@@ -915,7 +915,7 @@ INDEX_HTML = r"""<!doctype html>
       </div>
       <div class="row">
         <label class="toggle"><input id="usePlanner" type="checkbox" checked /> Smart source planning</label>
-        <label class="toggle"><input id="live" type="checkbox" /> Draft final answer</label>
+        <label class="toggle"><input id="live" type="checkbox" checked /> Draft final answer</label>
         <label for="topk">Evidence chunks</label>
         <input id="topk" type="number" min="1" max="50" value="12" />
       </div>
