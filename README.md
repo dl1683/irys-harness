@@ -204,7 +204,7 @@ The product UI supports:
 - source review, open-question summaries, and source-ignore steering for the next pass;
 - multiple chats per matter;
 - conversation history limited to user questions and final answers;
-- per-message and matter-level cost display.
+- per-message, matter-level, and model-tier usage/cost display.
 
 ## Tests
 
