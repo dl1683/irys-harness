@@ -802,6 +802,18 @@ INDEX_HTML = r"""<!doctype html>
       line-height: 1.45;
       margin-top: 6px;
     }
+    .guide-steps {
+      margin: 8px 0 0 20px;
+      padding: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .guide-steps li { margin: 4px 0; }
+    .control-help {
+      margin-top: 10px;
+      background: #f7f9fb;
+    }
     .empty {
       color: var(--muted);
       font-size: 13px;
@@ -870,26 +882,36 @@ INDEX_HTML = r"""<!doctype html>
     <section>
       <h2>Matter</h2>
       <div class="item">
-        <strong>How to use this test UI</strong>
-        <small>
-          Use Choose Folder, Choose File, or Choose Files to open a native picker on this machine. Paste local file or folder paths into Corpus Paths one per line when that is faster. Local folders are read recursively. No artificial file-count or per-document character cap is applied to local Corpus Paths. Matter ID groups saved runs and costs. Chat ID separates parallel conversations inside the same matter. Worker source planning uses a cheap model to review the file inventory and suggest first-read documents; if it cannot run, Irys falls back to deterministic path scoring. Live synthesis calls the configured Gemini models; when it is off, the UI produces a deterministic preview without final drafting model cost. Top K is the number of retrieved chunks used for the evidence packet. Message Cost is the loaded run; Matter Cost totals saved traces for the matter. The workstream shows what Irys is checking, reading, searching, and drafting while the run is still in progress.
-        </small>
+        <strong>Workflow</strong>
+        <ol class="guide-steps">
+          <li>Choose a folder or files for this matter.</li>
+          <li>Ask the question or describe the deliverable.</li>
+          <li>Review the proposed first-read documents.</li>
+          <li>Run, audit the sources, then steer the next pass if needed.</li>
+        </ol>
       </div>
+      <details class="control-help">
+        <summary>What the controls mean</summary>
+        <small>
+          Folders are read recursively. No artificial file-count or per-document character cap is applied to local corpus paths. Matter ID groups saved runs and costs. Chat ID keeps separate conversations inside the same matter. Smart source planning reviews the file inventory before the first read and falls back to path scoring if model planning is unavailable. Draft final answer calls the configured drafting model; when it is off, the UI produces a deterministic preview without final drafting model cost. Evidence chunks controls how many retrieved chunks are used for the answer packet. Message Cost is the loaded run; Matter Cost totals saved traces for the matter.
+        </small>
+      </details>
       <label for="matter">Matter ID</label>
       <input id="matter" value="local-matter" />
       <label for="chat">Chat ID</label>
       <input id="chat" value="main" />
       <label for="paths">Corpus Paths</label>
       <textarea id="paths" spellcheck="false"></textarea>
+      <div class="hint">Paste local file or folder paths one per line, or use the picker buttons.</div>
       <div class="row">
         <button class="secondary" id="chooseFolder">Choose Folder</button>
         <button class="secondary" id="chooseFile">Choose File</button>
         <button class="secondary" id="chooseFiles">Choose Files</button>
       </div>
       <div class="row">
-        <label class="toggle"><input id="usePlanner" type="checkbox" checked /> Worker source planning</label>
-        <label class="toggle"><input id="live" type="checkbox" /> Live synthesis</label>
-        <label for="topk">Top K</label>
+        <label class="toggle"><input id="usePlanner" type="checkbox" checked /> Smart source planning</label>
+        <label class="toggle"><input id="live" type="checkbox" /> Draft final answer</label>
+        <label for="topk">Evidence chunks</label>
         <input id="topk" type="number" min="1" max="50" value="12" />
       </div>
       <div class="row">
@@ -903,6 +925,10 @@ INDEX_HTML = r"""<!doctype html>
       <textarea id="objective" class="objective"></textarea>
       <div class="row">
         <button class="secondary" id="planRun">Review Plan</button>
+      </div>
+      <h2 style="margin-top:16px">Run Brief</h2>
+      <div class="list" id="runBrief">
+        <div class="empty">The brief will explain the current plan, what Irys is doing, and what you can change next.</div>
       </div>
       <h2 style="margin-top:16px">Plan</h2>
       <div class="list" id="planPreview">
@@ -1024,6 +1050,7 @@ INDEX_HTML = r"""<!doctype html>
       $("firstReadPaths").value = "";
       $("planNote").value = "";
       $("planPreview").innerHTML = emptyState("Choose a corpus and objective, then review the plan before running.");
+      $("runBrief").innerHTML = emptyState("The brief will explain the current plan, what Irys is doing, and what you can change next.");
       $("candidateReview").innerHTML = emptyState("Review Plan will show the highest-ranked documents here. Check or uncheck what Irys should read first.");
       currentPlan = null;
       currentPlanNote = "";
@@ -1263,6 +1290,7 @@ INDEX_HTML = r"""<!doctype html>
       ];
       $("planPreview").innerHTML = rows.map(([title, body]) => card(title, body)).join("");
       renderCandidateReview(plan.top_candidates || [], firstRead);
+      renderRunBrief({plan});
     }
     function planNeedsRefresh() {
       if (!pathPayload($("firstReadPaths").value).length) return true;
@@ -1295,6 +1323,7 @@ INDEX_HTML = r"""<!doctype html>
         ["Top path matches", top.join("\n") || "No path-level candidates were scored."]
       ].map(([title, body]) => card(title, body)).join("");
       renderCandidateReview(scope.scored_paths || [], selected);
+      renderRunBrief({plan: planLike});
     }
     function renderCandidateReview(candidates, selectedPaths) {
       const rows = Array.isArray(candidates) ? candidates.slice(0, 20) : [];
@@ -1401,6 +1430,7 @@ INDEX_HTML = r"""<!doctype html>
       $("chat").value = metadata.chat_id || $("chat").value || "main";
       $("objective").value = (trace.task || {}).question || $("objective").value;
       renderTracePlan(metadata);
+      renderRunBrief({trace, comparison: data.comparison});
       $("answer").innerHTML = renderMarkdown(data.rendered_answer || trace.rendered_answer || "");
       updateConversationHistoryFromTrace(trace);
       $("chatHistory").innerHTML = renderChatHistory(activeConversationHistory());
@@ -1558,6 +1588,53 @@ INDEX_HTML = r"""<!doctype html>
       if (unresolved.length) rows.push(["Needs review", unresolved.join("\n")]);
       return rows.map(([title, body]) => card(title, body)).join("");
     }
+    function renderRunBrief({plan = null, trace = null, events = null, comparison = null} = {}) {
+      const rows = [];
+      const objective = String(((trace || {}).task || {}).question || $("objective").value || currentPlanObjective || "").trim();
+      if (objective) rows.push(["Question", objective]);
+      if (trace) {
+        const packet = trace.final_packet || {};
+        const metadata = (trace.task || {}).metadata || {};
+        const scope = metadata.corpus_scope_decision || {};
+        const docs = Array.isArray(trace.documents) ? trace.documents : [];
+        const chunks = Array.isArray(trace.chunks) ? trace.chunks : [];
+        const evidence = Array.isArray(packet.verified_evidence) ? packet.verified_evidence : [];
+        const unresolved = Array.isArray(packet.unresolved) ? packet.unresolved : [];
+        const answerSources = Array.isArray(packet.answer_source_map) ? packet.answer_source_map : [];
+        const selected = Array.isArray(scope.selected_paths) ? scope.selected_paths : [];
+        rows.push(["Corpus read", `${docs.length} document(s), ${chunks.length} searchable chunk(s).`]);
+        if (selected.length) rows.push(["First-read focus", selected.slice(0, 8).map(path => `- ${filenameFromPath(path)}`).join("\n") + (selected.length > 8 ? `\n- ... ${selected.length - 8} more` : "")]);
+        rows.push(["Evidence status", `${evidence.length} evidence item(s), ${answerSources.length} answer-source link(s), ${unresolved.length} open question(s).`]);
+        rows.push(["Recommended next action", recommendedNextAction(trace, comparison)]);
+      } else if (plan) {
+        const firstRead = plan.first_read_paths || [];
+        rows.push(["Planned first read", `${firstRead.length} document(s) selected first out of ${plan.discovered_count || "the discovered corpus"}.`]);
+        rows.push(["Why these documents", plan.document_strategy || ((plan.source_planner || {}).reason) || "Irys ranked source paths against the question and document names."]);
+        if ((plan.needed_information || []).length) rows.push(["What Irys will look for", (plan.needed_information || []).join("\n")]);
+        rows.push(["What you can change", "Uncheck irrelevant first-read documents, add missing files, or write a Plan Correction before running."]);
+      }
+      if (Array.isArray(events) && events.length) {
+        const latest = events[events.length - 1] || {};
+        const fields = latest.fields || {};
+        rows.push(["Current step", `${fields.summary || friendlyEventTitle(latest)}\n${formatUserEventFields(fields) || "Working through the next step."}`]);
+      }
+      $("runBrief").innerHTML = rows.length
+        ? rows.map(([title, body]) => card(title, body)).join("")
+        : emptyState("The brief will explain the current plan, what Irys is doing, and what you can change next.");
+    }
+    function recommendedNextAction(trace, comparison) {
+      const packet = trace.final_packet || {};
+      const docs = Array.isArray(trace.documents) ? trace.documents : [];
+      const loadErrors = docs.filter(doc => doc && doc.load_error);
+      const unresolved = Array.isArray(packet.unresolved) ? packet.unresolved : [];
+      const evidence = Array.isArray(packet.verified_evidence) ? packet.verified_evidence : [];
+      const answerSources = Array.isArray(packet.answer_source_map) ? packet.answer_source_map : [];
+      if (loadErrors.length) return "Some files could not be read. Fix or remove those files, then rerun.";
+      if (unresolved.length) return "Review the open questions. Add a nudge or more documents if any gap matters.";
+      if (evidence.length && !answerSources.length) return "Evidence was found but answer-source links are thin. Review Sources Used before relying on the answer.";
+      if (comparison && comparison.answer_changed) return "Review the run comparison before accepting the new answer.";
+      return "Review the answer and Sources Used. If the focus is wrong, write a nudge and rerun.";
+    }
     function renderComparison(comparison) {
       if (!comparison) return "";
       const documents = comparison.document_delta || {};
@@ -1597,11 +1674,13 @@ INDEX_HTML = r"""<!doctype html>
       if (!Array.isArray(events) || !events.length) {
         $("liveEvents").innerHTML = "";
         $("currentStep").innerHTML = "<strong>Idle</strong><small>No run has started.</small>";
+        if (currentPlan) renderRunBrief({plan: currentPlan});
         return;
       }
       const latest = events[events.length - 1] || {};
       $("currentStep").innerHTML = renderCurrentStep(latest);
       $("liveEvents").innerHTML = events.slice(-30).map(renderUserEvent).join("");
+      renderRunBrief({plan: currentPlan, events});
     }
     function renderCurrentStep(event) {
       const fields = event.fields || {};
