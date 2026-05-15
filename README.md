@@ -16,7 +16,7 @@ Implemented:
 - Agent Bench bridge for long-context/document benchmarks;
 - model-call metrics with token and cost accounting;
 - local product matter runner with recursive folder ingestion, multi-chat matter history, live workstream events, source review, and per-message/matter cost totals;
-- editable product plan preview that ranks likely first-read documents from the objective and corpus structure before expensive document loading starts;
+- editable product plan preview that ranks likely first-read documents and folders from the objective and corpus structure before expensive document loading starts;
 - product UI workstream, source-review, held-back-document, rerun-comparison, next-pass setup, and steering surfaces for testing matter workflows over local corpora;
 - user-readable packet-review trace events that show missing information, revised search targets, source coverage, and retrieval-expansion decisions.
 
@@ -198,7 +198,7 @@ The product UI supports:
 
 - native local file/folder pickers;
 - recursive local folder paths;
-- optional worker source planning that reviews the file inventory before first read and falls back to deterministic path scoring if model planning is unavailable;
+- optional worker source planning that reviews the file and folder inventory before first read and falls back to deterministic path scoring if model planning is unavailable;
 - editable first-read plan preview before a run, with stale or missing plans shown for review before execution starts;
 - steering-note plan preview before a rerun, with stale or missing nudge plans shown for review before applying them;
 - first-read audit showing documents that were held back and one-click controls to read them in the next pass;
