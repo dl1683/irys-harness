@@ -4320,6 +4320,43 @@ class HarveyQueryTests(unittest.TestCase):
         self.assertIn("termination/adverse action evidence", digest)
         self.assertIn("Deterministic document review / privilege log digest", build_task_family_digest(state))
 
+    def test_document_review_privilege_digest_promotes_entry_level_deficiency_candidates(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="litigation-dispute-resolution/review-privilege-log-clawback-review",
+            question="Review the privilege log and prepare a clawback candidate list.",
+            answer_schema={"deliverables": ["clawback-candidate-list.xlsx"]},
+            metadata={"practice_area": "litigation-dispute-resolution"},
+        )
+        state = RunState(
+            task=task,
+            config=load_config(),
+            documents=[
+                {"doc_id": "doc_0024", "filename": "sample-doc-024.docx", "extension": ".docx"},
+                {"doc_id": "doc_0033", "filename": "sample-doc-033.docx", "extension": ".docx"},
+            ],
+            chunks=[
+                {
+                    "doc_id": "doc_0024",
+                    "chunk_id": "c1",
+                    "index": 0,
+                    "text": "April 5, 2020 email from Pruitt to Choi about operations metrics and business reporting.",
+                },
+                {
+                    "doc_id": "doc_0033",
+                    "chunk_id": "c2",
+                    "index": 0,
+                    "text": "December 15, 2018 audit report prepared in the ordinary course of environmental compliance.",
+                },
+            ],
+        )
+        digest = build_document_review_privilege_digest(state)
+        self.assertIn("Privilege Deficiency Candidate Rows", digest)
+        self.assertIn("Entry #024", digest)
+        self.assertIn("Entry #033", digest)
+        self.assertIn("No legal privilege apparent", digest)
+        self.assertIn("ordinary-course business or compliance material", digest)
+
     def test_antitrust_digest_routes_hsr_and_preserves_market_hot_doc_rows(self) -> None:
         task = BenchmarkTask(
             benchmark="harvey_lab_sample",

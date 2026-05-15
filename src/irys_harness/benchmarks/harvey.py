@@ -4751,6 +4751,21 @@ def build_document_review_privilege_digest(state: RunState) -> str:
         "- For each row preserve document ID, filename, date, author/from, recipient/to, privilege status, relevance tier, justification, and production or redaction guidance.",
         "- Do not let issue-category prose replace row-level classification.",
     ]
+    candidate_rows = build_privilege_deficiency_candidate_rows(rows)
+    if candidate_rows:
+        append_digest_table(
+            lines,
+            "Privilege Deficiency Candidate Rows",
+            [
+                "Entry / Doc",
+                "Filename",
+                "Deficiency Candidate",
+                "Risk",
+                "Recommended Treatment",
+                "Source Basis",
+            ],
+            candidate_rows,
+        )
     append_digest_table(
         lines,
         "Full Document Review Inventory",
@@ -4850,6 +4865,91 @@ def build_document_review_rows(state: RunState) -> list[dict[str, str]]:
             }
         )
     return rows
+
+
+def build_privilege_deficiency_candidate_rows(rows: list[dict[str, str]]) -> list[list[str]]:
+    candidates: list[list[str]] = []
+    for row in rows:
+        entry = extract_privilege_entry_label(row["filename"])
+        if not entry:
+            continue
+        deficiency = classify_privilege_deficiency_candidate(row)
+        if not deficiency:
+            continue
+        candidates.append(
+            [
+                entry or row["doc_id"],
+                row["filename"],
+                deficiency["deficiency"],
+                deficiency["risk"],
+                deficiency["treatment"],
+                deficiency["basis"],
+            ]
+        )
+    return candidates
+
+
+def extract_privilege_entry_label(filename: str) -> str:
+    lower = filename.lower()
+    match = re.search(r"(?:sample-doc|entry|priv)[-_ ]*0*(\d{1,4})\b", lower)
+    if match:
+        return f"Entry #{int(match.group(1)):03d}"
+    return ""
+
+
+def classify_privilege_deficiency_candidate(row: dict[str, str]) -> dict[str, str] | None:
+    combined = " ".join(
+        [
+            row.get("filename", ""),
+            row.get("date", ""),
+            row.get("author", ""),
+            row.get("recipient", ""),
+            row.get("cc", ""),
+            row.get("description", ""),
+            row.get("privilege_status", ""),
+            row.get("privilege_basis", ""),
+            row.get("key_basis", ""),
+            row.get("production_treatment", ""),
+        ]
+    ).lower()
+    status = row.get("privilege_status", "")
+    treatment = row.get("production_treatment", "")
+    basis = "; ".join(
+        item
+        for item in [row.get("privilege_basis", ""), row.get("key_basis", ""), row.get("description", "")]
+        if item and item != "Not stated"
+    )
+    if status == "Not Privileged":
+        if any(term in combined for term in ["non-lawyer", "not an attorney", "government relations", "operations", "business"]):
+            label = "Privilege claim appears deficient because the communication is business or non-lawyer-only."
+            risk = "High" if "highly relevant" in combined else "Medium"
+        elif any(term in combined for term in ["audit", "ordinary course", "compliance", "report"]):
+            label = "Work-product or privilege claim appears deficient because the document is ordinary-course business or compliance material."
+            risk = "High" if "highly relevant" in combined else "Medium"
+        else:
+            label = "Privilege claim appears deficient because no legal privilege is apparent from the source document."
+            risk = "Medium"
+        return {
+            "deficiency": label,
+            "risk": risk,
+            "treatment": treatment or "Produce or reclassify as non-privileged unless a separate legal basis is established.",
+            "basis": basis,
+        }
+    if status == "Partially Privileged":
+        return {
+            "deficiency": "Privilege claim requires segregation; non-privileged business portions should not remain fully withheld.",
+            "risk": "Medium",
+            "treatment": treatment or "Produce non-privileged portions with targeted redactions.",
+            "basis": basis,
+        }
+    if any(term in combined for term in ["common interest", "joint-defense", "joint defense", "waiver", "third party", "broker", "consultant"]):
+        return {
+            "deficiency": "Privilege claim requires waiver/common-interest review before withholding.",
+            "risk": "Medium",
+            "treatment": treatment or "Review for waiver, common-interest agreement coverage, and non-waiving log description.",
+            "basis": basis,
+        }
+    return None
 
 
 def natural_doc_sort_key(doc_id: str) -> tuple[int, str]:
