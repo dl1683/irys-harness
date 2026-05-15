@@ -259,6 +259,26 @@ class ProductMatterTests(unittest.TestCase):
             self.assertFalse(trace["retrieval_iterations"][0]["conversation_history_used"])
             self.assertIn("NEVER_RETRIEVE_HISTORY_MARKER", prompt)
 
+    def test_history_dependent_followup_is_flagged_without_using_history_for_retrieval(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            doc = root / "agreement.txt"
+            doc.write_text("Guaranty enforcement requires a continuing payment default.", encoding="utf-8")
+            result = run_product_matter(
+                objective="What about that?",
+                paths=[str(doc)],
+                matter_id="Followup Matter",
+                conversation_history=[{"user": "Can lender accelerate?", "assistant": "Only after default."}],
+                config=load_config(),
+                trace_dir=root / "traces",
+                live_synthesis=False,
+                verbose=False,
+            )
+            trace = result.state.to_trace()
+
+            self.assertIn("may depend on prior chat context", trace["final_packet"]["unresolved"][0])
+            self.assertFalse(trace["retrieval_iterations"][0]["conversation_history_used"])
+
     def test_product_synthesis_prompt_includes_worker_analysis(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

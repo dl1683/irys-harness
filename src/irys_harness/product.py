@@ -338,6 +338,13 @@ def compact_snippet(text: str, *, max_chars: int = 900) -> str:
 
 def build_unresolved_items(state: RunState) -> list[str]:
     items: list[str] = []
+    if (
+        state.task.metadata.get("conversation_history_turns")
+        and objective_may_depend_on_history(state.task.question)
+    ):
+        items.append(
+            "The current objective may depend on prior chat context. Conversation history will inform synthesis, but retrieval uses only the current objective and active corpus; restate the target issue if retrieval looks thin."
+        )
     if any(doc.get("load_error") for doc in state.documents):
         items.append("One or more documents failed to load; inspect document inventory.")
     if not state.final_packet and not state.chunks:
@@ -349,6 +356,25 @@ def build_unresolved_items(state: RunState) -> list[str]:
         if not retrieved:
             items.append("No chunks matched the objective; revise the objective or add relevant documents.")
     return items
+
+
+def objective_may_depend_on_history(objective: str) -> bool:
+    tokens = tokenize(objective)
+    if len(tokens) <= 4:
+        return True
+    history_dependent_terms = {
+        "above",
+        "earlier",
+        "it",
+        "previous",
+        "same",
+        "that",
+        "them",
+        "these",
+        "this",
+        "those",
+    }
+    return any(token in history_dependent_terms for token in tokens)
 
 
 def build_product_diagnosis(state: RunState) -> dict[str, Any]:
