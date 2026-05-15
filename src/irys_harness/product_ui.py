@@ -2555,12 +2555,14 @@ INDEX_HTML = r"""<!doctype html>
         if (label === "ERROR" || label === "STOP") hasError = true;
         if (labelToIndex[label] !== undefined) latestIndex = Math.max(latestIndex, labelToIndex[label]);
       }
-      const latestLabel = String(((events || [])[events.length - 1] || {}).label || "");
+      const latestEvent = (events || [])[events.length - 1] || {};
+      const latestLabel = String(latestEvent.label || "");
+      const runComplete = latestLabel === "DONE" || isRunCompleteEvent(latestEvent);
       const activeIndex = Math.max(0, latestIndex);
       return stages.map((stage, index) => {
         let state = "pending";
-        if (index < activeIndex || latestLabel === "DONE") state = "done";
-        if (index === activeIndex && latestLabel !== "DONE") state = hasError ? "error" : "active";
+        if (index < activeIndex || runComplete) state = "done";
+        if (index === activeIndex && !runComplete) state = hasError ? "error" : "active";
         const status = state === "done" ? "Done" : state === "active" ? "Now" : state === "error" ? "Needs attention" : "Waiting";
         return `<div class="timeline-step ${state}"><b>${escapeHtml(stage.title)}</b><span>${escapeHtml(status + ": " + stage.detail)}</span></div>`;
       }).join("");
@@ -2568,9 +2570,17 @@ INDEX_HTML = r"""<!doctype html>
     function renderCurrentStep(event) {
       const fields = event.fields || {};
       const title = fields.summary || friendlyEventTitle(event);
-      const details = fields.next_step ? `Next: ${fields.next_step}` : "Waiting for the next update.";
+      const details = isRunCompleteEvent(event)
+        ? "Review the answer, sources, and trace."
+        : fields.next_step ? `Next: ${fields.next_step}` : "Waiting for the next update.";
       updateCommandStep(title, details);
       return `<strong>${escapeHtml(title)}</strong><small>${escapeHtml(details)}</small>`;
+    }
+    function isRunCompleteEvent(event) {
+      const label = String((event || {}).label || "");
+      const message = String((event || {}).message || "").toLowerCase();
+      const summary = String((((event || {}).fields || {}).summary) || "").toLowerCase();
+      return label === "DONE" || (label === "SYNTH" && (message.includes("generated") || summary.includes("final answer generated")));
     }
     function renderUserEvent(event) {
       const fields = event.fields || {};

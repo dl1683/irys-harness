@@ -812,6 +812,8 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn('id="currentStep"', INDEX_HTML)
         self.assertIn('id="runTimeline"', INDEX_HTML)
         self.assertIn("function renderRunTimeline", INDEX_HTML)
+        self.assertIn("function isRunCompleteEvent", INDEX_HTML)
+        self.assertIn("Review the answer, sources, and trace.", INDEX_HTML)
         self.assertIn("timeline-step", INDEX_HTML)
         self.assertIn("Select sources", INDEX_HTML)
         self.assertIn("Draft answer", INDEX_HTML)
