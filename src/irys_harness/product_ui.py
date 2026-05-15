@@ -997,6 +997,55 @@ INDEX_HTML = r"""<!doctype html>
       font-size: 12px;
       line-height: 1.45;
     }
+    .action-board {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      margin: 12px 0 14px;
+    }
+    .action-card {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      padding: 10px;
+      min-height: 138px;
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      overflow-wrap: anywhere;
+    }
+    .action-card.ready {
+      border-color: #b8d8c2;
+      background: #f6fbf7;
+    }
+    .action-card.next {
+      border-color: #9fc2e8;
+      background: #f2f8ff;
+    }
+    .action-card.warn {
+      border-color: #d8c1ad;
+      background: #fff8f0;
+    }
+    .action-card b {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+    .action-card strong {
+      font-size: 15px;
+      line-height: 1.25;
+    }
+    .action-card small {
+      color: #2f3b46;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    .action-card button {
+      margin-top: auto;
+      width: 100%;
+      padding: 8px 9px;
+      font-size: 12px;
+    }
     .hint {
       color: var(--muted);
       font-size: 12px;
@@ -1130,6 +1179,7 @@ INDEX_HTML = r"""<!doctype html>
       .command-actions button { flex: 1 1 140px; }
       main { grid-template-columns: 1fr; }
       section { border-right: 0; border-bottom: 1px solid var(--line); }
+      .action-board { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -1200,6 +1250,10 @@ INDEX_HTML = r"""<!doctype html>
       <div class="hint">For a follow-up, keep the same Matter ID and Chat ID, replace the question, and run again. Prior questions and final answers are used for continuity; intermediate trace details are not used as chat history.</div>
       <div class="row">
         <button class="secondary" id="planRun">Review Source Plan</button>
+      </div>
+      <h2 style="margin-top:16px">Next Best Action</h2>
+      <div class="action-board" id="actionBoard">
+        <div class="empty">Choose a corpus and objective. Irys will show the next useful action here.</div>
       </div>
       <h2 style="margin-top:16px">Run Brief</h2>
       <div class="list" id="runBrief">
@@ -1351,6 +1405,8 @@ INDEX_HTML = r"""<!doctype html>
     let suppressFirstReadDirty = false;
     let excludedSourcePaths = [];
     let pinnedSourcePaths = [];
+    let lastLiveEvents = [];
+    let lastRenderedTrace = null;
     topPlan.addEventListener("click", () => planRun.click());
     topRun.addEventListener("click", () => run.click());
     topStop.addEventListener("click", () => stopRun.click());
@@ -1358,6 +1414,7 @@ INDEX_HTML = r"""<!doctype html>
     topApplyNudge.addEventListener("click", () => rerunTrace.click());
     syncCommandButtons();
     renderNextPassSetup();
+    renderActionBoard();
     $("clear").addEventListener("click", () => {
       $("objective").value = "";
       $("objective").classList.remove("compact");
@@ -1396,9 +1453,12 @@ INDEX_HTML = r"""<!doctype html>
       $("artifacts").innerHTML = "";
       $("evidence").innerHTML = "";
       $("answerSources").innerHTML = "";
+      lastLiveEvents = [];
+      lastRenderedTrace = null;
       updateCommandStep("Ready", "Choose a corpus, ask a question, review the source plan, then run.");
       syncCommandButtons();
       renderNextPassSetup();
+      renderActionBoard();
       status.textContent = "";
     });
     $("firstReadPaths").addEventListener("input", () => {
@@ -1408,6 +1468,8 @@ INDEX_HTML = r"""<!doctype html>
     $("nudge").addEventListener("input", renderNextPassSetup);
     $("rerunPaths").addEventListener("input", renderNextPassSetup);
     $("tracepath").addEventListener("input", renderNextPassSetup);
+    $("paths").addEventListener("input", renderActionBoard);
+    $("objective").addEventListener("input", renderActionBoard);
     stopRun.addEventListener("click", async () => {
       if (!activeJobId) return;
       stopRun.disabled = true;
@@ -1701,6 +1763,7 @@ INDEX_HTML = r"""<!doctype html>
       currentPlanObjective = $("objective").value;
       currentPlanMode = mode;
       currentPlanPathKey = pathKey;
+      lastRenderedTrace = null;
       renderNextPassSetup();
       const candidates = (plan.top_candidates || []).slice(0, 6).map(item =>
         `- ${item.filename || item.path}: score ${item.score}; ${(item.reasons || []).join("; ")}`
@@ -1720,6 +1783,7 @@ INDEX_HTML = r"""<!doctype html>
       renderCandidateReview(plan.top_candidates || [], firstRead);
       renderRunBrief({plan});
       renderReviewChecklist({plan});
+      renderActionBoard();
       setSourcePlanOpen(true);
     }
     function planNeedsRefresh() {
@@ -1877,6 +1941,29 @@ INDEX_HTML = r"""<!doctype html>
     document.addEventListener("click", (event) => {
       const target = event.target;
       if (!target || !target.matches) return;
+      if (target.matches(".action-board-action")) {
+        const action = target.getAttribute("data-action") || "";
+        if (action === "focus_objective") {
+          $("objective").focus();
+          $("objective").scrollIntoView({behavior: "smooth", block: "center"});
+        } else if (action === "review_plan") {
+          setSourcePlanOpen(true);
+          $("sourcePlanDetails").scrollIntoView({behavior: "smooth", block: "start"});
+          if (!currentPlan || !pathPayload($("firstReadPaths").value).length) planRun.click();
+        } else if (action === "run_plan") {
+          run.click();
+        } else if (action === "stop_run") {
+          stopRun.click();
+        } else if (action === "review_sources") {
+          $("sourceSummary").scrollIntoView({behavior: "smooth", block: "start"});
+        } else if (action === "preview_steering") {
+          previewNudgePlan.click();
+        } else if (action === "focus_steering") {
+          $("nudge").focus();
+          $("nudge").scrollIntoView({behavior: "smooth", block: "center"});
+        }
+        return;
+      }
       if (target.matches(".candidate-check")) {
         applyCheckedCandidatePaths({silent: true});
         status.textContent = `Updated first-read set to ${pathPayload($("firstReadPaths").value).length} document(s)`;
@@ -1940,6 +2027,7 @@ INDEX_HTML = r"""<!doctype html>
     });
     function render(data) {
       const trace = data.trace || {};
+      lastRenderedTrace = trace;
       const metrics = trace.metrics || {};
       $("docCount").textContent = String((trace.documents || []).length);
       $("chunkCount").textContent = String((trace.chunks || []).length);
@@ -1959,6 +2047,7 @@ INDEX_HTML = r"""<!doctype html>
       renderRunBrief({trace, comparison: data.comparison});
       renderReviewChecklist({trace, comparison: data.comparison});
       $("answer").innerHTML = renderMarkdown(data.rendered_answer || trace.rendered_answer || "");
+      renderActionBoard();
       updateConversationHistoryFromTrace(trace);
       $("chatHistory").innerHTML = renderChatHistory(activeConversationHistory());
       renderSourceReview(trace);
@@ -2249,10 +2338,95 @@ INDEX_HTML = r"""<!doctype html>
         : "";
       $("nextPassSetup").innerHTML =
         `<strong>Next Pass Setup</strong><small><pre>${escapeHtml(details.join("\n"))}</pre></small>${listHtml}${ignoredControls}`;
+      renderActionBoard();
     }
     function pill(text, tone = "") {
       const cls = tone ? `action-pill ${tone}` : "action-pill";
       return `<span class="${cls}">${escapeHtml(text)}</span>`;
+    }
+    function renderActionBoard() {
+      const target = $("actionBoard");
+      if (!target) return;
+      const objective = $("objective").value.trim();
+      const corpusPathCount = pathPayload($("paths").value).length;
+      const firstRead = pathPayload($("firstReadPaths").value);
+      const nudge = $("nudge").value.trim();
+      const trace = lastRenderedTrace || null;
+      const latestEvent = lastLiveEvents.length ? lastLiveEvents[lastLiveEvents.length - 1] : null;
+      const runActive = latestEvent && !isRunCompleteEvent(latestEvent) && !["ERROR", "STOP"].includes(String(latestEvent.label || ""));
+      const hasAnswer = Boolean(
+        (trace && (trace.rendered_answer || trace.draft_answer)) ||
+        $("answer").textContent.trim()
+      );
+      const cards = [];
+      cards.push(actionCard(
+        "Objective",
+        objective ? "Question ready" : "Add the question",
+        objective
+          ? limitDisplayText(objective, 180)
+          : "Type the question, deliverable, or issue you want Irys to solve.",
+        objective ? "ready" : "warn",
+        "Focus Question",
+        "focus_objective"
+      ));
+      cards.push(actionCard(
+        "Sources",
+        firstRead.length
+          ? `${firstRead.length} first-read source${firstRead.length === 1 ? "" : "s"}`
+          : corpusPathCount
+            ? "Plan source focus"
+            : "Choose corpus",
+        firstRead.length
+          ? firstRead.slice(0, 3).map(filenameFromPath).join("\n") + (firstRead.length > 3 ? `\n... ${firstRead.length - 3} more` : "")
+          : corpusPathCount
+            ? "Ask Irys to inspect the file inventory and decide what to read first."
+            : "Select a local folder or files for this matter.",
+        firstRead.length ? "ready" : corpusPathCount ? "next" : "warn",
+        firstRead.length ? "Review Plan" : "Review Source Plan",
+        "review_plan"
+      ));
+      cards.push(actionCard(
+        "Current Work",
+        runActive
+          ? (latestEvent.fields || {}).summary || friendlyEventTitle(latestEvent)
+          : hasAnswer
+            ? "Answer ready"
+            : firstRead.length
+              ? "Ready to run"
+              : "Waiting for plan",
+        runActive
+          ? formatUserEventFields(latestEvent.fields || {}) || "Working through the run."
+          : hasAnswer
+            ? "Review the answer, source support, and open questions. Steer the next pass if the focus is wrong."
+            : firstRead.length
+              ? "Run the approved first-read plan, or edit the plan before running."
+              : "Review the source plan before running so the first read is intentional.",
+        runActive ? "next" : hasAnswer ? "ready" : firstRead.length ? "next" : "warn",
+        runActive ? "Stop" : hasAnswer ? "Review Sources" : firstRead.length ? "Run Approved Plan" : "Review Source Plan",
+        runActive ? "stop_run" : hasAnswer ? "review_sources" : firstRead.length ? "run_plan" : "review_plan"
+      ));
+      cards.push(actionCard(
+        "Steering",
+        nudge ? "Correction ready" : hasAnswer ? "Steer next pass" : "Optional",
+        nudge
+          ? limitDisplayText(nudge, 180)
+          : hasAnswer
+            ? "Add a correction, pin or ignore sources, then preview the corrected source plan."
+            : "After planning or answering, use this to redirect source focus without starting over.",
+        nudge ? "next" : "neutral",
+        nudge ? "Preview Steering" : "Write Steering",
+        nudge ? "preview_steering" : "focus_steering"
+      ));
+      target.innerHTML = cards.join("");
+    }
+    function actionCard(label, title, body, tone, buttonText, action) {
+      const safeTone = ["ready", "next", "warn", "neutral"].includes(tone) ? tone : "neutral";
+      return `<div class="action-card ${safeTone}">` +
+        `<b>${escapeHtml(label)}</b>` +
+        `<strong>${escapeHtml(title || "")}</strong>` +
+        `<small>${formatPlainText(body || "")}</small>` +
+        `<button class="secondary action-board-action" data-action="${escapeAttr(action || "")}">${escapeHtml(buttonText || "Open")}</button>` +
+        `</div>`;
     }
     function renderRunHealth(trace) {
       const diagnosis = trace.diagnosis || {};
@@ -2524,6 +2698,7 @@ INDEX_HTML = r"""<!doctype html>
       }).join("\n") + ((items || []).length > 8 ? `\n- ... ${(items || []).length - 8} more` : "");
     }
     function renderLiveEvents(events) {
+      lastLiveEvents = Array.isArray(events) ? events : [];
       if (!Array.isArray(events) || !events.length) {
         $("liveEvents").innerHTML = "";
         $("runTimeline").innerHTML = "";
@@ -2531,6 +2706,7 @@ INDEX_HTML = r"""<!doctype html>
         updateCommandStep("Ready", "Choose a corpus, ask a question, review the source plan, then run.");
         if (currentPlan) renderRunBrief({plan: currentPlan});
         if (currentPlan) renderReviewChecklist({plan: currentPlan});
+        renderActionBoard();
         return;
       }
       const latest = events[events.length - 1] || {};
@@ -2539,6 +2715,7 @@ INDEX_HTML = r"""<!doctype html>
       $("liveEvents").innerHTML = renderRecentLiveEvents(events);
       renderRunBrief({plan: currentPlan, events});
       renderReviewChecklist({plan: currentPlan, events});
+      renderActionBoard();
     }
     function renderRecentLiveEvents(events) {
       const rows = Array.isArray(events) ? events : [];
