@@ -137,6 +137,7 @@ def run_product_matter(
         "verified_evidence": evidence_items,
         "unresolved": build_unresolved_items(state),
     }
+    state.diagnosis = build_product_diagnosis(state)
 
     if live_synthesis:
         router = GeminiModelRouter(config)
@@ -257,7 +258,41 @@ def build_unresolved_items(state: RunState) -> list[str]:
         items.append("No searchable text was extracted from the active corpus.")
     if state.chunks and not state.retrieval_iterations:
         items.append("Retrieval has not run.")
+    if state.chunks and state.retrieval_iterations:
+        retrieved = state.retrieval_iterations[-1].get("retrieved_chunks", [])
+        if not retrieved:
+            items.append("No chunks matched the objective; revise the objective or add relevant documents.")
     return items
+
+
+def build_product_diagnosis(state: RunState) -> dict[str, Any]:
+    packet = state.final_packet or {}
+    retrieved = []
+    if state.retrieval_iterations:
+        retrieved = list(state.retrieval_iterations[-1].get("retrieved_chunks", []) or [])
+    evidence = list(packet.get("verified_evidence", []) or [])
+    unresolved = list(packet.get("unresolved", []) or [])
+    load_errors = [doc for doc in state.documents if doc.get("load_error")]
+    status = "ready_for_review"
+    if load_errors or not state.chunks or not evidence or unresolved:
+        status = "needs_attention"
+    return {
+        "mode": "product_matter_diagnosis",
+        "status": status,
+        "document_count": len(state.documents),
+        "load_error_count": len(load_errors),
+        "chunk_count": len(state.chunks),
+        "retrieved_chunk_count": len(retrieved),
+        "evidence_count": len(evidence),
+        "unresolved_count": len(unresolved),
+        "unresolved": unresolved,
+        "supporting_trace_refs": [
+            {"path": "documents", "reason": "Active user corpus and load errors."},
+            {"path": "retrieval_iterations[-1].retrieved_chunks", "reason": "Chunks selected from the corpus."},
+            {"path": "final_packet.verified_evidence", "reason": "Evidence passed to synthesis or preview."},
+            {"path": "final_packet.unresolved", "reason": "Gaps that should be resolved before relying on output."},
+        ],
+    }
 
 
 def build_product_synthesis_prompt(state: RunState) -> str:

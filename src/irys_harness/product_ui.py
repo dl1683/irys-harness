@@ -328,6 +328,14 @@ INDEX_HTML = r"""<!doctype html>
     </section>
     <section>
       <h2>Trace</h2>
+      <label for="tracepath">Trace Path</label>
+      <input id="tracepath" />
+      <div class="row">
+        <button class="secondary" id="loadTrace">Load Trace</button>
+      </div>
+      <h2 style="margin-top:16px">Diagnosis</h2>
+      <div class="list" id="diagnosis"></div>
+      <h2 style="margin-top:16px">Events</h2>
       <div class="list" id="events"></div>
       <h2 style="margin-top:16px">Documents</h2>
       <div class="list" id="documents"></div>
@@ -339,9 +347,12 @@ INDEX_HTML = r"""<!doctype html>
     const $ = (id) => document.getElementById(id);
     const status = $("status");
     const run = $("run");
+    const loadTrace = $("loadTrace");
     $("clear").addEventListener("click", () => {
       $("objective").value = "";
       $("answer").textContent = "";
+      $("tracepath").value = "";
+      $("diagnosis").innerHTML = "";
       $("events").innerHTML = "";
       $("documents").innerHTML = "";
       $("evidence").innerHTML = "";
@@ -366,10 +377,26 @@ INDEX_HTML = r"""<!doctype html>
         if (!response.ok || data.error) throw new Error(data.error || "Run failed");
         render(data);
         status.textContent = data.trace_path;
+        $("tracepath").value = data.trace_path || "";
       } catch (error) {
         status.textContent = error.message;
       } finally {
         run.disabled = false;
+      }
+    });
+    loadTrace.addEventListener("click", async () => {
+      loadTrace.disabled = true;
+      status.textContent = "Loading trace";
+      try {
+        const response = await fetch("/api/trace?path=" + encodeURIComponent($("tracepath").value));
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || "Trace load failed");
+        render(data);
+        status.textContent = $("tracepath").value;
+      } catch (error) {
+        status.textContent = error.message;
+      } finally {
+        loadTrace.disabled = false;
       }
     });
     function render(data) {
@@ -379,7 +406,13 @@ INDEX_HTML = r"""<!doctype html>
       $("chunkCount").textContent = String((trace.chunks || []).length);
       $("tokens").textContent = String(metrics.total_tokens || 0);
       $("cost").textContent = "$" + Number(metrics.estimated_cost || 0).toFixed(4);
-      $("answer").textContent = data.rendered_answer || "";
+      $("matter").value = (trace.task || {}).task_id || $("matter").value;
+      $("objective").value = (trace.task || {}).question || $("objective").value;
+      $("answer").textContent = data.rendered_answer || trace.rendered_answer || "";
+      $("diagnosis").innerHTML = Object.entries(trace.diagnosis || {}).map(([key, value]) => card(
+        key,
+        typeof value === "string" || typeof value === "number" ? String(value) : JSON.stringify(value, null, 2)
+      )).join("");
       $("events").innerHTML = (trace.events || []).map(event => card(
         event.label + " - " + event.message,
         JSON.stringify(event.fields || {}, null, 2)

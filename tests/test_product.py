@@ -49,6 +49,29 @@ class ProductMatterTests(unittest.TestCase):
             self.assertEqual(trace["documents"][0]["source_posture"], "user_provided_corpus")
             self.assertTrue(trace["retrieval_iterations"][0]["retrieved_chunks"])
             self.assertIn("10 day cure period", trace["rendered_answer"])
+            self.assertEqual(trace["diagnosis"]["status"], "ready_for_review")
+            self.assertEqual(trace["diagnosis"]["evidence_count"], 1)
+
+    def test_run_product_matter_flags_no_matching_evidence(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            doc = root / "source.txt"
+            doc.write_text("ordinary payment terms only", encoding="utf-8")
+
+            result = run_product_matter(
+                objective="zebra orbital indemnity",
+                paths=[str(doc)],
+                matter_id="No Evidence",
+                config=load_config(),
+                trace_dir=root / "traces",
+                live_synthesis=False,
+                verbose=False,
+            )
+            trace = result.state.to_trace()
+
+            self.assertEqual(trace["diagnosis"]["status"], "needs_attention")
+            self.assertEqual(trace["diagnosis"]["evidence_count"], 0)
+            self.assertIn("No chunks matched the objective", trace["final_packet"]["unresolved"][0])
 
     def test_sanitize_matter_id_is_path_safe(self) -> None:
         self.assertEqual(sanitize_matter_id("Client / Matter: 01"), "Client-Matter-01")
