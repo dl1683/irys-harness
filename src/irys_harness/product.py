@@ -38,6 +38,7 @@ MAX_SOURCE_PLANNER_PATHS = 4000
 MAX_SOURCE_PLANNER_CANDIDATE_PATHS = 240
 MAX_SOURCE_PLANNER_DIRECTORY_ROWS = 80
 MAX_SOURCE_PLANNER_OUTPUT_TOKENS = 4096
+MAX_SUPPLEMENTAL_FIRST_READ_DOCS = 12
 
 
 class ProductRunCancelled(RuntimeError):
@@ -369,6 +370,61 @@ def run_product_matter(
         ][:8]
         if packet_review and packet_review.get("continue_retrieval") is True and revised_queries:
             check_product_cancel(should_cancel)
+            supplemental_paths, supplemental_profile, supplemental_calls = select_supplemental_product_paths(
+                objective=objective,
+                discovered_paths=scope_decision.discovered_paths,
+                active_paths=active_corpus_paths,
+                packet_review=packet_review,
+                config=config,
+                use_llm_planning=use_llm_planning,
+                limit=MAX_SUPPLEMENTAL_FIRST_READ_DOCS,
+            )
+            for call in supplemental_calls:
+                state.metrics.add_call(call)
+            if supplemental_paths:
+                active_corpus_paths = unique_paths([*active_corpus_paths, *supplemental_paths, *pinned_corpus_paths])
+                state.task.context_files = [str(path) for path in active_corpus_paths]
+                state.task.metadata["supplemental_context_files"] = [str(path) for path in supplemental_paths]
+                state.task.metadata["supplemental_source_planner"] = supplemental_profile
+                log.emit(
+                    "SCOPE",
+                    "adding supplemental documents",
+                    summary=(
+                        f"The packet reviewer found a gap, so Irys is adding "
+                        f"{len(supplemental_paths)} held-back document(s) before drafting."
+                    ),
+                    selected_documents=[path.name for path in supplemental_paths[:12]],
+                    omitted_document_count=max(0, len(supplemental_paths) - 12),
+                    missing_information=packet_review.get("missing_information", []),
+                    queries=revised_queries,
+                    reason=supplemental_profile.get("reason"),
+                    planner=(supplemental_profile.get("source_planner") or {}).get("status")
+                    or supplemental_profile.get("status"),
+                    next_step="Read the expanded active corpus and search again.",
+                )
+                state.documents, state.chunks = load_documents(
+                    [str(path) for path in active_corpus_paths],
+                    max_chars_per_doc=max_chars_per_doc,
+                    source_posture="user_provided_corpus",
+                    progress_callback=lambda event: log.emit(
+                        str(event.get("label") or "READ"),
+                        str(event.get("message") or ""),
+                        **dict(event.get("fields") or {}),
+                    ),
+                    should_cancel=should_cancel,
+                )
+                check_product_cancel(should_cancel)
+                log.emit(
+                    "LOAD",
+                    "loaded expanded user corpus",
+                    documents=len(state.documents),
+                    chunks=len(state.chunks),
+                    summary=(
+                        f"Loaded expanded corpus: {len(state.documents)} document(s), "
+                        f"{len(state.chunks)} searchable chunk(s)."
+                    ),
+                    next_step="Run the reviewer-requested evidence search.",
+                )
             supplemental = retrieve_product_chunks(
                 state.chunks,
                 revised_queries,
@@ -386,6 +442,7 @@ def run_product_matter(
                     "conversation_history_used": False,
                     "strategy": "worker_review_retrieval_expansion",
                     "source_coverage": source_coverage,
+                    "supplemental_context_files": [str(path) for path in supplemental_paths],
                 }
             )
             log.emit(
@@ -1808,6 +1865,70 @@ def normalize_packet_review(payload: dict[str, Any]) -> dict[str, Any]:
         "low_value_source_ids": normalize_string_list(payload.get("low_value_source_ids"), limit=80),
         "coverage_risks": normalize_string_list(payload.get("coverage_risks"), limit=20),
     }
+
+
+def select_supplemental_product_paths(
+    *,
+    objective: str,
+    discovered_paths: list[Path],
+    active_paths: list[Path],
+    packet_review: dict[str, Any],
+    config: HarnessConfig,
+    use_llm_planning: bool,
+    limit: int = MAX_SUPPLEMENTAL_FIRST_READ_DOCS,
+) -> tuple[list[Path], dict[str, Any], list[ModelCallRecord]]:
+    active_resolved = {path.resolve() for path in active_paths}
+    held_back = [path.resolve() for path in discovered_paths if path.resolve() not in active_resolved]
+    if not held_back or limit <= 0:
+        return [], {"status": "no_held_back_documents", "reason": "No held-back documents were available."}, []
+
+    missing = normalize_string_list(packet_review.get("missing_information"), limit=12)
+    revised = normalize_string_list(packet_review.get("revised_queries"), limit=12)
+    risks = normalize_string_list(packet_review.get("coverage_risks"), limit=8)
+    supplemental_objective = "\n".join(
+        part
+        for part in [
+            objective.strip(),
+            "Supplemental source selection requested by packet reviewer.",
+            "Missing information: " + "; ".join(missing) if missing else "",
+            "Reviewer search targets: " + "; ".join(revised) if revised else "",
+            "Coverage risks: " + "; ".join(risks) if risks else "",
+        ]
+        if part
+    )
+
+    if use_llm_planning:
+        decision = plan_product_corpus_scope(
+            objective=supplemental_objective,
+            paths=held_back,
+            config=config,
+            use_llm_planning=True,
+        )
+        selected = decision.selected_paths
+        if len(selected) > limit and len(held_back) > limit:
+            selected = selected[:limit]
+        profile = {
+            "status": "used",
+            "reason": decision.reason,
+            "source_planner": decision.signals.get("source_planner", {}),
+            "selected_count": len(selected),
+            "held_back_count": len(held_back),
+            "missing_information": missing,
+            "coverage_risks": risks,
+        }
+        return selected, profile, decision.model_calls
+
+    scored = score_corpus_paths(supplemental_objective, held_back)
+    selected = [Path(row["path"]).resolve() for row in scored[:limit]]
+    profile = {
+        "status": "path_scoring",
+        "reason": "Selected held-back documents against the packet reviewer's missing information and revised queries.",
+        "selected_count": len(selected),
+        "held_back_count": len(held_back),
+        "missing_information": missing,
+        "coverage_risks": risks,
+    }
+    return selected, profile, []
 
 
 def normalize_string_list(value: Any, *, limit: int) -> list[str]:

@@ -28,6 +28,7 @@ from irys_harness.product import (
     run_product_matter,
     sanitize_matter_id,
     score_corpus_paths,
+    select_supplemental_product_paths,
 )
 from irys_harness.product_ui import (
     INDEX_HTML,
@@ -419,6 +420,91 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn("basic $0.55", evidence[0]["raw_support"])
         self.assertIn("diluted $0.52", evidence[0]["raw_support"])
 
+    def test_packet_review_can_select_supplemental_held_back_documents(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            active = root / "generic_rules.txt"
+            target = root / "urgent_warranty_email_chain.txt"
+            active.write_text("General background rules only.", encoding="utf-8")
+            target.write_text("The key issue is warranty fraud discussed in the email chain.", encoding="utf-8")
+
+            selected, profile, calls = select_supplemental_product_paths(
+                objective="What is the main issue here?",
+                discovered_paths=[active, target],
+                active_paths=[active],
+                packet_review={
+                    "missing_information": ["matter-specific issue narrative"],
+                    "revised_queries": ["warranty fraud email chain"],
+                    "coverage_risks": ["current packet only has generic background"],
+                },
+                config=load_config(),
+                use_llm_planning=False,
+                limit=3,
+            )
+
+            self.assertEqual(calls, [])
+            self.assertIn(target.resolve(), selected)
+            self.assertEqual(profile["status"], "path_scoring")
+
+    def test_product_run_loads_supplemental_documents_after_packet_review(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            generic = root / "generic_rules.txt"
+            target = root / "urgent_warranty_email_chain.txt"
+            generic.write_text("General background rules only.", encoding="utf-8")
+            target.write_text("The key issue is warranty fraud discussed in the email chain.", encoding="utf-8")
+
+            def fake_review(**kwargs: object) -> dict[str, object]:
+                return {
+                    "status": "used",
+                    "sufficient": False,
+                    "continue_retrieval": True,
+                    "assessment": "Need the matter-specific email chain before drafting.",
+                    "missing_information": ["matter-specific issue narrative"],
+                    "revised_queries": ["warranty fraud email chain"],
+                    "coverage_risks": ["generic rules are not enough"],
+                }
+
+            class FakeRouter:
+                def __init__(self, config: object) -> None:
+                    self.config = config
+
+                def generate(self, **kwargs: object) -> SimpleNamespace:
+                    module = str(kwargs.get("module") or "")
+                    text = "MATERIAL_FACTS: warranty fraud is the key issue." if module == "extraction" else "The main issue is warranty fraud."
+                    return SimpleNamespace(
+                        text=text,
+                        usage=ModelCallRecord(
+                            module=module,
+                            tier=ModelTier.CHEAP_WORKER if module == "extraction" else ModelTier.STRONG_SYNTHESIZER,
+                            model="fake-model",
+                            input_tokens=10,
+                            output_tokens=5,
+                            estimated_cost=0.001,
+                        ),
+                    )
+
+            with patch("irys_harness.product.review_product_packet_with_cheap_worker", fake_review):
+                with patch("irys_harness.product.GeminiModelRouter", FakeRouter):
+                    result = run_product_matter(
+                        objective="What is the main issue here?",
+                        paths=[str(root)],
+                        selected_paths=[str(generic)],
+                        matter_id="Supplemental Matter",
+                        config=load_config(),
+                        trace_dir=root / "traces",
+                        live_synthesis=True,
+                        verbose=False,
+                    )
+            trace = result.state.to_trace()
+
+            self.assertEqual(len(trace["documents"]), 2)
+            self.assertIn(str(target.resolve()), trace["task"]["context_files"])
+            self.assertIn(str(target.resolve()), trace["task"]["metadata"]["supplemental_context_files"])
+            self.assertTrue(trace["retrieval_iterations"][-1]["supplemental_context_files"])
+            support = "\n".join(item["raw_support"] for item in trace["final_packet"]["verified_evidence"])
+            self.assertIn("warranty fraud", support)
+
     def test_run_product_matter_flags_no_matching_evidence(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -537,10 +623,15 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn("/api/pick-path", INDEX_HTML)
         self.assertIn("/api/plan", INDEX_HTML)
         self.assertIn("/api/rerun-plan", INDEX_HTML)
-        self.assertIn("Review Plan", INDEX_HTML)
+        self.assertIn("Review Source Plan", INDEX_HTML)
         self.assertIn("Plan ready. Review first-read documents, then click Run Approved Plan again.", INDEX_HTML)
         self.assertIn("Detailed Plan", INDEX_HTML)
         self.assertIn('id="planPreview"', INDEX_HTML)
+        self.assertIn("command-bar", INDEX_HTML)
+        self.assertIn('id="topRun"', INDEX_HTML)
+        self.assertIn('id="topApplyNudge"', INDEX_HTML)
+        self.assertIn("function updateCommandStep", INDEX_HTML)
+        self.assertIn("function syncCommandButtons", INDEX_HTML)
         self.assertIn("Run Brief", INDEX_HTML)
         self.assertIn('id="runBrief"', INDEX_HTML)
         self.assertIn("Recommended next action", INDEX_HTML)
@@ -552,7 +643,7 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn('id="firstReadPaths"', INDEX_HTML)
         self.assertIn('id="planNote"', INDEX_HTML)
         self.assertIn('id="applyPlanCorrection"', INDEX_HTML)
-        self.assertIn("Apply Plan Correction", INDEX_HTML)
+        self.assertIn("Preview Corrected Plan", INDEX_HTML)
         self.assertIn("steering-panel", INDEX_HTML)
         self.assertIn("function renderPlan", INDEX_HTML)
         self.assertIn("function initialPlanPathKey", INDEX_HTML)
@@ -560,7 +651,7 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn("function requestRerunPlan", INDEX_HTML)
         self.assertIn("function rerunPlanNeedsRefresh", INDEX_HTML)
         self.assertIn('currentPlanMode !== "initial"', INDEX_HTML)
-        self.assertIn("Nudge plan ready. Review first-read documents, then click Apply Nudge again.", INDEX_HTML)
+        self.assertIn("Steering plan ready. Review first-read documents, then click Run Corrected Pass again.", INDEX_HTML)
         self.assertIn("function renderRunBrief", INDEX_HTML)
         self.assertIn("function briefCard", INDEX_HTML)
         self.assertIn("function formatPlainText", INDEX_HTML)
@@ -593,7 +684,8 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn("/api/run-async", INDEX_HTML)
         self.assertIn("/api/rerun-async", INDEX_HTML)
         self.assertIn('id="previewNudgePlan"', INDEX_HTML)
-        self.assertIn("Preview Nudge Plan", INDEX_HTML)
+        self.assertIn("Preview Steering Plan", INDEX_HTML)
+        self.assertIn("Run Corrected Pass", INDEX_HTML)
         self.assertIn("/api/run-status", INDEX_HTML)
         self.assertIn("/api/cancel-run", INDEX_HTML)
         self.assertIn("function pollRunJob", INDEX_HTML)

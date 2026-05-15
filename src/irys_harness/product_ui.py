@@ -757,6 +757,9 @@ INDEX_HTML = r"""<!doctype html>
       border-bottom: 1px solid var(--line);
       padding: 0 18px;
       background: #fff;
+      position: sticky;
+      top: 0;
+      z-index: 20;
     }
     h1 {
       font-size: 18px;
@@ -764,10 +767,44 @@ INDEX_HTML = r"""<!doctype html>
       margin: 0;
       letter-spacing: 0;
     }
+    .command-bar {
+      min-height: 56px;
+      display: grid;
+      grid-template-columns: minmax(260px, 1fr) auto;
+      gap: 14px;
+      align-items: center;
+      border-bottom: 1px solid var(--line);
+      padding: 8px 16px;
+      background: #f8fafb;
+      position: sticky;
+      top: 56px;
+      z-index: 18;
+    }
+    .command-bar strong {
+      display: block;
+      font-size: 13px;
+      margin-bottom: 2px;
+    }
+    .command-bar small {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+    .command-actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+    .command-actions button {
+      padding: 8px 10px;
+      font-size: 12px;
+    }
     main {
       display: grid;
       grid-template-columns: minmax(280px, 360px) minmax(420px, 1fr) minmax(360px, 0.85fr);
-      min-height: calc(100vh - 56px);
+      min-height: calc(100vh - 112px);
     }
     section {
       min-width: 0;
@@ -945,9 +982,15 @@ INDEX_HTML = r"""<!doctype html>
       margin-top: 10px;
       background: #f7f9fb;
     }
+    .workspace-details {
+      margin-top: 14px;
+    }
+    .workspace-details[open] summary {
+      margin-bottom: 10px;
+    }
     .steering-panel {
       position: sticky;
-      top: 8px;
+      top: 0;
       z-index: 4;
       margin-bottom: 12px;
       border: 1px solid #bfd4de;
@@ -1011,6 +1054,9 @@ INDEX_HTML = r"""<!doctype html>
       font-size: 12px;
     }
     @media (max-width: 1100px) {
+      .command-bar { grid-template-columns: 1fr; position: static; }
+      .command-actions { justify-content: stretch; }
+      .command-actions button { flex: 1 1 140px; }
       main { grid-template-columns: 1fr; }
       section { border-right: 0; border-bottom: 1px solid var(--line); }
     }
@@ -1021,6 +1067,19 @@ INDEX_HTML = r"""<!doctype html>
     <h1>Irys Matter Runner</h1>
     <div class="status" id="status"></div>
   </header>
+  <div class="command-bar">
+    <div>
+      <strong id="commandStepTitle">Ready</strong>
+      <small id="commandStepDetail">Choose a corpus, ask a question, review the source plan, then run.</small>
+    </div>
+    <div class="command-actions">
+      <button class="secondary" id="topPlan">Review Source Plan</button>
+      <button id="topRun">Run Approved Plan</button>
+      <button class="secondary" id="topStop" disabled>Stop</button>
+      <button class="secondary" id="topPreviewNudge">Preview Steering</button>
+      <button class="secondary" id="topApplyNudge">Run Corrected Pass</button>
+    </div>
+  </div>
   <main>
     <section>
       <h2>Matter</h2>
@@ -1064,35 +1123,40 @@ INDEX_HTML = r"""<!doctype html>
       </div>
     </section>
     <section>
-      <h2>Objective</h2>
-      <textarea id="objective" class="objective"></textarea>
+      <h2>Question Or Deliverable</h2>
+      <textarea id="objective" class="objective" placeholder="Ask the question or describe the work product you want from this matter."></textarea>
       <div class="row">
-        <button class="secondary" id="planRun">Review Plan</button>
+        <button class="secondary" id="planRun">Review Source Plan</button>
       </div>
       <h2 style="margin-top:16px">Run Brief</h2>
       <div class="list" id="runBrief">
         <div class="empty">The brief will explain the current plan, what Irys is doing, and what you can change next.</div>
       </div>
-      <h2 style="margin-top:16px">First-Read Review</h2>
-      <div class="list" id="candidateReview">
-        <div class="empty">Review Plan will show the highest-ranked documents here. Check or uncheck what Irys should read first.</div>
-      </div>
-      <div class="row">
-        <button class="secondary" id="applyCheckedCandidates">Apply Checked Documents</button>
-        <button class="secondary" id="selectAllCandidates">Select All Shown</button>
-        <button class="secondary" id="restoreRecommendedCandidates">Restore Recommended</button>
-      </div>
-      <label for="firstReadPaths">First-Read Documents</label>
-      <textarea id="firstReadPaths" placeholder="Review Plan fills this with the files Irys intends to read first. Edit it before running if the plan is wrong."></textarea>
-      <label for="planNote">Plan Correction</label>
-      <textarea id="planNote" placeholder="Correct the plan here: focus on 10-Ks, start with the latest amendment, ignore draft folders, include quarterly reports, or compare all agreements."></textarea>
-      <div class="row">
-        <button class="secondary" id="applyPlanCorrection">Apply Plan Correction</button>
-      </div>
-      <h2 style="margin-top:16px">Detailed Plan</h2>
-      <div class="list" id="planPreview">
-        <div class="empty">Choose a corpus and objective, then review the plan before running.</div>
-      </div>
+      <details class="workspace-details" open>
+        <summary>Review And Edit Source Plan</summary>
+        <div class="hint">This is where you correct Irys before it spends time reading. Uncheck irrelevant documents, add missing first-read paths, or write a plan correction and preview again.</div>
+        <h2 style="margin-top:16px">First-Read Review</h2>
+        <div class="list" id="candidateReview">
+          <div class="empty">Review Source Plan will show the highest-ranked documents here. Check or uncheck what Irys should read first.</div>
+        </div>
+        <div class="row">
+          <button class="secondary" id="applyCheckedCandidates">Apply Checked Documents</button>
+          <button class="secondary" id="selectAllCandidates">Select All Shown</button>
+          <button class="secondary" id="restoreRecommendedCandidates">Restore Recommended</button>
+        </div>
+        <label for="firstReadPaths">First-Read Documents</label>
+        <textarea id="firstReadPaths" placeholder="Review Source Plan fills this with the files Irys intends to read first. Edit it before running if the plan is wrong."></textarea>
+        <label for="planNote">Plan Correction</label>
+        <textarea id="planNote" placeholder="Correct the plan here: focus on 10-Ks, start with the latest amendment, ignore draft folders, include quarterly reports, compare all agreements, or answer only the narrow question."></textarea>
+        <div class="hint">Preview Corrected Plan re-ranks the corpus using this correction. Run Approved Plan uses the current first-read documents and correction.</div>
+        <div class="row">
+          <button class="secondary" id="applyPlanCorrection">Preview Corrected Plan</button>
+        </div>
+        <h2 style="margin-top:16px">Detailed Plan</h2>
+        <div class="list" id="planPreview">
+          <div class="empty">Choose a corpus and objective, then review the source plan before running.</div>
+        </div>
+      </details>
       <div class="metric-grid">
         <div class="metric"><b>Documents</b><span id="docCount">0</span></div>
         <div class="metric"><b>Chunks</b><span id="chunkCount">0</span></div>
@@ -1117,13 +1181,11 @@ INDEX_HTML = r"""<!doctype html>
       <div class="list" id="chatHistory"></div>
     </section>
     <section>
-      <h2>Workstream</h2>
-      <div class="timeline" id="runTimeline"></div>
-      <div class="item" id="currentStep"><strong>Idle</strong><small>No run has started.</small></div>
+      <h2>Steering</h2>
       <div class="steering-panel">
-        <label for="nudge">Steer the Next Pass</label>
+        <label for="nudge">Correct Or Steer The Next Pass</label>
         <textarea id="nudge" placeholder="Example: focus on the 2024 10-K only, ignore Form 4s, compare against the latest amendment, read the guaranty more closely, or answer only the EPS question."></textarea>
-        <div class="hint">This stays available while a run is working. Preview shows how the next pass re-plans which files to read; Apply Nudge reruns the same matter with your correction.</div>
+        <div class="hint">This stays available while a run is working. Preview shows how the next pass re-plans which files to read; Run Corrected Pass reruns the same matter with your correction.</div>
         <label for="rerunPaths">Additional Corpus Paths</label>
         <textarea id="rerunPaths" placeholder="Optional: add another local file or folder path for the next pass."></textarea>
         <div class="row">
@@ -1132,10 +1194,13 @@ INDEX_HTML = r"""<!doctype html>
           <button class="secondary" id="chooseRerunFiles">Choose Files</button>
         </div>
         <div class="row">
-          <button class="secondary" id="previewNudgePlan">Preview Nudge Plan</button>
-          <button class="secondary" id="rerunTrace">Apply Nudge</button>
+          <button class="secondary" id="previewNudgePlan">Preview Steering Plan</button>
+          <button class="secondary" id="rerunTrace">Run Corrected Pass</button>
         </div>
       </div>
+      <h2 style="margin-top:16px">Current Work</h2>
+      <div class="item" id="currentStep"><strong>Idle</strong><small>No run has started.</small></div>
+      <div class="timeline" id="runTimeline"></div>
       <h2 style="margin-top:16px">What Irys Is Doing</h2>
       <div class="list" id="liveEvents"></div>
       <h2 style="margin-top:16px">Run Health</h2>
@@ -1175,6 +1240,11 @@ INDEX_HTML = r"""<!doctype html>
     const planRun = $("planRun");
     const applyPlanCorrection = $("applyPlanCorrection");
     const stopRun = $("stopRun");
+    const topPlan = $("topPlan");
+    const topRun = $("topRun");
+    const topStop = $("topStop");
+    const topPreviewNudge = $("topPreviewNudge");
+    const topApplyNudge = $("topApplyNudge");
     const loadTrace = $("loadTrace");
     const rerunTrace = $("rerunTrace");
     const previewNudgePlan = $("previewNudgePlan");
@@ -1200,6 +1270,12 @@ INDEX_HTML = r"""<!doctype html>
     let suppressFirstReadDirty = false;
     let excludedSourcePaths = [];
     let pinnedSourcePaths = [];
+    topPlan.addEventListener("click", () => planRun.click());
+    topRun.addEventListener("click", () => run.click());
+    topStop.addEventListener("click", () => stopRun.click());
+    topPreviewNudge.addEventListener("click", () => previewNudgePlan.click());
+    topApplyNudge.addEventListener("click", () => rerunTrace.click());
+    syncCommandButtons();
     $("clear").addEventListener("click", () => {
       $("objective").value = "";
       $("answer").innerHTML = "";
@@ -1235,6 +1311,8 @@ INDEX_HTML = r"""<!doctype html>
       $("artifacts").innerHTML = "";
       $("evidence").innerHTML = "";
       $("answerSources").innerHTML = "";
+      updateCommandStep("Ready", "Choose a corpus, ask a question, review the source plan, then run.");
+      syncCommandButtons();
       status.textContent = "";
     });
     $("firstReadPaths").addEventListener("input", () => {
@@ -1243,6 +1321,7 @@ INDEX_HTML = r"""<!doctype html>
     stopRun.addEventListener("click", async () => {
       if (!activeJobId) return;
       stopRun.disabled = true;
+      syncCommandButtons();
       status.textContent = "Stopping";
       try {
         const response = await fetch("/api/cancel-run", {
@@ -1281,6 +1360,7 @@ INDEX_HTML = r"""<!doctype html>
     });
     planRun.addEventListener("click", async () => {
       planRun.disabled = true;
+      syncCommandButtons();
       status.textContent = "Planning";
       try {
         const plan = await requestPlan({paths: pathPayload($("paths").value)});
@@ -1291,6 +1371,7 @@ INDEX_HTML = r"""<!doctype html>
         status.textContent = error.message;
       } finally {
         planRun.disabled = false;
+        syncCommandButtons();
       }
     });
     applyPlanCorrection.addEventListener("click", () => {
@@ -1298,6 +1379,7 @@ INDEX_HTML = r"""<!doctype html>
     });
     run.addEventListener("click", async () => {
       run.disabled = true;
+      syncCommandButtons();
       status.textContent = "Running";
       try {
         if (planNeedsRefresh()) {
@@ -1329,6 +1411,7 @@ INDEX_HTML = r"""<!doctype html>
         if (!response.ok || data.error) throw new Error(data.error || "Run failed");
         activeJobId = data.job_id || "";
         stopRun.disabled = !activeJobId;
+        syncCommandButtons();
         renderLiveEvents(data.events || []);
         await pollRunJob(data.job_id);
       } catch (error) {
@@ -1336,6 +1419,7 @@ INDEX_HTML = r"""<!doctype html>
       } finally {
         run.disabled = false;
         stopRun.disabled = true;
+        syncCommandButtons();
       }
     });
     loadTrace.addEventListener("click", async () => {
@@ -1367,13 +1451,14 @@ INDEX_HTML = r"""<!doctype html>
     });
     rerunTrace.addEventListener("click", async () => {
       rerunTrace.disabled = true;
+      syncCommandButtons();
       status.textContent = "Rerunning";
       try {
         if (rerunPlanNeedsRefresh()) {
           const plan = await requestRerunPlan();
           currentPlan = plan;
           renderPlan(plan, {mode: "rerun", pathKey: rerunPlanPathKey()});
-          status.textContent = "Nudge plan ready. Review first-read documents, then click Apply Nudge again.";
+          status.textContent = "Steering plan ready. Review first-read documents, then click Run Corrected Pass again.";
           return;
         }
         const response = await fetch("/api/rerun-async", {
@@ -1398,6 +1483,7 @@ INDEX_HTML = r"""<!doctype html>
         if (!response.ok || data.error) throw new Error(data.error || "Rerun failed");
         activeJobId = data.job_id || "";
         stopRun.disabled = !activeJobId;
+        syncCommandButtons();
         renderLiveEvents(data.events || []);
         await pollRunJob(data.job_id);
       } catch (error) {
@@ -1405,10 +1491,12 @@ INDEX_HTML = r"""<!doctype html>
       } finally {
         rerunTrace.disabled = false;
         stopRun.disabled = true;
+        syncCommandButtons();
       }
     });
     previewNudgePlan.addEventListener("click", async () => {
       previewNudgePlan.disabled = true;
+      syncCommandButtons();
       status.textContent = "Previewing nudge plan";
       try {
         const plan = await requestRerunPlan();
@@ -1419,6 +1507,7 @@ INDEX_HTML = r"""<!doctype html>
         status.textContent = error.message;
       } finally {
         previewNudgePlan.disabled = false;
+        syncCommandButtons();
       }
     });
     async function choosePath(mode, targetId) {
@@ -1455,6 +1544,17 @@ INDEX_HTML = r"""<!doctype html>
       $("firstReadPaths").value = (paths || []).join("\n");
       suppressFirstReadDirty = false;
       firstReadPathsDirty = dirty;
+    }
+    function syncCommandButtons() {
+      topRun.disabled = run.disabled;
+      topStop.disabled = stopRun.disabled;
+      topPlan.disabled = planRun.disabled;
+      topPreviewNudge.disabled = previewNudgePlan.disabled;
+      topApplyNudge.disabled = rerunTrace.disabled;
+    }
+    function updateCommandStep(title, detail) {
+      $("commandStepTitle").textContent = title || "Ready";
+      $("commandStepDetail").textContent = detail || "Choose a corpus, ask a question, review the source plan, then run.";
     }
     async function requestPlan({paths, selected_paths = []}) {
       const response = await fetch("/api/plan", {
@@ -2134,6 +2234,7 @@ INDEX_HTML = r"""<!doctype html>
         $("liveEvents").innerHTML = "";
         $("runTimeline").innerHTML = "";
         $("currentStep").innerHTML = "<strong>Idle</strong><small>No run has started.</small>";
+        updateCommandStep("Ready", "Choose a corpus, ask a question, review the source plan, then run.");
         if (currentPlan) renderRunBrief({plan: currentPlan});
         return;
       }
@@ -2176,6 +2277,7 @@ INDEX_HTML = r"""<!doctype html>
       const fields = event.fields || {};
       const title = fields.summary || friendlyEventTitle(event);
       const details = fields.next_step ? `Next: ${fields.next_step}` : "Waiting for the next update.";
+      updateCommandStep(title, details);
       return `<strong>${escapeHtml(title)}</strong><small>${escapeHtml(details)}</small>`;
     }
     function renderUserEvent(event) {
