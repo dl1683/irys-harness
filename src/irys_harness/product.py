@@ -299,6 +299,99 @@ def build_product_diagnosis(state: RunState) -> dict[str, Any]:
     }
 
 
+def compare_product_traces(parent: dict[str, Any], child: dict[str, Any]) -> dict[str, Any]:
+    parent_evidence = extract_trace_evidence(parent)
+    child_evidence = extract_trace_evidence(child)
+    parent_keys = {item["key"] for item in parent_evidence}
+    child_keys = {item["key"] for item in child_evidence}
+    parent_unresolved = set(extract_unresolved(parent))
+    child_unresolved = set(extract_unresolved(child))
+    parent_docs = set(extract_document_paths(parent))
+    child_docs = set(extract_document_paths(child))
+    parent_metrics = parent.get("metrics") or {}
+    child_metrics = child.get("metrics") or {}
+    return {
+        "mode": "product_trace_comparison",
+        "parent_run_id": parent.get("run_id"),
+        "child_run_id": child.get("run_id"),
+        "parent_task_id": parent.get("task_id"),
+        "child_task_id": child.get("task_id"),
+        "objective_changed": (parent.get("task") or {}).get("question") != (child.get("task") or {}).get("question"),
+        "answer_changed": normalize_compare_text(parent.get("rendered_answer")) != normalize_compare_text(child.get("rendered_answer")),
+        "document_delta": {
+            "added": sorted(child_docs - parent_docs),
+            "removed": sorted(parent_docs - child_docs),
+            "kept_count": len(parent_docs & child_docs),
+        },
+        "evidence_delta": {
+            "added_count": len(child_keys - parent_keys),
+            "removed_count": len(parent_keys - child_keys),
+            "kept_count": len(parent_keys & child_keys),
+            "added": [item for item in child_evidence if item["key"] in child_keys - parent_keys][:20],
+            "removed": [item for item in parent_evidence if item["key"] in parent_keys - child_keys][:20],
+        },
+        "unresolved_delta": {
+            "added": sorted(child_unresolved - parent_unresolved),
+            "removed": sorted(parent_unresolved - child_unresolved),
+            "kept_count": len(parent_unresolved & child_unresolved),
+        },
+        "metrics_delta": {
+            "total_tokens": int(child_metrics.get("total_tokens") or 0) - int(parent_metrics.get("total_tokens") or 0),
+            "estimated_cost": float(child_metrics.get("estimated_cost") or 0.0)
+            - float(parent_metrics.get("estimated_cost") or 0.0),
+        },
+    }
+
+
+def extract_trace_evidence(trace: dict[str, Any]) -> list[dict[str, str]]:
+    packet = trace.get("final_packet") or {}
+    rows: list[dict[str, str]] = []
+    for item in packet.get("verified_evidence", []) or []:
+        source = item.get("source") or {}
+        support = normalize_compare_text(item.get("raw_support"))
+        key = "|".join(
+            [
+                str(source.get("doc_id") or ""),
+                str(source.get("chunk_id") or ""),
+                support[:220],
+            ]
+        )
+        rows.append(
+            {
+                "key": key,
+                "doc_id": str(source.get("doc_id") or ""),
+                "chunk_id": str(source.get("chunk_id") or ""),
+                "claim": compact_compare_text(item.get("claim")),
+                "support": compact_compare_text(item.get("raw_support")),
+            }
+        )
+    return rows
+
+
+def extract_unresolved(trace: dict[str, Any]) -> list[str]:
+    packet = trace.get("final_packet") or {}
+    return [normalize_compare_text(item) for item in packet.get("unresolved", []) or [] if normalize_compare_text(item)]
+
+
+def extract_document_paths(trace: dict[str, Any]) -> list[str]:
+    return [
+        str(doc.get("path") or doc.get("filename") or doc.get("doc_id") or "")
+        for doc in trace.get("documents", []) or []
+        if str(doc.get("path") or doc.get("filename") or doc.get("doc_id") or "").strip()
+    ]
+
+
+def normalize_compare_text(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def compact_compare_text(value: Any, *, max_chars: int = 280) -> str:
+    text = normalize_compare_text(value)
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 3].rstrip() + "..."
+
+
 def build_product_synthesis_prompt(state: RunState) -> str:
     packet = state.final_packet or {}
     return f"""Produce the requested legal work product or answer using only the user-provided corpus.

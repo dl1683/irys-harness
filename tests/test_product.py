@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from irys_harness.config import load_config
-from irys_harness.product import discover_corpus_paths, run_product_matter, sanitize_matter_id
+from irys_harness.product import compare_product_traces, discover_corpus_paths, run_product_matter, sanitize_matter_id
 from irys_harness.product_ui import rerun_from_trace, resolve_trace_path, safe_upload_filename, save_uploaded_files
 
 
@@ -146,6 +146,57 @@ class ProductMatterTests(unittest.TestCase):
             self.assertIn("User steering note: Focus only on payment defaults.", trace["task"]["question"])
             self.assertEqual(trace["task"]["metadata"]["parent_trace_path"], str(parent.trace_path.resolve()))
             self.assertEqual(trace["task"]["metadata"]["user_nudge"], "Focus only on payment defaults.")
+            self.assertEqual(response["comparison"]["parent_task_id"], "Parent-Matter")
+            self.assertTrue(response["comparison"]["objective_changed"])
+
+    def test_compare_product_traces_reports_evidence_and_metric_deltas(self) -> None:
+        parent = {
+            "run_id": "parent",
+            "task_id": "matter",
+            "task": {"question": "Question"},
+            "documents": [{"path": "a.txt"}],
+            "final_packet": {
+                "verified_evidence": [
+                    {
+                        "claim": "Old claim",
+                        "raw_support": "Old support",
+                        "source": {"doc_id": "doc_1", "chunk_id": "chunk_1"},
+                    }
+                ],
+                "unresolved": ["old gap"],
+            },
+            "rendered_answer": "Old answer",
+            "metrics": {"total_tokens": 10, "estimated_cost": 0.25},
+        }
+        child = {
+            "run_id": "child",
+            "task_id": "matter-nudge",
+            "task": {"question": "Question\n\nUser steering note: focus"},
+            "documents": [{"path": "a.txt"}, {"path": "b.txt"}],
+            "final_packet": {
+                "verified_evidence": [
+                    {
+                        "claim": "New claim",
+                        "raw_support": "New support",
+                        "source": {"doc_id": "doc_2", "chunk_id": "chunk_2"},
+                    }
+                ],
+                "unresolved": ["new gap"],
+            },
+            "rendered_answer": "New answer",
+            "metrics": {"total_tokens": 17, "estimated_cost": 0.5},
+        }
+
+        comparison = compare_product_traces(parent, child)
+
+        self.assertTrue(comparison["objective_changed"])
+        self.assertTrue(comparison["answer_changed"])
+        self.assertEqual(comparison["document_delta"]["added"], ["b.txt"])
+        self.assertEqual(comparison["evidence_delta"]["added_count"], 1)
+        self.assertEqual(comparison["evidence_delta"]["removed_count"], 1)
+        self.assertEqual(comparison["unresolved_delta"]["added"], ["new gap"])
+        self.assertEqual(comparison["metrics_delta"]["total_tokens"], 7)
+        self.assertAlmostEqual(comparison["metrics_delta"]["estimated_cost"], 0.25)
 
 
 if __name__ == "__main__":

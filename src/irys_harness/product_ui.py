@@ -11,7 +11,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .config import HarnessConfig
-from .product import run_product_matter, sanitize_matter_id
+from .product import compare_product_traces, run_product_matter, sanitize_matter_id
 from .trace import load_trace, trace_summary
 
 
@@ -54,7 +54,11 @@ def build_handler(
                 trace_path = query.get("path", [""])[0]
                 try:
                     trace = load_trace(resolve_trace_path(trace_path, trace_dir))
-                    self.send_json({"summary": trace_summary(trace), "trace": trace})
+                    response = {"summary": trace_summary(trace), "trace": trace}
+                    comparison = comparison_from_parent(trace, trace_dir=trace_dir)
+                    if comparison:
+                        response["comparison"] = comparison
+                    self.send_json(response)
                 except Exception as exc:  # noqa: BLE001 - UI endpoint should return structured error.
                     self.send_json({"error": f"{type(exc).__name__}: {exc}"}, status=HTTPStatus.BAD_REQUEST)
                 return
@@ -173,10 +177,28 @@ def rerun_from_trace(
         parent_trace_path=str(parent_path),
         user_nudge=nudge,
     )
+    child_trace = result.state.to_trace()
     response = result.to_dict()
-    response["summary"] = trace_summary(result.state.to_trace())
-    response["trace"] = result.state.to_trace()
+    response["summary"] = trace_summary(child_trace)
+    response["trace"] = child_trace
+    response["comparison"] = compare_product_traces(parent, child_trace)
     return response
+
+
+def comparison_from_parent(trace: dict[str, Any], *, trace_dir: str | Path) -> dict[str, Any] | None:
+    metadata = ((trace.get("task") or {}).get("metadata") or {})
+    parent_trace_path = str(metadata.get("parent_trace_path") or "").strip()
+    if not parent_trace_path:
+        return None
+    try:
+        parent = load_trace(resolve_trace_path(parent_trace_path, trace_dir))
+        return compare_product_traces(parent, trace)
+    except Exception as exc:  # noqa: BLE001 - trace loading should stay usable if comparison fails.
+        return {
+            "mode": "product_trace_comparison",
+            "status": "unavailable",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
 
 def resolve_trace_path(raw_path: str, trace_dir: str | Path) -> Path:
@@ -450,6 +472,8 @@ INDEX_HTML = r"""<!doctype html>
       </div>
       <h2 style="margin-top:16px">Diagnosis</h2>
       <div class="list" id="diagnosis"></div>
+      <h2 style="margin-top:16px">Comparison</h2>
+      <div class="list" id="comparison"></div>
       <h2 style="margin-top:16px">Events</h2>
       <div class="list" id="events"></div>
       <h2 style="margin-top:16px">Documents</h2>
@@ -471,6 +495,7 @@ INDEX_HTML = r"""<!doctype html>
       $("tracepath").value = "";
       $("nudge").value = "";
       $("diagnosis").innerHTML = "";
+      $("comparison").innerHTML = "";
       $("events").innerHTML = "";
       $("documents").innerHTML = "";
       $("evidence").innerHTML = "";
@@ -579,6 +604,7 @@ INDEX_HTML = r"""<!doctype html>
         key,
         typeof value === "string" || typeof value === "number" ? String(value) : JSON.stringify(value, null, 2)
       )).join("");
+      $("comparison").innerHTML = renderComparison(data.comparison);
       $("events").innerHTML = (trace.events || []).map(event => card(
         event.label + " - " + event.message,
         JSON.stringify(event.fields || {}, null, 2)
@@ -595,6 +621,22 @@ INDEX_HTML = r"""<!doctype html>
     }
     function card(title, body) {
       return `<div class="item"><strong>${escapeHtml(title)}</strong><small><pre>${escapeHtml(body || "")}</pre></small></div>`;
+    }
+    function renderComparison(comparison) {
+      if (!comparison) return "";
+      const evidence = comparison.evidence_delta || {};
+      const unresolved = comparison.unresolved_delta || {};
+      const metrics = comparison.metrics_delta || {};
+      const rows = [
+        ["Run", `${comparison.parent_task_id || ""} -> ${comparison.child_task_id || ""}`],
+        ["Answer changed", String(Boolean(comparison.answer_changed))],
+        ["Evidence", `+${evidence.added_count || 0} / -${evidence.removed_count || 0} / kept ${evidence.kept_count || 0}`],
+        ["Unresolved", `+${(unresolved.added || []).length} / -${(unresolved.removed || []).length} / kept ${unresolved.kept_count || 0}`],
+        ["Tokens delta", String(metrics.total_tokens || 0)],
+        ["Cost delta", "$" + Number(metrics.estimated_cost || 0).toFixed(4)]
+      ];
+      if (comparison.status === "unavailable") rows.push(["Comparison unavailable", comparison.error || "unknown error"]);
+      return rows.map(([title, body]) => card(title, body)).join("");
     }
     function escapeHtml(value) {
       return String(value)
