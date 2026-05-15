@@ -1831,6 +1831,7 @@ INDEX_HTML = r"""<!doctype html>
         SAVE: "Saving the run.",
         DONE: "Run complete.",
         STOP: "Run stopped.",
+        STEER: "Applying your steering note.",
         ERROR: "Run failed."
       };
       return titles[label] || `${label}${message ? ": " + message : ""}`;
@@ -1845,8 +1846,13 @@ INDEX_HTML = r"""<!doctype html>
       if (fields.chunk_count !== undefined) lines.push(`Chunks from this document: ${fields.chunk_count}`);
       if (fields.text_chars !== undefined) lines.push(`Extracted characters: ${fields.text_chars}`);
       if (fields.load_error) lines.push(`Load issue: ${fields.load_error}`);
+      if (fields.user_nudge) lines.push(`Your instruction: ${fields.user_nudge}`);
+      if (fields.source_selection_mode) lines.push(`Source plan: ${formatSourceSelectionMode(fields.source_selection_mode)}`);
+      if (fields.reason) lines.push(`Why: ${fields.reason}`);
       if (fields.search_queries) lines.push(`Search targets: ${fields.search_queries.join("; ")}`);
       if (fields.queries) lines.push(`Search targets: ${fields.queries.join("; ")}`);
+      if (fields.selected_documents) lines.push(`Reading first: ${fields.selected_documents.join(", ")}`);
+      if (fields.skipped_document_count) lines.push(`Held back for now: ${fields.skipped_document_count} document(s).`);
       if (fields.selected_sources) {
         lines.push("Sources selected:");
         for (const source of fields.selected_sources) {
@@ -1872,6 +1878,11 @@ INDEX_HTML = r"""<!doctype html>
         }
       }
       return lines.join("\n");
+    }
+    function formatSourceSelectionMode(mode) {
+      if (mode === "replan_from_nudge") return "re-planning from your steering note";
+      if (mode === "locked_by_user") return "using the first-read documents you locked";
+      return String(mode || "");
     }
     function activeChatKey() {
       return `${$("matter").value || "local-matter"}::${$("chat").value || "main"}`;
