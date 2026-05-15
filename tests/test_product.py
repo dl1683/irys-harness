@@ -25,12 +25,14 @@ from irys_harness.product import (
 )
 from irys_harness.product_ui import (
     INDEX_HTML,
+    build_rerun_plan_note,
     build_handler,
     list_product_traces,
     parse_paths,
     pick_local_paths,
     rerun_from_trace,
     resolve_trace_path,
+    selected_paths_for_rerun_payload,
     summarize_trace_rows,
 )
 
@@ -379,6 +381,10 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn("function renderTracePlan", INDEX_HTML)
         self.assertIn("function renderCandidateReview", INDEX_HTML)
         self.assertIn("function applyCheckedCandidatePaths", INDEX_HTML)
+        self.assertIn("firstReadPathsDirty", INDEX_HTML)
+        self.assertIn("selected_paths_locked", INDEX_HTML)
+        self.assertIn("function setFirstReadPaths", INDEX_HTML)
+        self.assertIn("re-plans which files to read", INDEX_HTML)
         self.assertIn("function formatPlannerSummary", INDEX_HTML)
         self.assertIn("use_llm_planning", INDEX_HTML)
         self.assertIn("candidate-check", INDEX_HTML)
@@ -637,6 +643,23 @@ class ProductMatterTests(unittest.TestCase):
     def test_parse_paths_accepts_textarea_or_list(self) -> None:
         self.assertEqual(parse_paths(" a.txt \n\n b.txt "), ["a.txt", "b.txt"])
         self.assertEqual(parse_paths([" a.txt ", ""]), ["a.txt"])
+
+    def test_rerun_selected_paths_require_explicit_lock(self) -> None:
+        payload = {
+            "selected_paths": ["old-first-read.txt"],
+            "nudge": "Focus on the later 10-K instead.",
+        }
+
+        self.assertIsNone(selected_paths_for_rerun_payload(payload))
+
+        payload["selected_paths_locked"] = True
+        self.assertEqual(selected_paths_for_rerun_payload(payload), ["old-first-read.txt"])
+
+    def test_rerun_plan_note_keeps_current_steering_note(self) -> None:
+        note = build_rerun_plan_note("Prior correction: ignore drafts.", "Focus on the 2024 10-K.")
+
+        self.assertIn("Prior correction: ignore drafts.", note)
+        self.assertIn("Current steering note: Focus on the 2024 10-K.", note)
 
     def test_conversation_history_is_synthesis_only_not_retrieval_context(self) -> None:
         with TemporaryDirectory() as tmp:

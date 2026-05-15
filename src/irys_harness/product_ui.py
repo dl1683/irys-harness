@@ -460,7 +460,7 @@ def rerun_from_trace(
     matter_id = sanitize_matter_id(f"{base_matter_id}-nudge-{suffix}")
     paths.extend(parse_paths(payload.get("paths", [])))
     objective = f"{original_objective}\n\nUser steering note: {nudge}"
-    plan_note = str(payload.get("plan_note") or nudge)
+    plan_note = build_rerun_plan_note(payload.get("plan_note"), nudge)
     result = run_product_matter(
         objective=objective,
         paths=paths,
@@ -476,7 +476,7 @@ def rerun_from_trace(
         verbose=False,
         parent_trace_path=str(parent_path),
         user_nudge=nudge,
-        selected_paths=parse_paths(payload.get("selected_paths", [])) or None,
+        selected_paths=selected_paths_for_rerun_payload(payload),
         plan_note=plan_note,
         use_llm_planning=bool(payload.get("use_llm_planning", False)),
         event_callback=event_callback,
@@ -488,6 +488,24 @@ def rerun_from_trace(
     response["trace"] = child_trace
     response["comparison"] = compare_product_traces(parent, child_trace)
     return response
+
+
+def selected_paths_for_rerun_payload(payload: dict[str, Any]) -> list[str] | None:
+    selected_paths = parse_paths(payload.get("selected_paths", []))
+    if selected_paths and bool(payload.get("selected_paths_locked", False)):
+        return selected_paths
+    return None
+
+
+def build_rerun_plan_note(raw_plan_note: Any, nudge: str) -> str:
+    parts = []
+    plan_note = str(raw_plan_note or "").strip()
+    if plan_note:
+        parts.append(plan_note)
+    steering_note = f"Current steering note: {nudge.strip()}"
+    if steering_note not in parts:
+        parts.append(steering_note)
+    return "\n\n".join(parts)
 
 
 def parse_paths(raw_paths: Any) -> list[str]:
@@ -980,7 +998,7 @@ INDEX_HTML = r"""<!doctype html>
       <div class="list" id="liveEvents"></div>
       <label for="nudge">Steer the Next Pass</label>
       <textarea id="nudge" placeholder="Example: focus on the 2024 10-K only, ignore Form 4s, compare against the latest amendment, read the guaranty more closely, or answer only the EPS question."></textarea>
-      <div class="hint">This keeps the same matter and reruns with your correction. Add paths below only when the next pass needs more documents.</div>
+      <div class="hint">This keeps the same matter and reruns with your correction. By default the next pass re-plans which files to read; edit or apply First-Read Documents only when you want to force a specific source set.</div>
       <label for="rerunPaths">Additional Corpus Paths</label>
       <textarea id="rerunPaths" placeholder="Optional: add another local file or folder path for the next pass."></textarea>
       <div class="row">
@@ -1045,6 +1063,8 @@ INDEX_HTML = r"""<!doctype html>
     let currentPlan = null;
     let currentPlanNote = "";
     let currentPlanObjective = "";
+    let firstReadPathsDirty = false;
+    let suppressFirstReadDirty = false;
     $("clear").addEventListener("click", () => {
       $("objective").value = "";
       $("answer").innerHTML = "";
@@ -1052,7 +1072,7 @@ INDEX_HTML = r"""<!doctype html>
       $("tracepath").value = "";
       $("nudge").value = "";
       $("rerunPaths").value = "";
-      $("firstReadPaths").value = "";
+      setFirstReadPaths([], {dirty: false});
       $("planNote").value = "";
       $("planPreview").innerHTML = emptyState("Choose a corpus and objective, then review the plan before running.");
       $("runBrief").innerHTML = emptyState("The brief will explain the current plan, what Irys is doing, and what you can change next.");
@@ -1075,6 +1095,9 @@ INDEX_HTML = r"""<!doctype html>
       $("evidence").innerHTML = "";
       $("answerSources").innerHTML = "";
       status.textContent = "";
+    });
+    $("firstReadPaths").addEventListener("input", () => {
+      if (!suppressFirstReadDirty) firstReadPathsDirty = true;
     });
     stopRun.addEventListener("click", async () => {
       if (!activeJobId) return;
@@ -1111,7 +1134,7 @@ INDEX_HTML = r"""<!doctype html>
         status.textContent = "No recommended first-read set is loaded";
         return;
       }
-      $("firstReadPaths").value = recommended.join("\n");
+      setFirstReadPaths(recommended, {dirty: true});
       renderCandidateReview(currentPlan.top_candidates || [], recommended);
       status.textContent = `Restored ${recommended.length} recommended document(s)`;
     });
@@ -1210,7 +1233,8 @@ INDEX_HTML = r"""<!doctype html>
             live_synthesis: $("live").checked,
             use_llm_planning: $("usePlanner").checked,
             top_k: Number($("topk").value || 12),
-            selected_paths: pathPayload($("firstReadPaths").value),
+            selected_paths: firstReadPathsDirty ? pathPayload($("firstReadPaths").value) : [],
+            selected_paths_locked: firstReadPathsDirty,
             plan_note: $("planNote").value
           })
         });
@@ -1256,6 +1280,12 @@ INDEX_HTML = r"""<!doctype html>
       }
       $(targetId).value = existing.join("\n");
     }
+    function setFirstReadPaths(paths, {dirty = false} = {}) {
+      suppressFirstReadDirty = true;
+      $("firstReadPaths").value = (paths || []).join("\n");
+      suppressFirstReadDirty = false;
+      firstReadPathsDirty = dirty;
+    }
     async function requestPlan({paths, selected_paths = []}) {
       const response = await fetch("/api/plan", {
         method: "POST",
@@ -1275,7 +1305,7 @@ INDEX_HTML = r"""<!doctype html>
     }
     function renderPlan(plan) {
       const firstRead = plan.first_read_paths || [];
-      $("firstReadPaths").value = firstRead.join("\n");
+      setFirstReadPaths(firstRead, {dirty: false});
       currentPlan = plan;
       currentPlanNote = $("planNote").value;
       currentPlanObjective = $("objective").value;
@@ -1306,7 +1336,7 @@ INDEX_HTML = r"""<!doctype html>
       const scope = metadata.corpus_scope_decision || null;
       if (!scope) return;
       const selected = scope.selected_paths || [];
-      $("firstReadPaths").value = selected.join("\n");
+      setFirstReadPaths(selected, {dirty: false});
       $("planNote").value = metadata.plan_note || $("planNote").value;
       currentPlanNote = $("planNote").value;
       currentPlanObjective = $("objective").value;
@@ -1361,7 +1391,7 @@ INDEX_HTML = r"""<!doctype html>
         if (!silent) status.textContent = "No checked document candidates";
         return;
       }
-      $("firstReadPaths").value = checked.join("\n");
+      setFirstReadPaths(checked, {dirty: true});
       if (!silent) status.textContent = `Applied ${checked.length} first-read document(s)`;
     }
     function formatPlannerSummary(planner, metrics) {

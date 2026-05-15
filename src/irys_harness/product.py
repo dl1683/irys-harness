@@ -105,6 +105,17 @@ def run_product_matter(
     if not objective.strip():
         raise ValueError("objective is required")
     pre_events: list[dict[str, Any]] = []
+    if user_nudge:
+        emit_pre_event(
+            pre_events,
+            event_callback,
+            "STEER",
+            "Applying user steering",
+            summary="Applying your steering note before choosing sources.",
+            user_nudge=user_nudge,
+            source_selection_mode="locked_by_user" if selected_paths else "replan_from_nudge",
+            next_step="Re-check the document inventory against the updated objective.",
+        )
     emit_pre_event(
         pre_events,
         event_callback,
