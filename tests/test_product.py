@@ -417,6 +417,7 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn("function renderHeldBackSources", INDEX_HTML)
         self.assertIn("include-held-back", INDEX_HTML)
         self.assertIn("Read next pass", INDEX_HTML)
+        self.assertIn("in the next pass", INDEX_HTML)
         self.assertIn("next first-read set", INDEX_HTML)
         self.assertIn("function filenameFromPath", INDEX_HTML)
         self.assertIn("Documents added", INDEX_HTML)

@@ -1534,6 +1534,7 @@ INDEX_HTML = r"""<!doctype html>
         const path = target.getAttribute("data-path") || "";
         appendPaths("firstReadPaths", [path]);
         firstReadPathsDirty = true;
+        if (!$("nudge").value.trim()) $("nudge").value = `Read ${filenameFromPath(path)} in the next pass.`;
         status.textContent = `Added ${filenameFromPath(path)} to the next first-read set`;
       }
     });
