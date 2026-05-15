@@ -400,6 +400,11 @@ class ProductMatterTests(unittest.TestCase):
             event_messages = [event["message"] for event in trace["events"]]
             self.assertIn("Found supported documents", event_messages)
             self.assertIn("Choosing first-read documents", event_messages)
+            saved_trace = json.loads(result.trace_path.read_text(encoding="utf-8"))
+            saved_labels = [event["label"] for event in saved_trace["events"]]
+            self.assertIn("SAVE", saved_labels)
+            self.assertIn("DONE", saved_labels)
+            self.assertEqual(saved_labels[-1], "DONE")
 
     def test_run_product_matter_preserves_repeated_message_traces(self) -> None:
         with TemporaryDirectory() as tmp:

@@ -571,13 +571,25 @@ def run_product_matter(
     )
     state.artifacts.append(write_product_answer_artifact(state, diagnostic=not live_synthesis))
     state.diagnosis = build_product_diagnosis(state)
-    trace_path = TraceWriter(trace_dir).write(state)
+    writer = TraceWriter(trace_dir)
+    expected_trace_path = writer.trace_dir / state.task.benchmark / f"{state.task.task_id}.json"
+    if expected_trace_path.exists():
+        expected_trace_path = expected_trace_path.with_name(f"{expected_trace_path.stem}--{state.run_id}.json")
     log.emit(
         "SAVE",
-        "trace saved",
-        trace=str(trace_path),
-        summary="Saved the answer, evidence packet, and diagnostic trace.",
+        "saving trace",
+        trace=str(expected_trace_path),
+        summary="Saving the answer, evidence packet, costs, and diagnostic trace.",
+        next_step="Finish the matter run.",
     )
+    log.emit(
+        "DONE",
+        "product matter run complete",
+        trace=str(expected_trace_path),
+        summary="Run complete.",
+        next_step="Review the answer, sources, and trace.",
+    )
+    trace_path = writer.write(state)
     return ProductRunResult(state=state, trace_path=trace_path)
 
 
