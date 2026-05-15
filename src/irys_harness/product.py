@@ -903,6 +903,8 @@ def build_source_planner_prompt(
         "folder structure, file types, dates, and deterministic hints. Prefer high-quality work product over minimal token use.\n"
         "If the objective likely requires broad comparison or the candidate list is too ambiguous, set should_read_full_corpus true.\n"
         "If a broad folder has an index, manifest, or file list, prefer selecting that index first and then specific documents after review, rather than selecting hundreds of files blindly.\n"
+        "If the user asks to compare a source family across time or subsets (announcements, releases, emails, board materials, agreements, papers, filings, etc.), do not substitute only quarterly/annual summaries for the primary source-family documents.\n"
+        "For source-family comparisons, select the family index/manifest when present and enough representative primary documents from each requested period or subset.\n"
         "Do not overfit to finance or legal filings; this may be legal, finance, biomedical, governance, email, research, or another document set.\n\n"
         f"User objective:\n{objective.strip()}\n\n"
         f"User plan correction:\n{(plan_note or '').strip() or '- None.'}\n\n"
@@ -1108,6 +1110,12 @@ def build_objective_profile(objective: str, *, plan_note: str | None = None) -> 
         "tokens": tokens,
         "years": years,
         "requested_families": requested_families,
+        "source_family_comparison": is_source_family_comparison_objective(
+            lowered,
+            tokens,
+            requested_families,
+            years,
+        ),
         "issue_discovery": is_issue_discovery_objective(lowered, tokens),
         "force_full_corpus": any(
             phrase in lowered
@@ -1177,6 +1185,52 @@ def is_issue_discovery_objective(lowered: str, tokens: list[str]) -> bool:
         return True
     token_set = set(tokens)
     return bool({"issue", "issues", "problem", "dispute", "matter"} & token_set) and len(token_set) <= 8
+
+
+def is_source_family_comparison_objective(
+    lowered: str,
+    tokens: list[str],
+    families: list[str],
+    years: list[int],
+) -> bool:
+    if not families:
+        return False
+    comparable_families = {
+        "agreement",
+        "current_report",
+        "email",
+        "governance",
+        "litigation",
+        "presentation",
+        "regulatory_or_policy",
+        "research_paper",
+    }
+    if not (set(families) & comparable_families):
+        return False
+    token_set = set(tokens)
+    breadth_terms = {
+        "across",
+        "all",
+        "between",
+        "change",
+        "changed",
+        "changes",
+        "compare",
+        "comparison",
+        "direction",
+        "evolution",
+        "pattern",
+        "patterns",
+        "priorities",
+        "priority",
+        "shift",
+        "shifts",
+        "summarize",
+        "themes",
+        "trend",
+        "trends",
+    }
+    return bool(len(years) >= 2 or token_set & breadth_terms or "over time" in lowered)
 
 
 def infer_requested_document_families(lowered: str, tokens: list[str]) -> list[str]:
@@ -1311,6 +1365,14 @@ def infer_needed_information(profile: dict[str, Any]) -> list[str]:
     items = ["the user's requested answer", "the most likely source documents", "supporting source excerpts"]
     if "annual_report" in families or "quarterly_report" in families:
         items.extend(["the relevant reporting period", "the requested financial metric", "the source table or note"])
+    if profile.get("source_family_comparison"):
+        items.extend(
+            [
+                "the relevant source-family index or inventory",
+                "coverage across the requested periods or source subsets",
+                "representative primary source-family documents rather than only summaries",
+            ]
+        )
     if "agreement" in families:
         items.extend(["the controlling provision", "any exceptions or amendments", "the applicable party or obligation"])
     if "governance" in families:
@@ -1383,6 +1445,35 @@ def score_one_path(
         score += family_score
         reasons.append("path matched likely document family")
 
+    source_family_comparison = bool(profile.get("source_family_comparison"))
+    if (
+        source_family_comparison
+        and "current_report" in families
+        and "annual_report" not in families
+        and "quarterly_report" not in families
+        and any(term in path_text for term in ["/10-k/", "/10-q/", "10-k", "10-q"])
+    ):
+        score -= 14
+        reasons.append("source-family comparison: periodic filing is secondary to announcement/release sources")
+    if source_family_comparison and "current_report" in families:
+        if any(
+            term in path_text
+            for term in [
+                "announcement",
+                "announcements",
+                "announces",
+                "news-release",
+                "news-releases",
+                "press-release",
+                "press-releases",
+            ]
+        ):
+            score += 10
+            reasons.append("source-family comparison: path is a primary announcement/release source")
+        elif any(term in path_text for term in ["/8-k/", "8-k", "8_k", "8k"]):
+            score -= 4
+            reasons.append("source-family comparison: SEC current report is secondary when release sources exist")
+
     if years:
         path_years = {int(match) for match in re.findall(r"\b(?:19|20)\d{2}\b", path_text)}
         matched_years = sorted(set(years) & path_years)
@@ -1391,7 +1482,8 @@ def score_one_path(
             reasons.append(f"path matched year(s): {', '.join(str(year) for year in matched_years)}")
         accession = accession_from_path(path)
         fiscal_year = fiscal_year_by_accession.get(accession or "")
-        if fiscal_year and fiscal_year in years:
+        report_family_requested = "annual_report" in families or "quarterly_report" in families
+        if fiscal_year and fiscal_year in years and report_family_requested:
             score += 22
             reasons.append(f"index maps accession to fiscal/report year {fiscal_year}")
         if "annual_report" in families and any(year + 1 in path_years for year in years):
@@ -1401,7 +1493,10 @@ def score_one_path(
     if filename in {"index.md", "index.csv"}:
         score += 3
         reasons.append("index file can explain the folder structure")
-        if families and not any(family in {"table_or_workbook"} for family in families):
+        if source_family_comparison and family_score:
+            score += 24
+            reasons.append("source-family index can guide broad comparison before reading every file")
+        elif families and not any(family in {"table_or_workbook"} for family in families):
             score -= 2
 
     return {
@@ -1466,7 +1561,17 @@ def score_path_family(path_text: str, families: list[str]) -> int:
     family_path_terms = {
         "annual_report": ["10-k", "10_k", "10k", "annual-report", "annual-reports", "annual reports"],
         "quarterly_report": ["10-q", "10_q", "10q", "quarterly", "quarterly-results"],
-        "current_report": ["8-k", "8_k", "8k", "news-release", "news-releases", "press-release"],
+        "current_report": [
+            "8-k",
+            "8_k",
+            "8k",
+            "announcement",
+            "announcements",
+            "news-release",
+            "news-releases",
+            "press-release",
+            "press-releases",
+        ],
         "agreement": ["agreement", "agreements", "contract", "contracts", "amendment", "guaranty", "lease"],
         "governance": ["board", "minutes", "consent", "charter", "bylaws", "governance"],
         "table_or_workbook": ["schedule", "table", "workbook", "spreadsheet", ".xlsx", ".xlsm", ".csv"],
@@ -2019,6 +2124,7 @@ Return JSON only:
 Rules:
 - If the task asks for a year, period, entity, agreement, issue, or deliverable and the evidence does not directly cover it, set sufficient false.
 - If selected documents exist but evidence is dominated by the wrong source family or stale period, set continue_retrieval true and provide better queries.
+- If the task asks to compare a source family across time or subsets, do not accept generic summaries alone; require a source-family index/inventory or representative primary documents.
 - If the answer would say information is unavailable, require strong coverage across likely source documents first.
 - Queries should include synonyms and source-specific terms, not huge filename lists.
 - Use the source IDs in the active corpus. Do not invent sources.

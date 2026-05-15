@@ -376,6 +376,54 @@ class ProductMatterTests(unittest.TestCase):
             self.assertIn(str(index.resolve()), plan["first_read_paths"])
             self.assertTrue(all("news-releases" in path for path in plan["first_read_paths"]))
 
+    def test_product_plan_prefers_source_family_index_over_periodic_filings(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            news = root / "filings" / "ir" / "news-releases"
+            sec_10k = root / "filings" / "sec" / "10-K"
+            sec_10q = root / "filings" / "sec" / "10-Q"
+            news.mkdir(parents=True)
+            sec_10k.mkdir(parents=True)
+            sec_10q.mkdir(parents=True)
+            news_index = news / "INDEX.md"
+            news_index.write_text(
+                "- 2023 Datadog announces product launch\n- 2024 Datadog announces AI platform launch",
+                encoding="utf-8",
+            )
+            for year in (2023, 2024):
+                (news / f"datadog-announces-product-priorities-{year}.txt").write_text(
+                    f"{year} announcement about product priorities.",
+                    encoding="utf-8",
+                )
+            sec_index = sec_10k / "INDEX.md"
+            sec_index.write_text(
+                "| Filing Date | Accession | Document | Form |\n"
+                "| 2024-02-23 | `0001561550-24-000009` | ddog-20231231.htm | 10-K |\n",
+                encoding="utf-8",
+            )
+            (sec_10k / "2024-02-23_0001561550-24-000009.txt").write_text(
+                "annual report summary",
+                encoding="utf-8",
+            )
+            (sec_10q / "2024-05-08_0001561550-24-000051.txt").write_text(
+                "quarterly report summary",
+                encoding="utf-8",
+            )
+
+            plan = build_product_plan_preview(
+                objective="Compare the announcements Datadog made in 2023 to 2024. How did priorities change?",
+                paths=[str(root)],
+            )
+
+            self.assertEqual(plan["first_read_paths"], [str(news_index.resolve())])
+            self.assertIn(
+                "source-family index can guide broad comparison before reading every file",
+                plan["top_candidates"][0]["reasons"],
+            )
+            self.assertTrue(
+                all("sec" not in {part.lower() for part in Path(path).parts} for path in plan["first_read_paths"])
+            )
+
     def test_source_planner_prompt_uses_bounded_inventory(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -402,6 +450,7 @@ class ProductMatterTests(unittest.TestCase):
             self.assertIn('"selected_directories"', prompt)
             self.assertIn('"directory_summary"', prompt)
             self.assertIn('"omitted_candidate_count"', prompt)
+            self.assertIn("source-family comparisons", prompt)
             self.assertNotIn("irrelevant-299.txt", prompt)
 
     def test_sec_fiscal_year_index_beats_filing_date_for_annual_report(self) -> None:
