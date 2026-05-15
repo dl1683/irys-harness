@@ -110,6 +110,7 @@ def build_handler(
             parsed = urlparse(self.path)
             if parsed.path not in {
                 "/api/plan",
+                "/api/rerun-plan",
                 "/api/run",
                 "/api/run-async",
                 "/api/rerun",
@@ -145,6 +146,15 @@ def build_handler(
                             top_k=int(payload.get("top_k", 12) or 12),
                             config=config,
                             use_llm_planning=bool(payload.get("use_llm_planning", False)),
+                        )
+                    )
+                    return
+                if parsed.path == "/api/rerun-plan":
+                    self.send_json(
+                        rerun_plan_from_trace(
+                            payload,
+                            config=config,
+                            trace_dir=trace_dir,
                         )
                     )
                     return
@@ -488,6 +498,41 @@ def rerun_from_trace(
     response["trace"] = child_trace
     response["comparison"] = compare_product_traces(parent, child_trace)
     return response
+
+
+def rerun_plan_from_trace(
+    payload: dict[str, Any],
+    *,
+    config: HarnessConfig,
+    trace_dir: str | Path,
+) -> dict[str, Any]:
+    parent_path = resolve_trace_path(str(payload.get("trace_path") or ""), trace_dir)
+    parent = load_trace(parent_path)
+    task = parent.get("task") or {}
+    metadata = task.get("metadata") or {}
+    original_objective = str(task.get("question") or "")
+    nudge = str(payload.get("nudge") or "").strip()
+    if not nudge:
+        raise ValueError("nudge is required")
+    paths = [
+        str(item)
+        for item in (metadata.get("discovered_context_files") or task.get("context_files", []))
+        if str(item).strip()
+    ]
+    paths.extend(parse_paths(payload.get("paths", [])))
+    if not paths:
+        raise ValueError("parent trace does not contain context_files")
+    objective = f"{original_objective}\n\nUser steering note: {nudge}"
+    return build_product_plan_preview(
+        objective=objective,
+        paths=paths,
+        max_files=parse_optional_int(payload.get("max_files")),
+        selected_paths=selected_paths_for_rerun_payload(payload),
+        plan_note=build_rerun_plan_note(payload.get("plan_note"), nudge),
+        top_k=int(payload.get("top_k", 12) or 12),
+        config=config,
+        use_llm_planning=bool(payload.get("use_llm_planning", False)),
+    )
 
 
 def selected_paths_for_rerun_payload(payload: dict[str, Any]) -> list[str] | None:
@@ -1007,6 +1052,7 @@ INDEX_HTML = r"""<!doctype html>
         <button class="secondary" id="chooseRerunFiles">Choose Files</button>
       </div>
       <div class="row">
+        <button class="secondary" id="previewNudgePlan">Preview Nudge Plan</button>
         <button class="secondary" id="rerunTrace">Apply Nudge</button>
       </div>
       <h2 style="margin-top:16px">Run Health</h2>
@@ -1047,6 +1093,7 @@ INDEX_HTML = r"""<!doctype html>
     const stopRun = $("stopRun");
     const loadTrace = $("loadTrace");
     const rerunTrace = $("rerunTrace");
+    const previewNudgePlan = $("previewNudgePlan");
     const listTraces = $("listTraces");
     const chooseFolder = $("chooseFolder");
     const chooseFile = $("chooseFile");
@@ -1249,6 +1296,35 @@ INDEX_HTML = r"""<!doctype html>
       } finally {
         rerunTrace.disabled = false;
         stopRun.disabled = true;
+      }
+    });
+    previewNudgePlan.addEventListener("click", async () => {
+      previewNudgePlan.disabled = true;
+      status.textContent = "Previewing nudge plan";
+      try {
+        const response = await fetch("/api/rerun-plan", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            trace_path: $("tracepath").value,
+            nudge: $("nudge").value,
+            paths: pathPayload($("rerunPaths").value),
+            use_llm_planning: $("usePlanner").checked,
+            top_k: Number($("topk").value || 12),
+            selected_paths: firstReadPathsDirty ? pathPayload($("firstReadPaths").value) : [],
+            selected_paths_locked: firstReadPathsDirty,
+            plan_note: $("planNote").value
+          })
+        });
+        const plan = await response.json();
+        if (!response.ok || plan.error) throw new Error(plan.error || "Nudge plan failed");
+        currentPlan = plan;
+        renderPlan(plan);
+        status.textContent = `Nudge plan ready: ${plan.first_read_count || 0} first-read document(s)`;
+      } catch (error) {
+        status.textContent = error.message;
+      } finally {
+        previewNudgePlan.disabled = false;
       }
     });
     async function choosePath(mode, targetId) {

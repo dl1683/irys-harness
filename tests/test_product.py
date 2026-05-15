@@ -31,6 +31,7 @@ from irys_harness.product_ui import (
     parse_paths,
     pick_local_paths,
     rerun_from_trace,
+    rerun_plan_from_trace,
     resolve_trace_path,
     selected_paths_for_rerun_payload,
     summarize_trace_rows,
@@ -360,6 +361,7 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn('id="usePlanner"', INDEX_HTML)
         self.assertIn("/api/pick-path", INDEX_HTML)
         self.assertIn("/api/plan", INDEX_HTML)
+        self.assertIn("/api/rerun-plan", INDEX_HTML)
         self.assertIn("Review Plan", INDEX_HTML)
         self.assertIn("Detailed Plan", INDEX_HTML)
         self.assertIn('id="planPreview"', INDEX_HTML)
@@ -394,6 +396,8 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn('id="liveEvents"', INDEX_HTML)
         self.assertIn("/api/run-async", INDEX_HTML)
         self.assertIn("/api/rerun-async", INDEX_HTML)
+        self.assertIn('id="previewNudgePlan"', INDEX_HTML)
+        self.assertIn("Preview Nudge Plan", INDEX_HTML)
         self.assertIn("/api/run-status", INDEX_HTML)
         self.assertIn("/api/cancel-run", INDEX_HTML)
         self.assertIn("function pollRunJob", INDEX_HTML)
@@ -660,6 +664,41 @@ class ProductMatterTests(unittest.TestCase):
 
         self.assertIn("Prior correction: ignore drafts.", note)
         self.assertIn("Current steering note: Focus on the 2024 10-K.", note)
+
+    def test_rerun_plan_from_trace_previews_nudged_source_plan(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            email = root / "email.txt"
+            ten_k = root / "2024_10-K.txt"
+            email.write_text("Email discusses a renewal dispute.", encoding="utf-8")
+            ten_k.write_text("Annual report: diluted EPS was 1.23.", encoding="utf-8")
+            trace_dir = root / "traces"
+            output_dir = root / "outputs"
+            parent = run_product_matter(
+                objective="What is the main issue here?",
+                paths=[str(email)],
+                matter_id="Preview Matter",
+                config=load_config(),
+                trace_dir=trace_dir,
+                output_dir=output_dir,
+                live_synthesis=False,
+                verbose=False,
+            )
+
+            plan = rerun_plan_from_trace(
+                {
+                    "trace_path": str(parent.trace_path),
+                    "nudge": "Focus on the 2024 10-K EPS instead.",
+                    "paths": [str(ten_k)],
+                    "top_k": 3,
+                },
+                config=load_config(),
+                trace_dir=trace_dir,
+            )
+
+            self.assertIn("User steering note: Focus on the 2024 10-K EPS instead.", plan["objective"])
+            self.assertIn("Current steering note: Focus on the 2024 10-K EPS instead.", plan["plan_note"])
+            self.assertIn(str(ten_k.resolve()), plan["first_read_paths"])
 
     def test_conversation_history_is_synthesis_only_not_retrieval_context(self) -> None:
         with TemporaryDirectory() as tmp:
