@@ -7,6 +7,7 @@ import unittest
 
 from irys_harness.config import load_config
 from irys_harness.product import compare_product_traces, discover_corpus_paths, run_product_matter, sanitize_matter_id
+from irys_harness.product import build_product_synthesis_prompt
 from irys_harness.product_ui import (
     parse_paths,
     rerun_from_trace,
@@ -199,6 +200,27 @@ class ProductMatterTests(unittest.TestCase):
     def test_parse_paths_accepts_textarea_or_list(self) -> None:
         self.assertEqual(parse_paths(" a.txt \n\n b.txt "), ["a.txt", "b.txt"])
         self.assertEqual(parse_paths([" a.txt ", ""]), ["a.txt"])
+
+    def test_product_synthesis_prompt_includes_worker_analysis(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            doc = root / "agreement.txt"
+            doc.write_text("Payment default has a 5 day cure period after notice.", encoding="utf-8")
+            result = run_product_matter(
+                objective="What cure period applies?",
+                paths=[str(doc)],
+                matter_id="Analysis Matter",
+                config=load_config(),
+                trace_dir=root / "traces",
+                live_synthesis=False,
+                verbose=False,
+            )
+            result.state.final_packet["worker_analysis"] = "MATERIAL_FACTS: payment default cure is 5 days."
+
+            prompt = build_product_synthesis_prompt(result.state)
+
+            self.assertIn("Worker analysis:", prompt)
+            self.assertIn("MATERIAL_FACTS: payment default cure is 5 days.", prompt)
 
     def test_compare_product_traces_reports_evidence_and_metric_deltas(self) -> None:
         parent = {

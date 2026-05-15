@@ -141,10 +141,26 @@ def run_product_matter(
         "verified_evidence": evidence_items,
         "unresolved": build_unresolved_items(state),
     }
-    state.diagnosis = build_product_diagnosis(state)
 
     if live_synthesis:
         router = GeminiModelRouter(config)
+        analysis_prompt = build_product_worker_analysis_prompt(state)
+        analysis = router.generate(
+            module="extraction",
+            prompt=analysis_prompt,
+            temperature=0.0,
+            max_output_tokens=4096,
+        )
+        state.metrics.add_call(analysis.usage)
+        state.extraction_records.append(
+            {
+                "mode": "live_product_worker_analysis",
+                "model": analysis.usage.model,
+                "analysis": analysis.text,
+            }
+        )
+        state.final_packet["worker_analysis"] = analysis.text
+        log.emit("ANALYZE", "generated cheap-worker product analysis", model=analysis.usage.model)
         prompt = build_product_synthesis_prompt(state)
         result = router.generate(
             module="synthesis",
@@ -161,6 +177,7 @@ def run_product_matter(
         state.rendered_answer = state.draft_answer
         log.emit("SYNTH", "generated deterministic preview")
 
+    state.diagnosis = build_product_diagnosis(state)
     trace_path = TraceWriter(trace_dir).write(state)
     log.emit("SAVE", "trace saved", trace=str(trace_path))
     return ProductRunResult(state=state, trace_path=trace_path)
@@ -405,10 +422,33 @@ Active corpus:
 Evidence packet:
 {format_evidence_for_prompt(packet.get("verified_evidence", []))}
 
+Worker analysis:
+{packet.get("worker_analysis") or "- Not run."}
+
 Unresolved gaps:
 {format_list(packet.get("unresolved", []))}
 
 Write a clean answer. Cite source doc IDs and chunk IDs when relying on evidence. If the corpus does not contain enough support, state the gap plainly."""
+
+
+def build_product_worker_analysis_prompt(state: RunState) -> str:
+    packet = state.final_packet or {}
+    return f"""Analyze the retrieved user-corpus evidence for the product objective.
+
+Return compact structured notes for the final drafter. Use only the provided evidence.
+
+User objective:
+{state.task.question}
+
+Evidence packet:
+{format_evidence_for_prompt(packet.get("verified_evidence", []))}
+
+Return:
+- ANSWER_TARGET: the exact question or artifact to satisfy.
+- MATERIAL_FACTS: concise source-grounded facts with doc/chunk IDs.
+- CONDITIONS_OR_REQUIREMENTS: notice, timing, approval, threshold, document, or procedural requirements.
+- GAPS: facts missing from the corpus that the drafter should not invent.
+- DRAFTING_NOTES: constraints for a clean user-facing answer."""
 
 
 def build_deterministic_product_answer(state: RunState) -> str:
