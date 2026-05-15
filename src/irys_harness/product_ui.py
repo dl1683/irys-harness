@@ -864,6 +864,7 @@ INDEX_HTML = r"""<!doctype html>
     }
     textarea { min-height: 116px; resize: vertical; }
     .objective { min-height: 190px; }
+    .objective.compact { min-height: 74px; }
     .row {
       display: flex;
       align-items: center;
@@ -1359,6 +1360,7 @@ INDEX_HTML = r"""<!doctype html>
     renderNextPassSetup();
     $("clear").addEventListener("click", () => {
       $("objective").value = "";
+      $("objective").classList.remove("compact");
       $("answer").innerHTML = "";
       $("chatHistory").innerHTML = "";
       $("tracepath").value = "";
@@ -1692,6 +1694,7 @@ INDEX_HTML = r"""<!doctype html>
     }
     function renderPlan(plan, {mode = "initial", pathKey = initialPlanPathKey()} = {}) {
       const firstRead = plan.first_read_paths || [];
+      $("objective").classList.remove("compact");
       setFirstReadPaths(firstRead, {dirty: false});
       currentPlan = plan;
       currentPlanNote = $("planNote").value;
@@ -1947,6 +1950,7 @@ INDEX_HTML = r"""<!doctype html>
       $("matter").value = metadata.matter_id || (trace.task || {}).task_id || $("matter").value;
       $("chat").value = metadata.chat_id || $("chat").value || "main";
       $("objective").value = (trace.task || {}).question || $("objective").value;
+      $("objective").classList.add("compact");
       excludedSourcePaths = [];
       renderTracePlan(metadata, trace);
       renderLiveEvents(trace.events || []);
