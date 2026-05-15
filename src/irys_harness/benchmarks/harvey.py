@@ -4956,6 +4956,15 @@ DOCUMENT_COMPARISON_ISSUE_FAMILIES: list[tuple[str, list[str]]] = [
             "salary",
             "bonus",
             "rent",
+            "excess cash flow",
+            "ecf",
+            "asset sale",
+            "reinvestment",
+            "restricted payment",
+            "rp basket",
+            "extraordinary receipts",
+            "soft call",
+            "cash hoarding",
         ],
     ),
     (
@@ -5013,6 +5022,16 @@ DOCUMENT_COMPARISON_ISSUE_FAMILIES: list[tuple[str, list[str]]] = [
             "gdpr",
             "cpra",
             "hipaa",
+            "business associate",
+            "baa",
+            "security officer",
+            "audit log",
+            "workforce training",
+            "terminated account",
+            "mdm",
+            "byod",
+            "remote workforce",
+            "physical safeguard",
         ],
     ),
     (
@@ -5027,6 +5046,13 @@ DOCUMENT_COMPARISON_ISSUE_FAMILIES: list[tuple[str, list[str]]] = [
             "work product",
             "source code",
             "sublicense",
+            "service credit",
+            "termination for convenience",
+            "bespoke development",
+            "most favored",
+            "mfc",
+            "audit rights",
+            "source code escrow",
         ],
     ),
     (
@@ -5057,6 +5083,12 @@ DOCUMENT_COMPARISON_ISSUE_FAMILIES: list[tuple[str, list[str]]] = [
             "ebitda",
             "liquidity",
             "intercreditor",
+            "equity cure",
+            "permitted acquisition",
+            "financial covenant",
+            "springing",
+            "audited financial",
+            "commitment letter",
         ],
     ),
     (
@@ -5072,6 +5104,15 @@ DOCUMENT_COMPARISON_ISSUE_FAMILIES: list[tuple[str, list[str]]] = [
             "title",
             "zoning",
             "insurance",
+            "rent commencement",
+            "rcd",
+            "controllable expense",
+            "rofo",
+            "rofr",
+            "asbestos",
+            "signage",
+            "grease trap",
+            "loading dock",
         ],
     ),
     (
@@ -5122,9 +5163,9 @@ DOCUMENT_COMPARISON_ISSUE_FAMILIES: list[tuple[str, list[str]]] = [
     ),
 ]
 
-MAX_DOCUMENT_COMPARISON_ISSUE_ROWS = 140
-MAX_DOCUMENT_COMPARISON_NUMERIC_ROWS = 70
-MAX_REQUIREMENT_RECONCILIATION_ROWS = 120
+MAX_DOCUMENT_COMPARISON_ISSUE_ROWS = 180
+MAX_DOCUMENT_COMPARISON_NUMERIC_ROWS = 90
+MAX_REQUIREMENT_RECONCILIATION_ROWS = 180
 MAX_ARTIFACT_REQUIREMENT_ROWS = 90
 MAX_ARTIFACT_DERIVED_ROWS = 40
 MAX_STRUCTURED_FINANCE_ASSET_ISSUE_ROWS = 90
@@ -16302,17 +16343,182 @@ def infer_reconciliation_doc_role(text: str) -> str:
     return infer_document_role(text)
 
 
+RECONCILIATION_DISCREPANCY_TERMS = [
+    "missing",
+    "omits",
+    "omitted",
+    "inconsistent",
+    "discrepancy",
+    "shortfall",
+    "not address",
+    "does not",
+    "wrong ",
+    "stale ",
+]
+
+
+RECONCILIATION_REQUIREMENT_TERMS = [
+    "shall",
+    "must",
+    "required",
+    "requirement",
+    "condition",
+    "benchmark",
+    "criterion",
+    "no later than",
+    "within ",
+    "deadline",
+    "threshold",
+    "limit",
+    "cap",
+    "ratio",
+]
+
+
+RECONCILIATION_REGULATORY_TERMS = [
+    "ofac",
+    "sanction",
+    "cpra",
+    "gdpr",
+    "hipaa",
+    "sec",
+    "cusip",
+    "10b-5",
+    "good standing",
+    "license exception",
+    "entity list",
+    "50% rule",
+    "fda",
+    "irs",
+]
+
+
+RECONCILIATION_FOCUSED_TERMS = [
+    # Healthcare / regulated policy comparisons.
+    "business associate",
+    "baa",
+    "security officer",
+    "audit log",
+    "workforce training",
+    "terminated account",
+    "mdm",
+    "byod",
+    "remote workforce",
+    "physical safeguard",
+    # Finance and credit-agreement comparisons.
+    "excess cash flow",
+    "ecf",
+    "asset sale",
+    "reinvestment",
+    "equity cure",
+    "restricted payment",
+    "rp basket",
+    "permitted acquisition",
+    "soft call",
+    "anti-cash-hoarding",
+    "cash hoarding",
+    "extraordinary receipts",
+    "springing financial covenant",
+    "audited financial",
+    # SaaS / IP / commercial markups.
+    "service credit",
+    "termination for convenience",
+    "residual cap",
+    "bespoke development",
+    "most favored",
+    "mfc",
+    "non-solicit",
+    "audit rights",
+    "warranty",
+    "source code escrow",
+    # Real-estate and lease drafting/comparison.
+    "rent commencement",
+    "rcd",
+    "controllable expense",
+    "rofo",
+    "rofr",
+    "asbestos",
+    "casualty",
+    "condemnation",
+    "signage",
+    "grease trap",
+    "loading dock",
+]
+
+
 def iter_reconciliation_candidate_lines(text: str) -> list[str]:
     lines: list[str] = []
     for raw in text.splitlines():
         line = " ".join(raw.strip().split())
         if not line or len(line) < 18:
             continue
-        if len(line) > 1200:
-            line = compact_digest_text(line, limit=1200)
-        if is_reconciliation_candidate_line(line):
-            lines.append(line)
+        for unit in reconciliation_candidate_units(line):
+            if len(unit) < 18:
+                continue
+            if len(unit) > 1200:
+                unit = compact_digest_text(unit, limit=1200)
+            if is_reconciliation_candidate_line(unit):
+                lines.append(unit)
     return lines
+
+
+def reconciliation_candidate_units(line: str) -> list[str]:
+    if "|" in line and count_nonempty_cells(line) >= 3:
+        return [line]
+    units = [line]
+    if len(line) > 260 or "; " in line:
+        fragments = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9$\"'(])|;\s+(?=[A-Z0-9$\"'(])", line)
+        units.extend(" ".join(fragment.strip().split()) for fragment in fragments if fragment.strip())
+    if len(line) > 260:
+        units.extend(iter_focused_reconciliation_fragments(line))
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for unit in units:
+        normalized = normalize_issue_key(unit)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(unit)
+    return unique[:20]
+
+
+def iter_focused_reconciliation_fragments(line: str) -> list[str]:
+    fragments: list[str] = []
+    lower = line.lower()
+    for term in RECONCILIATION_FOCUSED_TERMS:
+        pattern = reconciliation_term_pattern(term)
+        for match in re.finditer(pattern, lower):
+            start, end = match.span()
+            fragments.append(reconciliation_window(line, start, end))
+    return fragments
+
+
+def reconciliation_window(line: str, start: int, end: int) -> str:
+    window_start = max(0, start - 360)
+    before = max(line.rfind(".", window_start, start), line.rfind(";", window_start, start))
+    if before >= window_start:
+        window_start = before + 1
+    window_end = min(len(line), end + 520)
+    after_candidates = [
+        position + 1
+        for position in (line.find(".", end, window_end), line.find(";", end, window_end))
+        if position >= 0
+    ]
+    if after_candidates:
+        window_end = min(after_candidates)
+    return compact_digest_text(line[window_start:window_end], limit=900)
+
+
+def reconciliation_term_pattern(term: str) -> str:
+    escaped = re.escape(term).replace(r"\ ", r"\s+")
+    if re.fullmatch(r"[a-z0-9 ]+", term):
+        return rf"\b{escaped}\b"
+    return escaped
+
+
+def has_reconciliation_term(lower: str, terms: list[str]) -> bool:
+    return any(re.search(reconciliation_term_pattern(term), lower) for term in terms)
 
 
 def is_reconciliation_candidate_line(line: str) -> bool:
@@ -16321,11 +16527,13 @@ def is_reconciliation_candidate_line(line: str) -> bool:
         return True
     if re.search(r"\b(?:item|section|schedule|exhibit|requirement|condition|benchmark|criterion)\s+[a-z0-9_.()-]+", lower):
         return True
-    if any(term in lower for term in ["missing", "omits", "omitted", "inconsistent", "discrepancy", "shortfall", "not address", "does not", "wrong ", "stale "]):
+    if has_reconciliation_term(lower, RECONCILIATION_DISCREPANCY_TERMS):
         return True
-    if any(term in lower for term in ["shall", "must", "required", "no later than", "within ", "deadline", "threshold", "limit", "cap", "ratio"]):
+    if has_reconciliation_term(lower, RECONCILIATION_REQUIREMENT_TERMS):
         return True
-    if any(term in lower for term in ["ofac", "cpra", "gdpr", "hipaa", "sec", "cusip", "10b-5", "good standing", "license exception", "entity list", "50% rule"]):
+    if has_reconciliation_term(lower, RECONCILIATION_REGULATORY_TERMS):
+        return True
+    if has_reconciliation_term(lower, RECONCILIATION_FOCUSED_TERMS):
         return True
     return bool(re.search(r"\b(?:19|20)\d{2}\b", line) and re.search(r"\$?\d[\d,]*(?:\.\d+)?%?", line))
 
@@ -16339,13 +16547,15 @@ def score_reconciliation_line(*, line: str, role: str, relevance_tokens: set[str
         score += 5
     if "current-state" in role or "current markup" in role:
         score += 4
-    if any(term in lower for term in ["missing", "omits", "omitted", "inconsistent", "discrepancy", "shortfall", "wrong ", "stale "]):
+    if has_reconciliation_term(lower, RECONCILIATION_DISCREPANCY_TERMS):
         score += 12
-    if any(term in lower for term in ["require", "condition", "benchmark", "threshold", "limit", "deadline", "shall", "must"]):
+    if has_reconciliation_term(lower, RECONCILIATION_REQUIREMENT_TERMS):
         score += 8
+    if has_reconciliation_term(lower, RECONCILIATION_FOCUSED_TERMS):
+        score += 10
     if any(term in lower for term in ["critical", "significant", "administrative", "high", "medium", "low"]):
         score += 5
-    if any(term in lower for term in ["ofac", "sanction", "cpra", "gdpr", "hipaa", "sec", "cusip", "10b-5", "license", "permit"]):
+    if has_reconciliation_term(lower, RECONCILIATION_REGULATORY_TERMS) or any(term in lower for term in ["license", "permit"]):
         score += 6
     if re.search(r"\b(?:19|20)\d{2}\b", line):
         score += 3

@@ -2370,6 +2370,83 @@ class HarveyQueryTests(unittest.TestCase):
         self.assertIn("CUSIP 147829 AC4", digest)
         self.assertIn("summary count by severity", digest)
 
+    def test_requirement_reconciliation_digest_splits_dense_policy_paragraphs(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="healthcare-life-sciences/compare-policies-against-regulations",
+            question="Compare current healthcare privacy and security policies against HIPAA requirements.",
+            answer_schema={"deliverables": ["hipaa-gap-report.docx"]},
+            metadata={"practice_area": "healthcare-life-sciences"},
+        )
+        state = RunState(
+            task=task,
+            config=load_config(),
+            documents=[
+                {"doc_id": "doc_1", "filename": "hipaa-security-rule-requirements.docx"},
+                {"doc_id": "doc_2", "filename": "current-privacy-security-program.docx"},
+            ],
+            chunks=[
+                {
+                    "doc_id": "doc_2",
+                    "chunk_id": "c1",
+                    "index": 0,
+                    "text": (
+                        "Current program notes that the Hartley & Greer Business Associate Agreement expired on "
+                        "June 30, 2024 but claims data continued daily; Security Officer designation remains informal "
+                        "and is not reflected in the policy; access review found 23 stale terminated accounts; audit "
+                        "log retention is only 90 days; workforce training excludes 44 remote employees; MDM/BYOD "
+                        "controls are optional for the remote workforce and physical safeguard procedures are not "
+                        "updated for home offices."
+                    ),
+                }
+            ],
+        )
+        digest = build_task_family_digest(state)
+        self.assertIn("Hartley & Greer Business Associate Agreement", digest)
+        self.assertIn("Security Officer", digest)
+        self.assertIn("23 stale terminated accounts", digest)
+        self.assertIn("audit log retention is only 90 days", digest)
+        self.assertIn("MDM/BYOD", digest)
+
+    def test_requirement_reconciliation_digest_splits_dense_credit_paragraphs(self) -> None:
+        task = BenchmarkTask(
+            benchmark="harvey_lab_sample",
+            task_id="banking-finance/compare-credit-agreement-to-commitment-letter",
+            question="Compare the draft credit agreement against the commitment letter and identify all term deviations.",
+            answer_schema={"deliverables": ["credit-agreement-comparison.docx"]},
+            metadata={"practice_area": "banking-finance"},
+        )
+        state = RunState(
+            task=task,
+            config=load_config(),
+            documents=[
+                {"doc_id": "doc_1", "filename": "commitment-letter.docx"},
+                {"doc_id": "doc_2", "filename": "draft-credit-agreement.docx"},
+            ],
+            chunks=[
+                {
+                    "doc_id": "doc_2",
+                    "chunk_id": "c1",
+                    "index": 0,
+                    "text": (
+                        "The draft revises the Excess Cash Flow sweep so that ECF is 75% above 4.75x and 50% below "
+                        "that level; asset sale reinvestment is extended to 365 days plus a 180-day committed "
+                        "reinvestment period; the equity cure may be exercised twice in any four-quarter period; an "
+                        "unlimited restricted payment basket is added; audited financial statements are not a "
+                        "condition to closing; extraordinary receipts are excluded from mandatory prepayments; a "
+                        "soft call applies for only six months and anti-cash-hoarding language is absent."
+                    ),
+                }
+            ],
+        )
+        digest = build_task_family_digest(state)
+        self.assertIn("Excess Cash Flow", digest)
+        self.assertIn("75% above 4.75x", digest)
+        self.assertIn("asset sale reinvestment", digest)
+        self.assertIn("equity cure", digest)
+        self.assertIn("unlimited restricted payment basket", digest)
+        self.assertIn("anti-cash-hoarding", digest)
+
     def test_synthesis_prompt_forbids_encoded_artifacts(self) -> None:
         task = BenchmarkTask(
             benchmark="harvey_lab_sample",
