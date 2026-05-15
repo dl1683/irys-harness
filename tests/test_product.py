@@ -684,6 +684,71 @@ class ProductMatterTests(unittest.TestCase):
         self.assertEqual(retrieved[0].doc_id, "doc_0002")
         self.assertIn("press releases", retrieved[0].text)
 
+    def test_product_retrieval_keeps_announcement_sources_over_large_summary(self) -> None:
+        documents = [
+            {"doc_id": "doc_0001", "filename": "annual-report-2023.txt"},
+            {"doc_id": "doc_0002", "filename": "first-quarter-2023-financial-results.txt"},
+            {"doc_id": "doc_0003", "filename": "first-quarter-2024-financial-results.txt"},
+            {"doc_id": "doc_0004", "filename": "security-ai-product-announcement-2024.txt"},
+        ]
+        chunks = [
+            {
+                "doc_id": "doc_0001",
+                "chunk_id": f"doc_0001_chunk_{index:04d}",
+                "text": (
+                    "Annual report platform product security observability accounting policy "
+                    "convertible senior notes financial statements "
+                )
+                * 35,
+            }
+            for index in range(12)
+        ]
+        chunks.extend(
+            [
+                {
+                    "doc_id": "doc_0002",
+                    "chunk_id": "doc_0002_chunk_0000",
+                    "text": (
+                        "Datadog Announces First Quarter 2023 Financial Results. "
+                        "Business highlights included launched Data Streams Monitoring, "
+                        "Application Vulnerability Management, and cloud security reports."
+                    ),
+                },
+                {
+                    "doc_id": "doc_0003",
+                    "chunk_id": "doc_0003_chunk_0000",
+                    "text": (
+                        "Datadog Announces First Quarter 2024 Financial Results. "
+                        "Business highlights included general availability of LLM Observability, "
+                        "Bits AI, and expanded security automation."
+                    ),
+                },
+                {
+                    "doc_id": "doc_0004",
+                    "chunk_id": "doc_0004_chunk_0000",
+                    "text": (
+                        "Datadog announced a 2024 product expansion for AI security, "
+                        "incident management, platform integration, and observability workflows."
+                    ),
+                },
+            ]
+        )
+
+        retrieved = retrieve_product_chunks(
+            chunks,
+            [
+                "compare the announcements data dog made in 2023 to 2024. how did company priorities change?",
+                "press release news release announcement announces launches expands acquires partnership product platform priorities",
+            ],
+            documents,
+            top_k=3,
+        )
+
+        doc_ids = {item.doc_id for item in retrieved}
+        self.assertIn("doc_0002", doc_ids)
+        self.assertIn("doc_0003", doc_ids)
+        self.assertNotEqual([item.doc_id for item in retrieved], ["doc_0001", "doc_0001", "doc_0001"])
+
     def test_packet_review_can_select_supplemental_held_back_documents(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
