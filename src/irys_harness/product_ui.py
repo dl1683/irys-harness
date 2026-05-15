@@ -143,6 +143,8 @@ def build_handler(
                             selected_paths=parse_paths(payload.get("selected_paths", [])) or None,
                             plan_note=str(payload.get("plan_note") or ""),
                             top_k=int(payload.get("top_k", 12) or 12),
+                            config=config,
+                            use_llm_planning=bool(payload.get("use_llm_planning", False)),
                         )
                     )
                     return
@@ -193,6 +195,7 @@ def build_handler(
                     max_files=parse_optional_int(payload.get("max_files")),
                     selected_paths=parse_paths(payload.get("selected_paths", [])) or None,
                     plan_note=str(payload.get("plan_note") or ""),
+                    use_llm_planning=bool(payload.get("use_llm_planning", False)),
                     verbose=False,
                 )
                 response = result.to_dict()
@@ -303,6 +306,7 @@ def start_product_run_job(
                     should_cancel=should_cancel,
                     selected_paths=parse_paths(payload.get("selected_paths", [])) or None,
                     plan_note=str(payload.get("plan_note") or ""),
+                    use_llm_planning=bool(payload.get("use_llm_planning", False)),
                 )
                 response = result.to_dict()
                 response["summary"] = trace_summary(result.state.to_trace())
@@ -474,6 +478,7 @@ def rerun_from_trace(
         user_nudge=nudge,
         selected_paths=parse_paths(payload.get("selected_paths", [])) or None,
         plan_note=plan_note,
+        use_llm_planning=bool(payload.get("use_llm_planning", False)),
         event_callback=event_callback,
         should_cancel=should_cancel,
     )
@@ -732,6 +737,29 @@ INDEX_HTML = r"""<!doctype html>
       color: var(--muted);
     }
     .toggle input { width: auto; }
+    .candidate {
+      display: grid;
+      grid-template-columns: 22px minmax(0, 1fr);
+      gap: 8px;
+      align-items: start;
+      margin: 0;
+      font-size: 13px;
+      font-weight: 400;
+      color: var(--ink);
+    }
+    .candidate input { width: auto; margin-top: 2px; }
+    .candidate strong {
+      display: block;
+      font-size: 13px;
+      margin-bottom: 3px;
+      overflow-wrap: anywhere;
+    }
+    .candidate small {
+      display: block;
+      color: var(--muted);
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
     .status {
       color: var(--accent-2);
       font-size: 13px;
@@ -844,7 +872,7 @@ INDEX_HTML = r"""<!doctype html>
       <div class="item">
         <strong>How to use this test UI</strong>
         <small>
-          Use Choose Folder, Choose File, or Choose Files to open a native picker on this machine. Paste local file or folder paths into Corpus Paths one per line when that is faster. Local folders are read recursively. No artificial file-count or per-document character cap is applied to local Corpus Paths. Matter ID groups saved runs and costs. Chat ID separates parallel conversations inside the same matter. Live synthesis calls the configured Gemini models; when it is off, the UI produces a deterministic preview without model cost. Top K is the number of retrieved chunks used for the evidence packet. Message Cost is the loaded run; Matter Cost totals saved traces for the matter. The workstream shows what Irys is checking, reading, searching, and drafting while the run is still in progress.
+          Use Choose Folder, Choose File, or Choose Files to open a native picker on this machine. Paste local file or folder paths into Corpus Paths one per line when that is faster. Local folders are read recursively. No artificial file-count or per-document character cap is applied to local Corpus Paths. Matter ID groups saved runs and costs. Chat ID separates parallel conversations inside the same matter. Worker source planning uses a cheap model to review the file inventory and suggest first-read documents; if it cannot run, Irys falls back to deterministic path scoring. Live synthesis calls the configured Gemini models; when it is off, the UI produces a deterministic preview without final drafting model cost. Top K is the number of retrieved chunks used for the evidence packet. Message Cost is the loaded run; Matter Cost totals saved traces for the matter. The workstream shows what Irys is checking, reading, searching, and drafting while the run is still in progress.
         </small>
       </div>
       <label for="matter">Matter ID</label>
@@ -859,6 +887,7 @@ INDEX_HTML = r"""<!doctype html>
         <button class="secondary" id="chooseFiles">Choose Files</button>
       </div>
       <div class="row">
+        <label class="toggle"><input id="usePlanner" type="checkbox" checked /> Worker source planning</label>
         <label class="toggle"><input id="live" type="checkbox" /> Live synthesis</label>
         <label for="topk">Top K</label>
         <input id="topk" type="number" min="1" max="50" value="12" />
@@ -878,6 +907,15 @@ INDEX_HTML = r"""<!doctype html>
       <h2 style="margin-top:16px">Plan</h2>
       <div class="list" id="planPreview">
         <div class="empty">Choose a corpus and objective, then review the plan before running.</div>
+      </div>
+      <h2 style="margin-top:16px">First-Read Review</h2>
+      <div class="list" id="candidateReview">
+        <div class="empty">Review Plan will show the highest-ranked documents here. Check or uncheck what Irys should read first.</div>
+      </div>
+      <div class="row">
+        <button class="secondary" id="applyCheckedCandidates">Apply Checked Documents</button>
+        <button class="secondary" id="selectAllCandidates">Select All Shown</button>
+        <button class="secondary" id="restoreRecommendedCandidates">Restore Recommended</button>
       </div>
       <label for="firstReadPaths">First-Read Documents</label>
       <textarea id="firstReadPaths" placeholder="Review Plan fills this with the files Irys intends to read first. Edit it before running if the plan is wrong."></textarea>
@@ -965,6 +1003,9 @@ INDEX_HTML = r"""<!doctype html>
     const chooseRerunFolder = $("chooseRerunFolder");
     const chooseRerunFile = $("chooseRerunFile");
     const chooseRerunFiles = $("chooseRerunFiles");
+    const applyCheckedCandidates = $("applyCheckedCandidates");
+    const selectAllCandidates = $("selectAllCandidates");
+    const restoreRecommendedCandidates = $("restoreRecommendedCandidates");
     let conversationByChat = {};
     let activeJobPoll = null;
     let activeJobId = "";
@@ -981,6 +1022,7 @@ INDEX_HTML = r"""<!doctype html>
       $("firstReadPaths").value = "";
       $("planNote").value = "";
       $("planPreview").innerHTML = emptyState("Choose a corpus and objective, then review the plan before running.");
+      $("candidateReview").innerHTML = emptyState("Review Plan will show the highest-ranked documents here. Check or uncheck what Irys should read first.");
       currentPlan = null;
       currentPlanNote = "";
       currentPlanObjective = "";
@@ -1023,6 +1065,21 @@ INDEX_HTML = r"""<!doctype html>
     chooseRerunFolder.addEventListener("click", () => choosePath("folder", "rerunPaths"));
     chooseRerunFile.addEventListener("click", () => choosePath("file", "rerunPaths"));
     chooseRerunFiles.addEventListener("click", () => choosePath("files", "rerunPaths"));
+    applyCheckedCandidates.addEventListener("click", () => applyCheckedCandidatePaths({silent: false}));
+    selectAllCandidates.addEventListener("click", () => {
+      document.querySelectorAll(".candidate-check").forEach(input => input.checked = true);
+      applyCheckedCandidatePaths({silent: false});
+    });
+    restoreRecommendedCandidates.addEventListener("click", () => {
+      const recommended = currentPlan && Array.isArray(currentPlan.first_read_paths) ? currentPlan.first_read_paths : [];
+      if (!recommended.length) {
+        status.textContent = "No recommended first-read set is loaded";
+        return;
+      }
+      $("firstReadPaths").value = recommended.join("\n");
+      renderCandidateReview(currentPlan.top_candidates || [], recommended);
+      status.textContent = `Restored ${recommended.length} recommended document(s)`;
+    });
     planRun.addEventListener("click", async () => {
       planRun.disabled = true;
       status.textContent = "Planning";
@@ -1046,6 +1103,7 @@ INDEX_HTML = r"""<!doctype html>
           currentPlan = plan;
           renderPlan(plan);
         }
+        applyCheckedCandidatePaths({silent: true});
         const response = await fetch("/api/run-async", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
@@ -1056,6 +1114,7 @@ INDEX_HTML = r"""<!doctype html>
             objective: $("objective").value,
             conversation_history: activeConversationHistory(),
             live_synthesis: $("live").checked,
+            use_llm_planning: $("usePlanner").checked,
             top_k: Number($("topk").value || 12),
             selected_paths: pathPayload($("firstReadPaths").value),
             plan_note: $("planNote").value
@@ -1114,6 +1173,7 @@ INDEX_HTML = r"""<!doctype html>
             chat_id: $("chat").value,
             paths: pathPayload($("rerunPaths").value),
             live_synthesis: $("live").checked,
+            use_llm_planning: $("usePlanner").checked,
             top_k: Number($("topk").value || 12),
             selected_paths: pathPayload($("firstReadPaths").value),
             plan_note: $("planNote").value
@@ -1170,6 +1230,7 @@ INDEX_HTML = r"""<!doctype html>
           paths,
           selected_paths,
           plan_note: $("planNote").value,
+          use_llm_planning: $("usePlanner").checked,
           top_k: Number($("topk").value || 12)
         })
       });
@@ -1186,15 +1247,19 @@ INDEX_HTML = r"""<!doctype html>
       const candidates = (plan.top_candidates || []).slice(0, 6).map(item =>
         `- ${item.filename || item.path}: score ${item.score}; ${(item.reasons || []).join("; ")}`
       );
+      const planner = plan.source_planner || {};
+      const plannerMetrics = plan.planner_metrics || {};
       const rows = [
         ["Task", plan.interpreted_goal || ""],
         ["First read", `${plan.first_read_count || 0} of ${plan.discovered_count || 0} document(s). ${plan.not_read_first_count || 0} held back for later.`],
         ["Why these files", plan.document_strategy || ""],
+        ["Worker source planner", formatPlannerSummary(planner, plannerMetrics)],
         ["Likely document types", (plan.likely_document_families || []).join(", ") || "No specific family inferred."],
         ["Needed information", (plan.needed_information || []).join("\n")],
         ["Top path matches", candidates.join("\n") || "No path-level candidates were scored."]
       ];
       $("planPreview").innerHTML = rows.map(([title, body]) => card(title, body)).join("");
+      renderCandidateReview(plan.top_candidates || [], firstRead);
     }
     function planNeedsRefresh() {
       if (!pathPayload($("firstReadPaths").value).length) return true;
@@ -1207,19 +1272,72 @@ INDEX_HTML = r"""<!doctype html>
       const selected = scope.selected_paths || [];
       $("firstReadPaths").value = selected.join("\n");
       $("planNote").value = metadata.plan_note || $("planNote").value;
-      currentPlan = {first_read_paths: selected};
       currentPlanNote = $("planNote").value;
       currentPlanObjective = $("objective").value;
       const top = (scope.scored_paths || []).slice(0, 6).map(item =>
         `- ${item.filename || item.path}: score ${item.score}; ${(item.reasons || []).join("; ")}`
       );
+      const planLike = {
+        first_read_paths: selected,
+        top_candidates: scope.scored_paths || [],
+        source_planner: (scope.signals || {}).source_planner || null
+      };
+      currentPlan = planLike;
       $("planPreview").innerHTML = [
         ["Task", $("objective").value || ""],
         ["First read", `${selected.length} of ${(scope.discovered_paths || []).length} document(s).`],
         ["Why these files", scope.reason || ""],
+        ["Worker source planner", formatPlannerSummary((scope.signals || {}).source_planner || null, {})],
         ["Likely document types", ((scope.signals || {}).requested_families || []).join(", ") || "No specific family inferred."],
         ["Top path matches", top.join("\n") || "No path-level candidates were scored."]
       ].map(([title, body]) => card(title, body)).join("");
+      renderCandidateReview(scope.scored_paths || [], selected);
+    }
+    function renderCandidateReview(candidates, selectedPaths) {
+      const rows = Array.isArray(candidates) ? candidates.slice(0, 20) : [];
+      if (!rows.length) {
+        $("candidateReview").innerHTML = emptyState("No ranked document candidates were returned for this plan.");
+        return;
+      }
+      const selected = new Set((selectedPaths || []).map(path => String(path || "").toLowerCase()));
+      $("candidateReview").innerHTML = rows.map((item, index) => {
+        const path = String(item.path || "");
+        const checked = selected.has(path.toLowerCase()) ? " checked" : "";
+        const reasons = Array.isArray(item.reasons) ? item.reasons.join("; ") : "";
+        const title = `${index + 1}. ${item.filename || path || "Document"}`;
+        const body = [
+          `Score ${item.score ?? 0}`,
+          reasons,
+          path
+        ].filter(Boolean).join("\n");
+        return `<div class="item"><label class="candidate">` +
+          `<input type="checkbox" class="candidate-check" data-path="${escapeAttr(path)}"${checked} />` +
+          `<span><strong>${escapeHtml(title)}</strong><small><pre>${escapeHtml(body)}</pre></small></span>` +
+          `</label></div>`;
+      }).join("");
+    }
+    function applyCheckedCandidatePaths({silent = false} = {}) {
+      const checked = Array.from(document.querySelectorAll(".candidate-check:checked"))
+        .map(input => input.getAttribute("data-path") || "")
+        .filter(Boolean);
+      if (!checked.length) {
+        if (!silent) status.textContent = "No checked document candidates";
+        return;
+      }
+      $("firstReadPaths").value = checked.join("\n");
+      if (!silent) status.textContent = `Applied ${checked.length} first-read document(s)`;
+    }
+    function formatPlannerSummary(planner, metrics) {
+      if (!planner) return "Not available for this run.";
+      const lines = [
+        `Status: ${planner.status || "unknown"}`,
+        planner.reason ? `Reason: ${planner.reason}` : "",
+        planner.confidence ? `Confidence: ${planner.confidence}` : "",
+        planner.selected_count !== undefined ? `Selected: ${planner.selected_count}` : "",
+        metrics && metrics.total_tokens ? `Planner tokens: ${metrics.total_tokens}` : "",
+        metrics && metrics.estimated_cost ? `Planner cost: $${Number(metrics.estimated_cost || 0).toFixed(4)}` : ""
+      ].filter(Boolean);
+      return lines.join("\n");
     }
     async function pollRunJob(jobId) {
       if (!jobId) throw new Error("Missing run job id");

@@ -157,7 +157,7 @@ python -m irys_harness agent-bench --agent-bench-root ../agent-bench --benchmark
 Run over a local user corpus:
 
 ```bash
-python -m irys_harness product-run --objective "Summarize the key obligations." --path ./matter-docs --matter-id acme-review --chat-id main
+python -m irys_harness product-run --objective "Summarize the key obligations." --path ./matter-docs --matter-id acme-review --chat-id main --worker-source-planning
 ```
 
 Serve the local UI:
@@ -170,6 +170,7 @@ The product UI supports:
 
 - native local file/folder pickers;
 - recursive local folder paths;
+- optional worker source planning that reviews the file inventory before first read and falls back to deterministic path scoring if model planning is unavailable;
 - editable first-read plan preview before a run;
 - live workstream events while the run is active;
 - source review and open-question summaries;

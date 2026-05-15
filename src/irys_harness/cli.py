@@ -101,6 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     product_run.add_argument("--config", default=None)
     product_run.add_argument("--top-k", type=int, default=12)
     product_run.add_argument("--max-files", type=int, default=DEFAULT_PRODUCT_MAX_FILES)
+    product_run.add_argument("--worker-source-planning", action="store_true")
     product_run.add_argument("--live-synthesis", action="store_true")
     product_run.set_defaults(func=cmd_product_run)
 
@@ -602,6 +603,7 @@ def cmd_product_run(args: argparse.Namespace) -> int:
         trace_dir=args.trace_dir,
         output_dir=args.output_dir,
         live_synthesis=bool(args.live_synthesis),
+        use_llm_planning=bool(args.worker_source_planning),
         top_k=args.top_k,
         max_files=args.max_files,
     )

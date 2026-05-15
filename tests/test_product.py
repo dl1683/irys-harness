@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from http.server import ThreadingHTTPServer
 import json
+from types import SimpleNamespace
 import threading
 import time
 from tempfile import TemporaryDirectory
@@ -10,7 +11,8 @@ import unittest
 from unittest.mock import patch
 from urllib.request import Request, urlopen
 
-from irys_harness.config import load_config
+from irys_harness.config import ModelTier, load_config
+from irys_harness.metrics import ModelCallRecord
 from irys_harness.product import (
     build_answer_source_map,
     build_product_plan_preview,
@@ -173,6 +175,57 @@ class ProductMatterTests(unittest.TestCase):
             self.assertIn(str(target.resolve()), plan["first_read_paths"])
             self.assertLess(plan["first_read_count"], plan["discovered_count"])
 
+    def test_product_plan_can_use_cheap_worker_source_planner(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "email_chain.txt"
+            background = root / "background_rules.txt"
+            target.write_text("matter-specific dispute", encoding="utf-8")
+            background.write_text("general rules", encoding="utf-8")
+
+            class FakeRouter:
+                def __init__(self, config: object) -> None:
+                    self.config = config
+
+                def generate(self, **kwargs: object) -> SimpleNamespace:
+                    self.kwargs = kwargs
+                    return SimpleNamespace(
+                        text=json.dumps(
+                            {
+                                "selected_paths": [str(target.resolve())],
+                                "rejected_paths": [str(background.resolve())],
+                                "should_read_full_corpus": False,
+                                "reason": "The email chain is the matter-specific narrative source.",
+                                "needed_information": ["event timeline"],
+                                "confidence": "high",
+                            }
+                        ),
+                        usage=ModelCallRecord(
+                            module="product_source_planner",
+                            tier=ModelTier.CHEAP_WORKER,
+                            model="fake-cheap-worker",
+                            input_tokens=100,
+                            output_tokens=20,
+                            estimated_cost=0.0001,
+                        ),
+                    )
+
+            with patch("irys_harness.product.GeminiModelRouter", FakeRouter):
+                plan = build_product_plan_preview(
+                    objective="What is the main issue here?",
+                    paths=[str(root)],
+                    config=load_config(),
+                    use_llm_planning=True,
+                )
+
+            self.assertEqual(plan["first_read_paths"], [str(target.resolve())])
+            self.assertEqual(plan["source_planner"]["status"], "used")
+            self.assertEqual(plan["source_planner"]["selected_count"], 1)
+            self.assertIn("Worker source planner selected", plan["document_strategy"])
+            self.assertIn("event timeline", plan["needed_information"])
+            self.assertEqual(plan["planner_metrics"]["total_tokens"], 120)
+            self.assertAlmostEqual(plan["planner_metrics"]["estimated_cost"], 0.0001)
+
     def test_product_scope_respects_user_approved_plan_paths(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -297,15 +350,26 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn("function pathPayload", INDEX_HTML)
         self.assertIn("Paste local file or folder paths", INDEX_HTML)
         self.assertIn("No artificial file-count or per-document character cap", INDEX_HTML)
+        self.assertIn("Worker source planning uses a cheap model", INDEX_HTML)
         self.assertIn("Top K is the number of retrieved chunks", INDEX_HTML)
+        self.assertIn('id="usePlanner"', INDEX_HTML)
         self.assertIn("/api/pick-path", INDEX_HTML)
         self.assertIn("/api/plan", INDEX_HTML)
         self.assertIn("Review Plan", INDEX_HTML)
         self.assertIn('id="planPreview"', INDEX_HTML)
+        self.assertIn('id="candidateReview"', INDEX_HTML)
+        self.assertIn('id="applyCheckedCandidates"', INDEX_HTML)
+        self.assertIn('id="selectAllCandidates"', INDEX_HTML)
+        self.assertIn('id="restoreRecommendedCandidates"', INDEX_HTML)
         self.assertIn('id="firstReadPaths"', INDEX_HTML)
         self.assertIn('id="planNote"', INDEX_HTML)
         self.assertIn("function renderPlan", INDEX_HTML)
         self.assertIn("function renderTracePlan", INDEX_HTML)
+        self.assertIn("function renderCandidateReview", INDEX_HTML)
+        self.assertIn("function applyCheckedCandidatePaths", INDEX_HTML)
+        self.assertIn("function formatPlannerSummary", INDEX_HTML)
+        self.assertIn("use_llm_planning", INDEX_HTML)
+        self.assertIn("candidate-check", INDEX_HTML)
         self.assertIn('id="chooseFolder"', INDEX_HTML)
         self.assertIn('id="chooseFiles"', INDEX_HTML)
         self.assertIn("function appendPaths", INDEX_HTML)

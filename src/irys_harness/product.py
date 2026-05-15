@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 import re
@@ -9,6 +10,7 @@ from typing import Any, Callable
 from .config import HarnessConfig
 from .events import EventLogger
 from .indexing import load_documents, retrieve_chunks, tokenize
+from .metrics import ModelCallRecord
 from .models.gemini import GeminiModelRouter
 from .state import BenchmarkTask, RunState
 from .trace import TraceWriter
@@ -31,6 +33,8 @@ SUPPORTED_PRODUCT_EXTENSIONS = {
 }
 
 DEFAULT_PRODUCT_MAX_FILES: int | None = None
+MAX_SOURCE_PLANNER_PATHS = 4000
+MAX_SOURCE_PLANNER_OUTPUT_TOKENS = 4096
 
 
 class ProductRunCancelled(RuntimeError):
@@ -44,6 +48,7 @@ class CorpusScopeDecision:
     reason: str
     signals: dict[str, Any]
     scored_paths: list[dict[str, Any]]
+    model_calls: list[ModelCallRecord] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -52,6 +57,7 @@ class CorpusScopeDecision:
             "reason": self.reason,
             "signals": self.signals,
             "scored_paths": self.scored_paths,
+            "model_calls": [call.to_dict() for call in self.model_calls],
         }
 
 
@@ -92,6 +98,7 @@ def run_product_matter(
     user_nudge: str | None = None,
     selected_paths: list[str] | None = None,
     plan_note: str | None = None,
+    use_llm_planning: bool = False,
     event_callback: Callable[[dict[str, Any]], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> ProductRunResult:
@@ -116,6 +123,8 @@ def run_product_matter(
         paths=corpus_paths,
         selected_paths=selected_paths,
         plan_note=plan_note,
+        config=config,
+        use_llm_planning=use_llm_planning,
     )
     emit_pre_event(
         pre_events,
@@ -142,6 +151,7 @@ def run_product_matter(
             selected_documents=[path.name for path in scope_decision.selected_paths[:12]],
             omitted_document_count=max(0, len(scope_decision.selected_paths) - 12),
             skipped_document_count=len(scope_decision.discovered_paths) - len(scope_decision.selected_paths),
+            planner=scope_decision.signals.get("source_planner", {}).get("status"),
             steer_hint=(
                 "Use a steering note like 'focus on the 2024 10-K' or 'include quarterly reports too' "
                 "if this first-read set is wrong."
@@ -201,6 +211,8 @@ def run_product_matter(
         },
     )
     state = RunState(task=task, config=config, output_dir=str(Path(output_dir) / task_id))
+    for call in scope_decision.model_calls:
+        state.metrics.add_call(call)
     state.events.extend(pre_events)
     log = EventLogger(state, verbose=verbose, event_callback=event_callback)
     log.emit(
@@ -475,6 +487,8 @@ def plan_product_corpus_scope(
     paths: list[Path],
     selected_paths: list[str] | None = None,
     plan_note: str | None = None,
+    config: HarnessConfig | None = None,
+    use_llm_planning: bool = False,
 ) -> CorpusScopeDecision:
     resolved_paths = [path.resolve() for path in paths]
     path_by_key = {str(path).lower(): path for path in resolved_paths}
@@ -495,16 +509,40 @@ def plan_product_corpus_scope(
 
     profile = build_objective_profile(objective, plan_note=plan_note)
     scored = score_corpus_paths(objective, resolved_paths, plan_note=plan_note, profile=profile)
+    model_calls: list[ModelCallRecord] = []
     if not resolved_paths:
         selected = []
     elif profile["force_full_corpus"]:
         selected = resolved_paths
+    elif use_llm_planning and config is not None:
+        selected, planner_profile, planner_calls = plan_with_cheap_source_planner(
+            objective=objective,
+            plan_note=plan_note,
+            paths=resolved_paths,
+            scored_paths=scored,
+            config=config,
+        )
+        profile["source_planner"] = planner_profile
+        model_calls.extend(planner_calls)
     else:
         selected = select_first_read_paths(scored, total_paths=len(resolved_paths), profile=profile)
     if not selected:
         selected = resolved_paths
+    planner_status = (profile.get("source_planner") or {}).get("status")
+    planner_reason = str((profile.get("source_planner") or {}).get("reason") or "").strip()
     if len(selected) == len(resolved_paths):
-        reason = "No confident narrow first-read set was inferable from the objective and corpus structure."
+        if planner_status == "used":
+            reason = (
+                "Worker source planner recommended reading the full selected corpus."
+                + (f" {planner_reason}" if planner_reason else "")
+            )
+        else:
+            reason = "No confident narrow first-read set was inferable from the objective and corpus structure."
+    elif planner_status == "used":
+        reason = (
+            f"Worker source planner selected {len(selected)} of {len(resolved_paths)} discovered document(s)."
+            + (f" {planner_reason}" if planner_reason else "")
+        )
     else:
         reason = explain_scope_reason(profile, selected, len(resolved_paths))
     return CorpusScopeDecision(
@@ -513,6 +551,7 @@ def plan_product_corpus_scope(
         reason=reason,
         signals=profile,
         scored_paths=scored[:80],
+        model_calls=model_calls,
     )
 
 
@@ -524,6 +563,8 @@ def build_product_plan_preview(
     selected_paths: list[str] | None = None,
     plan_note: str | None = None,
     top_k: int = 12,
+    config: HarnessConfig | None = None,
+    use_llm_planning: bool = False,
 ) -> dict[str, Any]:
     corpus_paths = discover_corpus_paths(paths, max_files=max_files)
     if not corpus_paths:
@@ -533,8 +574,12 @@ def build_product_plan_preview(
         paths=corpus_paths,
         selected_paths=selected_paths,
         plan_note=plan_note,
+        config=config,
+        use_llm_planning=use_llm_planning,
     )
     profile = scope.signals
+    planner_needed = (profile.get("source_planner") or {}).get("needed_information") or []
+    needed_information = unique_strings([*infer_needed_information(profile), *planner_needed])
     return {
         "objective": objective.strip(),
         "plan_note": plan_note or "",
@@ -546,11 +591,167 @@ def build_product_plan_preview(
         "not_read_first_count": max(0, len(scope.discovered_paths) - len(scope.selected_paths)),
         "likely_document_families": profile.get("requested_families", []),
         "detected_years": profile.get("years", []),
-        "needed_information": infer_needed_information(profile),
+        "needed_information": needed_information,
         "search_queries": build_path_level_queries(objective, profile),
         "top_candidates": scope.scored_paths[:20],
+        "source_planner": profile.get("source_planner", {"status": "not_requested"}),
+        "planner_metrics": {
+            "estimated_cost": sum(call.estimated_cost for call in scope.model_calls),
+            "total_tokens": sum(call.input_tokens + call.output_tokens for call in scope.model_calls),
+            "model_calls": [call.to_dict() for call in scope.model_calls],
+        },
         "retrieval": {"top_k": top_k},
     }
+
+
+def plan_with_cheap_source_planner(
+    *,
+    objective: str,
+    plan_note: str | None,
+    paths: list[Path],
+    scored_paths: list[dict[str, Any]],
+    config: HarnessConfig,
+) -> tuple[list[Path], dict[str, Any], list[ModelCallRecord]]:
+    if not paths:
+        return [], {"status": "not_run", "reason": "empty corpus"}, []
+    if len(paths) > MAX_SOURCE_PLANNER_PATHS:
+        return [], {
+            "status": "skipped",
+            "reason": f"corpus has {len(paths)} paths, above planner limit {MAX_SOURCE_PLANNER_PATHS}",
+        }, []
+
+    prompt = build_source_planner_prompt(
+        objective=objective,
+        plan_note=plan_note,
+        paths=paths,
+        scored_paths=scored_paths,
+    )
+    try:
+        result = GeminiModelRouter(config).generate(
+            module="product_source_planner",
+            prompt=prompt,
+            temperature=0.0,
+            max_output_tokens=MAX_SOURCE_PLANNER_OUTPUT_TOKENS,
+        )
+        payload = parse_json_object(result.text)
+        selected_paths = resolve_planner_selected_paths(payload, paths)
+        if payload.get("should_read_full_corpus") is True:
+            selected_paths = paths
+        status = "used" if selected_paths else "empty_selection"
+        return selected_paths, {
+            "status": status,
+            "reason": str(payload.get("reason") or payload.get("document_strategy") or ""),
+            "confidence": str(payload.get("confidence") or ""),
+            "should_read_full_corpus": bool(payload.get("should_read_full_corpus")),
+            "selected_count": len(selected_paths),
+            "selected_paths": [str(path) for path in selected_paths],
+            "rejected_paths": [str(item) for item in payload.get("rejected_paths", [])[:50]]
+            if isinstance(payload.get("rejected_paths"), list)
+            else [],
+            "needed_information": [str(item) for item in payload.get("needed_information", [])[:20]]
+            if isinstance(payload.get("needed_information"), list)
+            else [],
+            "raw_response": compact_snippet(result.text, max_chars=4000),
+        }, [result.usage]
+    except Exception as exc:  # noqa: BLE001 - product UI should fall back cleanly if planning fails.
+        return [], {
+            "status": "failed",
+            "reason": f"{type(exc).__name__}: {exc}",
+        }, []
+
+
+def build_source_planner_prompt(
+    *,
+    objective: str,
+    plan_note: str | None,
+    paths: list[Path],
+    scored_paths: list[dict[str, Any]],
+) -> str:
+    inventory_rows = []
+    score_by_path = {str(item.get("path") or ""): item for item in scored_paths}
+    for index, path in enumerate(paths, 1):
+        scored = score_by_path.get(str(path), {})
+        reasons = "; ".join(str(reason) for reason in scored.get("reasons", [])[:4])
+        inventory_rows.append(
+            {
+                "index": index,
+                "path": str(path),
+                "filename": path.name,
+                "suffix": path.suffix.lower(),
+                "deterministic_score": int(scored.get("score") or 0),
+                "deterministic_reasons": reasons,
+            }
+        )
+    return (
+        "You are a cheap worker model helping route a user-defined document corpus before expensive reading.\n"
+        "Decide which files should be read first for the user's objective. Use semantic judgment over path names, "
+        "folder structure, file types, dates, and deterministic hints. Prefer high-quality work product over minimal token use.\n"
+        "If the objective likely requires broad comparison or the path inventory is too ambiguous, set should_read_full_corpus true.\n"
+        "Do not overfit to finance or legal filings; this may be legal, finance, biomedical, governance, email, research, or another document set.\n\n"
+        f"User objective:\n{objective.strip()}\n\n"
+        f"User plan correction:\n{(plan_note or '').strip() or '- None.'}\n\n"
+        "Return JSON only with this shape:\n"
+        "{\n"
+        '  "selected_paths": ["exact path strings from the inventory"],\n'
+        '  "rejected_paths": ["exact path strings that look lower priority"],\n'
+        '  "should_read_full_corpus": false,\n'
+        '  "reason": "short practical explanation",\n'
+        '  "needed_information": ["what the run must find"],\n'
+        '  "confidence": "low|medium|high"\n'
+        "}\n\n"
+        "Path inventory JSON:\n"
+        f"{json.dumps(inventory_rows, indent=2)}"
+    )
+
+
+def parse_json_object(text: str) -> dict[str, Any]:
+    cleaned = str(text or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start >= 0 and end > start:
+        cleaned = cleaned[start : end + 1]
+    parsed = json.loads(cleaned)
+    if not isinstance(parsed, dict):
+        raise ValueError("planner response must be a JSON object")
+    return parsed
+
+
+def resolve_planner_selected_paths(payload: dict[str, Any], paths: list[Path]) -> list[Path]:
+    raw_items = payload.get("selected_paths", [])
+    if not isinstance(raw_items, list):
+        return []
+    by_exact = {str(path).lower(): path for path in paths}
+    by_name: dict[str, list[Path]] = {}
+    for path in paths:
+        by_name.setdefault(path.name.lower(), []).append(path)
+    selected: list[Path] = []
+    for raw_item in raw_items:
+        raw = str(raw_item or "").strip()
+        if not raw:
+            continue
+        match = by_exact.get(raw.lower())
+        if match is None:
+            name_matches = by_name.get(Path(raw).name.lower(), [])
+            if len(name_matches) == 1:
+                match = name_matches[0]
+        if match is not None and match not in selected:
+            selected.append(match)
+    return selected
+
+
+def unique_strings(items: list[Any]) -> list[str]:
+    output: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        text = str(item or "").strip()
+        key = text.lower()
+        if text and key not in seen:
+            output.append(text)
+            seen.add(key)
+    return output
 
 
 def build_objective_profile(objective: str, *, plan_note: str | None = None) -> dict[str, Any]:

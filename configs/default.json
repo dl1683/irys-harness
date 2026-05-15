@@ -28,6 +28,7 @@
     "extraction": "cheap_worker",
     "critic": "mid_orchestrator",
     "verification": "mid_orchestrator",
+    "product_source_planner": "cheap_worker",
     "synthesis": "strong_synthesizer",
     "rendering": "cheap_worker",
     "scoring": "cheap_worker"
