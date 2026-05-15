@@ -23,7 +23,7 @@ from .doctor import run_doctor
 from .env import load_dotenv_if_present
 from .experiments import close_experiment, open_experiment, read_experiment
 from .harvey_pipeline import HarveyPipelineResult, run_harvey_batch
-from .product import DEFAULT_PRODUCT_MAX_FILES, run_product_matter
+from .product import DEFAULT_PRODUCT_MAX_FILES, DEFAULT_PRODUCT_TOP_K, run_product_matter
 from .product_ui import serve_product_ui
 from .state import RunState
 from .trace import TraceWriter, attach_harvey_scores, diagnose_trace, load_trace, save_trace, trace_summary
@@ -99,7 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
     product_run.add_argument("--trace-dir", default="traces/product")
     product_run.add_argument("--output-dir", default="outputs/product")
     product_run.add_argument("--config", default=None)
-    product_run.add_argument("--top-k", type=int, default=12)
+    product_run.add_argument("--top-k", type=int, default=DEFAULT_PRODUCT_TOP_K)
     product_run.add_argument("--max-files", type=int, default=DEFAULT_PRODUCT_MAX_FILES)
     product_run.add_argument("--worker-source-planning", action="store_true")
     product_run.add_argument("--live-synthesis", action="store_true")

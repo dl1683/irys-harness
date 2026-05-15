@@ -11,9 +11,11 @@ import unittest
 from unittest.mock import patch
 from urllib.request import Request, urlopen
 
+from irys_harness.cli import build_parser
 from irys_harness.config import ModelTier, load_config
 from irys_harness.metrics import ModelCallRecord
 from irys_harness.product import (
+    DEFAULT_PRODUCT_TOP_K,
     build_answer_source_map,
     build_metric_selection_notes,
     build_product_evidence_items,
@@ -765,6 +767,12 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn("Advanced run details", INDEX_HTML)
         self.assertNotIn("webkitdirectory", INDEX_HTML)
         self.assertNotIn("function uploadFiles", INDEX_HTML)
+
+    def test_product_run_cli_uses_product_retrieval_default(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(["product-run", "--objective", "What is the issue?", "--path", "matter"])
+
+        self.assertEqual(args.top_k, DEFAULT_PRODUCT_TOP_K)
 
     def test_pick_local_paths_rejects_invalid_mode(self) -> None:
         with self.assertRaises(ValueError):
