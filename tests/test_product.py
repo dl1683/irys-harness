@@ -856,6 +856,7 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn("Current Run Cost", INDEX_HTML)
         self.assertIn("Matter Runs", INDEX_HTML)
         self.assertIn("Conversation History", INDEX_HTML)
+        self.assertIn("Loaded saved run:", INDEX_HTML)
         self.assertIn("Searchable passages:", INDEX_HTML)
         self.assertIn("Passages from this document:", INDEX_HTML)
         self.assertIn("Extract text and source passages", INDEX_HTML)

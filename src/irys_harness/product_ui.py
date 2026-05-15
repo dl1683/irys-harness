@@ -1519,7 +1519,7 @@ INDEX_HTML = r"""<!doctype html>
         if (!response.ok || data.error) throw new Error(data.error || "Trace load failed");
         render(data);
         await refreshTraceList({setStatus: false});
-        status.textContent = $("tracepath").value;
+        status.textContent = `Loaded saved run: ${filenameFromPath($("tracepath").value)}`;
       } catch (error) {
         status.textContent = error.message;
       } finally {
