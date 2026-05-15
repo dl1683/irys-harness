@@ -16,25 +16,51 @@ Implemented:
 - Agent Bench bridge for long-context/document benchmarks;
 - model-call metrics with token and cost accounting;
 - local product matter runner with recursive folder ingestion, multi-chat matter history, live workstream events, source review, and per-message/matter cost totals;
-- editable product plan preview that ranks likely first-read documents from the objective and corpus structure before expensive document loading starts.
+- editable product plan preview that ranks likely first-read documents from the objective and corpus structure before expensive document loading starts;
+- product UI workstream, source-review, held-back-document, rerun-comparison, and steering surfaces for testing matter workflows over local corpora.
 
 ## Benchmark Performance
 
-The table below summarizes recent local Harvey LAB development snapshots. These are development measurements from the local sibling `harvey-labs` evaluator, not a committed benchmark artifact or an official release claim.
+The strongest current signal is Harvey LAB rubric performance. Recent development samples are in the 80-85% overall rubric-pass range, with several practice-area and task-family slices around 90% or better. The harness is also being checked against adjacent long-context, grounding, citation, extraction, and document-QA suites through the Agent Bench bridge so Harvey progress does not become a one-benchmark artifact.
+
+These are local development measurements from the sibling `harvey-labs` evaluator and Agent Bench bridge. They are not official benchmark submissions; refresh them locally before publishing new external claims.
 
 | Run | Scope | Task pass rate | Rubric pass rate |
 |---|---:|---:|---:|
-| `irys-sample-250-reconciliation-patch-v1` | 250 tasks | 16.0% | 84.43% |
+| `irys-sample-250-reconciliation-patch-v1` | 250 tasks | 16.0% | 85.10% |
 | `irys-reconciliation-patch-30-v1` | 30 tasks | 26.67% | 80.36% |
 | `irys-harvey-all-action-source-inventory-v1` | 498 tasks | 3.21% | 73.38% |
 | `irys-harvey-all-bankruptcy-sale-motion-v1` | 1,247 tasks | 3.37% | 70.57% |
+
+Representative high-signal Harvey slices from the 250-task sample:
+
+| Slice | Rubric pass rate |
+|---|---:|
+| White-collar defense and investigations | 91.35% |
+| Corporate governance | 90.72% |
+| Employment and labor | 89.80% |
+| Structured finance and securitization | 89.60% |
+| Funds and asset management | 88.34% |
+
+Representative Agent Bench bridge smokes:
+
+| Suite | Scope | Result |
+|---|---:|---:|
+| NoLiMa | 10 examples | 10/10 passed |
+| FACTS Grounding | 10 examples | 9/10 passed |
+| CUAD | 10 examples | 9/10 passed, 94.71% avg score |
+| L-CiteEval | 2 examples | 2/2 passed |
+| LongBench v2 | 10 examples | 6/10 passed |
 
 Interpretation:
 
 - Harvey LAB task-level pass is strict: every criterion on a task must pass.
 - Rubric pass rate is the more granular signal during development because Harvey tasks often contain dozens of criteria.
+- Some non-passing Harvey tasks are still useful product signals rather than simple source-understanding failures. Trace review distinguishes missing information from drafting-shape misses, exact-rubric formatting misses, and cases where a product answer intentionally avoids redundant repetition that a benchmark rubric expects.
+- The latest 250-task run kept most token volume in the cheap-worker tier while reserving the strongest model for final synthesis; that run averaged about 82% cheap-worker token share and 18% strong-synthesis token share.
 - Raw benchmark outputs, traces, and evaluator artifacts are intentionally ignored by git. Reproduce or refresh numbers locally before publishing new claims.
-- Secondary Agent Bench suites are wired through the bridge, but no public aggregate score is claimed yet in this repository.
+- Secondary Agent Bench suites are wired through the bridge and are used as regression pressure for general long-context behavior. No single aggregate score is claimed yet because the suite mix is intentionally broad and still being calibrated.
+- Active product work is focused on the UI and steering layer: local folder selection, plan inspection, live workstream visibility, source review, held-back document audit, cost display, rerun comparison, and user nudges over matter-specific corpora.
 
 ## Supported Benchmark Surfaces
 
@@ -143,13 +169,13 @@ python -m irys_harness harvey-smoke --split sample250 --workers 24 --score-paral
 Run the configured bridge against the sibling Agent Bench checkout:
 
 ```bash
-python -m irys_harness agent-bench --agent-bench-root ../agent-bench --benchmark-workers 4
+python -m irys_harness agent-bench-smoke --agent-bench-root ../agent-bench --benchmark-workers 4
 ```
 
 Use `--benchmark` repeatedly to target specific suites:
 
 ```bash
-python -m irys_harness agent-bench --agent-bench-root ../agent-bench --benchmark docfinqa:train --benchmark l_citeeval:test
+python -m irys_harness agent-bench-smoke --agent-bench-root ../agent-bench --benchmark docfinqa:train --benchmark l_citeeval:test
 ```
 
 ## Product Matter Runner
