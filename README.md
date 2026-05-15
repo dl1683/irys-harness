@@ -198,7 +198,7 @@ The product UI supports:
 - recursive local folder paths;
 - optional worker source planning that reviews the file inventory before first read and falls back to deterministic path scoring if model planning is unavailable;
 - editable first-read plan preview before a run, with stale or missing plans shown for review before execution starts;
-- steering-note plan preview before a rerun, so users can inspect changed source focus before applying it;
+- steering-note plan preview before a rerun, with stale or missing nudge plans shown for review before applying them;
 - first-read audit showing documents that were held back and one-click controls to read them in the next pass;
 - live workstream events while the run is active;
 - source review, open-question summaries, and source-ignore steering for the next pass;

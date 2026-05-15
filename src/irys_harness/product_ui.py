@@ -1299,6 +1299,13 @@ INDEX_HTML = r"""<!doctype html>
       rerunTrace.disabled = true;
       status.textContent = "Rerunning";
       try {
+        if (rerunPlanNeedsRefresh()) {
+          const plan = await requestRerunPlan();
+          currentPlan = plan;
+          renderPlan(plan, {mode: "rerun", pathKey: rerunPlanPathKey()});
+          status.textContent = "Nudge plan ready. Review first-read documents, then click Apply Nudge again.";
+          return;
+        }
         const response = await fetch("/api/rerun-async", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
@@ -1333,23 +1340,7 @@ INDEX_HTML = r"""<!doctype html>
       previewNudgePlan.disabled = true;
       status.textContent = "Previewing nudge plan";
       try {
-        const response = await fetch("/api/rerun-plan", {
-          method: "POST",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({
-            trace_path: $("tracepath").value,
-            nudge: $("nudge").value,
-            paths: pathPayload($("rerunPaths").value),
-            use_llm_planning: $("usePlanner").checked,
-            top_k: Number($("topk").value || 12),
-            selected_paths: firstReadPathsDirty ? pathPayload($("firstReadPaths").value) : [],
-            selected_paths_locked: firstReadPathsDirty,
-            excluded_paths: excludedSourcePaths,
-            plan_note: $("planNote").value
-          })
-        });
-        const plan = await response.json();
-        if (!response.ok || plan.error) throw new Error(plan.error || "Nudge plan failed");
+        const plan = await requestRerunPlan();
         currentPlan = plan;
         renderPlan(plan, {mode: "rerun", pathKey: rerunPlanPathKey()});
         status.textContent = `Nudge plan ready: ${plan.first_read_count || 0} first-read document(s)`;
@@ -1411,6 +1402,26 @@ INDEX_HTML = r"""<!doctype html>
       if (!response.ok || data.error) throw new Error(data.error || "Plan failed");
       return data;
     }
+    async function requestRerunPlan() {
+      const response = await fetch("/api/rerun-plan", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          trace_path: $("tracepath").value,
+          nudge: $("nudge").value,
+          paths: pathPayload($("rerunPaths").value),
+          use_llm_planning: $("usePlanner").checked,
+          top_k: Number($("topk").value || 12),
+          selected_paths: firstReadPathsDirty ? pathPayload($("firstReadPaths").value) : [],
+          selected_paths_locked: firstReadPathsDirty,
+          excluded_paths: excludedSourcePaths,
+          plan_note: $("planNote").value
+        })
+      });
+      const plan = await response.json();
+      if (!response.ok || plan.error) throw new Error(plan.error || "Nudge plan failed");
+      return plan;
+    }
     function renderPlan(plan, {mode = "initial", pathKey = initialPlanPathKey()} = {}) {
       const firstRead = plan.first_read_paths || [];
       setFirstReadPaths(firstRead, {dirty: false});
@@ -1448,7 +1459,16 @@ INDEX_HTML = r"""<!doctype html>
       return pathPayload($("paths").value).join("\n");
     }
     function rerunPlanPathKey() {
-      return [String($("tracepath").value || ""), pathPayload($("rerunPaths").value).join("\n")].join("\n---\n");
+      return [
+        String($("tracepath").value || ""),
+        String($("nudge").value || ""),
+        pathPayload($("rerunPaths").value).join("\n"),
+        String($("planNote").value || ""),
+        excludedSourcePaths.join("\n")
+      ].join("\n---\n");
+    }
+    function rerunPlanNeedsRefresh() {
+      return currentPlanMode !== "rerun" || currentPlanPathKey !== rerunPlanPathKey();
     }
     function renderTracePlan(metadata, trace = null) {
       const scope = metadata.corpus_scope_decision || null;
