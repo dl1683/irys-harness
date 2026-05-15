@@ -40,7 +40,7 @@ Serve the local product UI:
 python -m irys_harness product-ui --host 127.0.0.1 --port 8765
 ```
 
-The product UI supports file and folder uploads, matter/chat trace listing, per-message cost, and matter-level cost totals.
+The product UI supports recursive local folder paths, matter/chat trace listing, per-message cost, and matter-level cost totals.
 
 Open and close a local experiment record:
 

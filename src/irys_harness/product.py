@@ -29,6 +29,8 @@ SUPPORTED_PRODUCT_EXTENSIONS = {
     ".xlsx",
 }
 
+DEFAULT_PRODUCT_MAX_FILES: int | None = None
+
 
 @dataclass(frozen=True)
 class ProductRunResult:
@@ -60,8 +62,8 @@ def run_product_matter(
     output_dir: str | Path = "outputs/product",
     live_synthesis: bool = False,
     top_k: int = 12,
-    max_files: int = 80,
-    max_chars_per_doc: int | None = 200_000,
+    max_files: int | None = DEFAULT_PRODUCT_MAX_FILES,
+    max_chars_per_doc: int | None = None,
     verbose: bool = True,
     parent_trace_path: str | None = None,
     user_nudge: str | None = None,
@@ -200,7 +202,7 @@ def run_product_matter(
     return ProductRunResult(state=state, trace_path=trace_path)
 
 
-def discover_corpus_paths(paths: list[str], *, max_files: int = 80) -> list[Path]:
+def discover_corpus_paths(paths: list[str], *, max_files: int | None = DEFAULT_PRODUCT_MAX_FILES) -> list[Path]:
     discovered: list[Path] = []
     seen: set[Path] = set()
     for raw in paths:
@@ -218,7 +220,7 @@ def discover_corpus_paths(paths: list[str], *, max_files: int = 80) -> list[Path
                 continue
             seen.add(resolved)
             discovered.append(resolved)
-            if len(discovered) >= max_files:
+            if max_files is not None and len(discovered) >= max_files:
                 return discovered
     return discovered
 

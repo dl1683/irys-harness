@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 import base64
+from http.server import ThreadingHTTPServer
+import json
+import threading
 from tempfile import TemporaryDirectory
 import unittest
+from urllib.request import Request, urlopen
 
 from irys_harness.config import load_config
 from irys_harness.product import (
@@ -16,6 +20,7 @@ from irys_harness.product import (
 )
 from irys_harness.product_ui import (
     INDEX_HTML,
+    build_handler,
     list_product_traces,
     parse_paths,
     rerun_from_trace,
@@ -39,6 +44,16 @@ class ProductMatterTests(unittest.TestCase):
             paths = discover_corpus_paths([str(root)])
 
         self.assertEqual([path.name for path in paths], ["contract.txt"])
+
+    def test_discover_corpus_paths_default_handles_large_matter_folder(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for index in range(90):
+                (root / f"doc-{index:03d}.txt").write_text("matter document", encoding="utf-8")
+
+            paths = discover_corpus_paths([str(root)])
+
+        self.assertEqual(len(paths), 90)
 
     def test_run_product_matter_writes_trace_over_user_corpus(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -94,6 +109,27 @@ class ProductMatterTests(unittest.TestCase):
             self.assertEqual(trace["diagnosis"]["status"], "needs_attention")
             self.assertEqual(trace["diagnosis"]["evidence_count"], 0)
             self.assertIn("No chunks matched the objective", trace["final_packet"]["unresolved"][0])
+
+    def test_run_product_matter_does_not_truncate_local_documents_by_default(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            marker = "UNTRUNCATED_MARKER_NOTICE_CURE"
+            doc = root / "large_agreement.txt"
+            doc.write_text(("A" * 210_000) + f" {marker}", encoding="utf-8")
+
+            result = run_product_matter(
+                objective=marker,
+                paths=[str(doc)],
+                matter_id="Large Matter",
+                config=load_config(),
+                trace_dir=root / "traces",
+                live_synthesis=False,
+                verbose=False,
+            )
+            trace = result.state.to_trace()
+
+            self.assertGreater(trace["documents"][0]["text_chars"], 200_000)
+            self.assertIn(marker, trace["rendered_answer"])
 
     def test_sanitize_matter_id_is_path_safe(self) -> None:
         self.assertEqual(sanitize_matter_id("Client / Matter: 01"), "Client-Matter-01")
@@ -175,7 +211,55 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn("/api/traces", INDEX_HTML)
         self.assertIn('id="matterCost"', INDEX_HTML)
         self.assertIn('id="matterMessages"', INDEX_HTML)
-        self.assertIn("webkitdirectory", INDEX_HTML)
+        self.assertIn("function pathPayload", INDEX_HTML)
+        self.assertIn("Paste local file or folder paths", INDEX_HTML)
+        self.assertIn("No artificial file-count or per-document character cap", INDEX_HTML)
+        self.assertIn("Top K is the number of retrieved chunks", INDEX_HTML)
+        self.assertNotIn("webkitdirectory", INDEX_HTML)
+        self.assertNotIn("function uploadFiles", INDEX_HTML)
+
+    def test_upload_endpoint_saves_files_before_run(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trace_dir = root / "traces"
+            output_dir = root / "outputs"
+            handler = build_handler(
+                config=load_config(),
+                trace_dir=trace_dir,
+                output_dir=output_dir,
+            )
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                payload = {
+                    "matter_id": "Upload Matter",
+                    "uploads": [
+                        {
+                            "filename": "agreement.txt",
+                            "relative_path": "folder/sub/agreement.txt",
+                            "content_base64": base64.b64encode(b"notice and cure").decode("ascii"),
+                        }
+                    ],
+                }
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/upload",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(request, timeout=5) as response:  # noqa: S310 - local test server.
+                    data = json.loads(response.read().decode("utf-8"))
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            self.assertEqual(data["count"], 1)
+            saved = Path(data["paths"][0])
+            self.assertTrue(saved.exists())
+            self.assertEqual(saved.read_text(encoding="utf-8"), "notice and cure")
+            self.assertEqual(saved.relative_to(output_dir / "_uploads" / "Upload-Matter"), Path("folder") / "sub" / "agreement.txt")
 
     def test_list_product_traces_filters_by_matter_and_chat(self) -> None:
         with TemporaryDirectory() as tmp:

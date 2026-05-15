@@ -15,9 +15,6 @@ from .product import compare_product_traces, run_product_matter, sanitize_matter
 from .trace import load_trace, trace_summary
 
 
-MAX_UPLOAD_BYTES = 25_000_000
-
-
 def serve_product_ui(
     *,
     host: str,
@@ -93,11 +90,24 @@ def build_handler(
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib handler API.
             parsed = urlparse(self.path)
-            if parsed.path not in {"/api/run", "/api/rerun"}:
+            if parsed.path not in {"/api/run", "/api/rerun", "/api/upload"}:
                 self.send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
                 return
             try:
                 payload = self.read_json()
+                if parsed.path == "/api/upload":
+                    matter_id = str(payload.get("matter_id", "matter"))
+                    upload_paths = save_uploaded_files(
+                        payload.get("uploads", []),
+                        upload_root=Path(output_dir) / "_uploads" / sanitize_matter_id(matter_id),
+                    )
+                    self.send_json(
+                        {
+                            "paths": [str(path) for path in upload_paths],
+                            "count": len(upload_paths),
+                        }
+                    )
+                    return
                 if parsed.path == "/api/rerun":
                     response = rerun_from_trace(
                         payload,
@@ -125,7 +135,7 @@ def build_handler(
                     output_dir=output_dir,
                     live_synthesis=bool(payload.get("live_synthesis", False)),
                     top_k=int(payload.get("top_k", 12) or 12),
-                    max_files=int(payload.get("max_files", 80) or 80),
+                    max_files=parse_optional_int(payload.get("max_files")),
                     verbose=False,
                 )
                 response = result.to_dict()
@@ -207,7 +217,7 @@ def rerun_from_trace(
         output_dir=output_dir,
         live_synthesis=bool(payload.get("live_synthesis", False)),
         top_k=int(payload.get("top_k", 12) or 12),
-        max_files=int(payload.get("max_files", 80) or 80),
+        max_files=parse_optional_int(payload.get("max_files")),
         verbose=False,
         parent_trace_path=str(parent_path),
         user_nudge=nudge,
@@ -224,6 +234,13 @@ def parse_paths(raw_paths: Any) -> list[str]:
     if isinstance(raw_paths, str):
         return [line.strip() for line in raw_paths.splitlines() if line.strip()]
     return [str(item).strip() for item in raw_paths or [] if str(item).strip()]
+
+
+def parse_optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    parsed = int(value)
+    return parsed if parsed > 0 else None
 
 
 def conversation_history_for_rerun(parent: dict[str, Any]) -> list[dict[str, str]]:
@@ -345,8 +362,6 @@ def save_uploaded_files(raw_uploads: Any, *, upload_root: str | Path) -> list[Pa
             data = base64.b64decode(encoded, validate=True)
         except Exception as exc:  # noqa: BLE001 - normalize base64 parser errors.
             raise ValueError(f"upload {upload_path} is not valid base64") from exc
-        if len(data) > MAX_UPLOAD_BYTES:
-            raise ValueError(f"upload {upload_path} exceeds {MAX_UPLOAD_BYTES} bytes")
         target = unique_upload_path(root / upload_path.parent, upload_path.name)
         target.write_bytes(data)
         paths.append(target)
@@ -579,18 +594,21 @@ INDEX_HTML = r"""<!doctype html>
   <main>
     <section>
       <h2>Matter</h2>
+      <div class="item">
+        <strong>How to use this test UI</strong>
+        <small>
+          Paste local file or folder paths into Corpus Paths, one per line. Local folders are read recursively and are the intended way to test large matters on this machine. No artificial file-count or per-document character cap is applied to local Corpus Paths. Matter ID groups saved runs and costs. Chat ID separates parallel conversations inside the same matter. Live synthesis calls the configured Gemini models; when it is off, the UI produces a deterministic preview without model cost. Top K is the number of retrieved chunks used for the evidence packet. Message Cost is the loaded run; Matter Cost totals saved traces for the matter.
+        </small>
+      </div>
       <label for="matter">Matter ID</label>
       <input id="matter" value="local-matter" />
       <label for="chat">Chat ID</label>
       <input id="chat" value="main" />
       <label for="paths">Corpus Paths</label>
       <textarea id="paths" spellcheck="false"></textarea>
-      <label for="files">Corpus Files</label>
-      <input id="files" type="file" multiple />
-      <label for="folders">Corpus Folders</label>
-      <input id="folders" type="file" webkitdirectory directory multiple />
       <div class="row">
         <label class="toggle"><input id="live" type="checkbox" /> Live synthesis</label>
+        <label for="topk">Top K</label>
         <input id="topk" type="number" min="1" max="50" value="12" />
       </div>
       <div class="row">
@@ -626,10 +644,6 @@ INDEX_HTML = r"""<!doctype html>
       <textarea id="nudge"></textarea>
       <label for="rerunPaths">Additional Corpus Paths</label>
       <textarea id="rerunPaths"></textarea>
-      <label for="rerunFiles">Additional Corpus Files</label>
-      <input id="rerunFiles" type="file" multiple />
-      <label for="rerunFolders">Additional Corpus Folders</label>
-      <input id="rerunFolders" type="file" webkitdirectory directory multiple />
       <div class="row">
         <button class="secondary" id="rerunTrace">Rerun</button>
       </div>
@@ -661,15 +675,11 @@ INDEX_HTML = r"""<!doctype html>
     let conversationByChat = {};
     $("clear").addEventListener("click", () => {
       $("objective").value = "";
-      $("files").value = "";
-      $("folders").value = "";
       $("answer").innerHTML = "";
       $("chatHistory").innerHTML = "";
       $("tracepath").value = "";
       $("nudge").value = "";
       $("rerunPaths").value = "";
-      $("rerunFiles").value = "";
-      $("rerunFolders").value = "";
       $("diagnosis").innerHTML = "";
       $("traceList").innerHTML = "";
       $("comparison").innerHTML = "";
@@ -684,18 +694,13 @@ INDEX_HTML = r"""<!doctype html>
       run.disabled = true;
       status.textContent = "Running";
       try {
-        const uploads = [
-          ...(await readUploads($("files").files)),
-          ...(await readUploads($("folders").files))
-        ];
         const response = await fetch("/api/run", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify({
             matter_id: $("matter").value,
             chat_id: $("chat").value,
-            paths: $("paths").value,
-            uploads,
+            paths: pathPayload($("paths").value),
             objective: $("objective").value,
             conversation_history: activeConversationHistory(),
             live_synthesis: $("live").checked,
@@ -745,10 +750,6 @@ INDEX_HTML = r"""<!doctype html>
       rerunTrace.disabled = true;
       status.textContent = "Rerunning";
       try {
-        const uploads = [
-          ...(await readUploads($("rerunFiles").files)),
-          ...(await readUploads($("rerunFolders").files))
-        ];
         const response = await fetch("/api/rerun", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
@@ -756,8 +757,7 @@ INDEX_HTML = r"""<!doctype html>
             trace_path: $("tracepath").value,
             nudge: $("nudge").value,
             chat_id: $("chat").value,
-            paths: $("rerunPaths").value,
-            uploads,
+            paths: pathPayload($("rerunPaths").value),
             live_synthesis: $("live").checked,
             top_k: Number($("topk").value || 12)
           })
@@ -774,27 +774,9 @@ INDEX_HTML = r"""<!doctype html>
         rerunTrace.disabled = false;
       }
     });
-    async function readUploads(fileList) {
-      const files = Array.from(fileList || []);
-      const uploads = [];
-      for (const file of files) {
-        const dataUrl = await readAsDataUrl(file);
-        const comma = dataUrl.indexOf(",");
-        uploads.push({
-          filename: file.name,
-          relative_path: file.webkitRelativePath || file.name,
-          content_base64: comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl
-        });
-      }
-      return uploads;
-    }
-    function readAsDataUrl(file) {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result || ""));
-        reader.onerror = () => reject(reader.error || new Error("File read failed"));
-        reader.readAsDataURL(file);
-      });
+    function pathPayload(pathText) {
+      const paths = String(pathText || "").split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+      return paths;
     }
     document.addEventListener("click", (event) => {
       const target = event.target;
