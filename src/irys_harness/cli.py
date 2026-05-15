@@ -66,6 +66,14 @@ def build_parser() -> argparse.ArgumentParser:
     diagnose_scores.add_argument("--scores", required=True)
     diagnose_scores.set_defaults(func=cmd_diagnose_scores)
 
+    harvey_scores_summary = sub.add_parser(
+        "summarize-harvey-scores",
+        help="Summarize a Harvey LAB results directory containing scores.json files",
+    )
+    harvey_scores_summary.add_argument("--scores-dir", required=True)
+    harvey_scores_summary.add_argument("--limit", type=int, default=10)
+    harvey_scores_summary.set_defaults(func=cmd_summarize_harvey_scores)
+
     attach_scores = sub.add_parser("attach-scores", help="Attach a benchmark scores.json file to a trace")
     attach_scores.add_argument("--trace", required=True)
     attach_scores.add_argument("--scores", required=True)
@@ -245,6 +253,79 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
 def cmd_diagnose_scores(args: argparse.Namespace) -> int:
     print_json(diagnose_harvey_scores_file(args.scores))
     return 0
+
+
+def cmd_summarize_harvey_scores(args: argparse.Namespace) -> int:
+    print_json(summarize_harvey_scores(args.scores_dir, limit=args.limit))
+    return 0
+
+
+def summarize_harvey_scores(scores_dir: str | Path, *, limit: int = 10) -> dict[str, Any]:
+    root = Path(scores_dir)
+    rows: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    for scores_path in sorted(root.rglob("scores.json")) if root.exists() else []:
+        try:
+            with scores_path.open("r", encoding="utf-8") as handle:
+                scores = json.load(handle)
+            total = int(scores.get("n_criteria") or 0)
+            passed = int(scores.get("n_passed") or 0)
+            if total <= 0:
+                continue
+            task = str(scores.get("task") or scores_path.parent.name)
+            practice_area = task.split("/", 1)[0] if "/" in task else ""
+            rows.append(
+                {
+                    "task": task,
+                    "practice_area": practice_area,
+                    "n_passed": passed,
+                    "n_criteria": total,
+                    "rubric_pass_rate": passed / total,
+                    "scores_path": str(scores_path),
+                    "judge_model": scores.get("judge_model"),
+                    "scored_at": scores.get("scored_at"),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - summarize all readable scores while reporting bad files.
+            errors.append({"scores_path": str(scores_path), "error": f"{type(exc).__name__}: {exc}"})
+
+    raw_passed = sum(int(row["n_passed"]) for row in rows)
+    raw_total = sum(int(row["n_criteria"]) for row in rows)
+    macro = sum(float(row["rubric_pass_rate"]) for row in rows) / len(rows) if rows else 0.0
+    area_buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        area_buckets[str(row.get("practice_area") or "unknown")].append(row)
+    practice_areas = []
+    for area, area_rows in sorted(area_buckets.items()):
+        area_passed = sum(int(row["n_passed"]) for row in area_rows)
+        area_total = sum(int(row["n_criteria"]) for row in area_rows)
+        practice_areas.append(
+            {
+                "practice_area": area,
+                "tasks": len(area_rows),
+                "n_passed": area_passed,
+                "n_criteria": area_total,
+                "raw_rubric_pass_rate": area_passed / area_total if area_total else 0.0,
+                "macro_rubric_pass_rate": sum(float(row["rubric_pass_rate"]) for row in area_rows) / len(area_rows),
+            }
+        )
+
+    return {
+        "scores_dir": str(root),
+        "scored_tasks": len(rows),
+        "n_passed": raw_passed,
+        "n_criteria": raw_total,
+        "raw_rubric_pass_rate": raw_passed / raw_total if raw_total else 0.0,
+        "macro_rubric_pass_rate": macro,
+        "worst_tasks": sorted(rows, key=lambda row: (float(row["rubric_pass_rate"]), str(row["task"])))[:limit],
+        "best_tasks": sorted(rows, key=lambda row: (-float(row["rubric_pass_rate"]), str(row["task"])))[:limit],
+        "practice_areas": sorted(
+            practice_areas,
+            key=lambda row: (float(row["macro_rubric_pass_rate"]), str(row["practice_area"])),
+        ),
+        "errors": errors[:limit],
+        "error_count": len(errors),
+    }
 
 
 def cmd_attach_scores(args: argparse.Namespace) -> int:

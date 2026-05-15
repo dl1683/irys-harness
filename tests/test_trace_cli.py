@@ -15,6 +15,7 @@ from irys_harness.cli import (
     read_task_file,
     refresh_harvey_diagnostics,
     resolve_harvey_smoke_task_ids,
+    summarize_harvey_scores,
     token_share,
     write_harvey_batch_tracking,
 )
@@ -64,6 +65,46 @@ class TraceCliTests(unittest.TestCase):
         self.assertTrue(diagnosis["failed"])
         self.assertIn("trace_incomplete", diagnosis["failure_tags"])
         self.assertEqual(diagnosis["suspected_module"], "trace_writer")
+
+    def test_summarize_harvey_scores_reports_partial_results(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "area-a--task-one"
+            second = root / "area-b--task-two"
+            first.mkdir()
+            second.mkdir()
+            first.joinpath("scores.json").write_text(
+                json.dumps(
+                    {
+                        "task": "area-a/task-one",
+                        "n_passed": 8,
+                        "n_criteria": 10,
+                        "judge_model": "judge",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            second.joinpath("scores.json").write_text(
+                json.dumps(
+                    {
+                        "task": "area-b/task-two",
+                        "n_passed": 2,
+                        "n_criteria": 5,
+                        "judge_model": "judge",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            summary = summarize_harvey_scores(root, limit=1)
+
+            self.assertEqual(summary["scored_tasks"], 2)
+            self.assertEqual(summary["n_passed"], 10)
+            self.assertEqual(summary["n_criteria"], 15)
+            self.assertAlmostEqual(summary["raw_rubric_pass_rate"], 10 / 15)
+            self.assertAlmostEqual(summary["macro_rubric_pass_rate"], 0.6)
+            self.assertEqual(summary["worst_tasks"][0]["task"], "area-b/task-two")
+            self.assertEqual(summary["practice_areas"][0]["practice_area"], "area-b")
 
     def test_compare_run_dirs_reports_rubric_deltas(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
