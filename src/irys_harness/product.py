@@ -177,6 +177,10 @@ def run_product_matter(
         state.rendered_answer = state.draft_answer
         log.emit("SYNTH", "generated deterministic preview")
 
+    state.final_packet["answer_source_map"] = build_answer_source_map(
+        state.rendered_answer or "",
+        state.final_packet.get("verified_evidence", []),
+    )
     state.diagnosis = build_product_diagnosis(state)
     trace_path = TraceWriter(trace_dir).write(state)
     log.emit("SAVE", "trace saved", trace=str(trace_path))
@@ -292,6 +296,7 @@ def build_product_diagnosis(state: RunState) -> dict[str, Any]:
     if state.retrieval_iterations:
         retrieved = list(state.retrieval_iterations[-1].get("retrieved_chunks", []) or [])
     evidence = list(packet.get("verified_evidence", []) or [])
+    source_map = list(packet.get("answer_source_map", []) or [])
     unresolved = list(packet.get("unresolved", []) or [])
     load_errors = [doc for doc in state.documents if doc.get("load_error")]
     status = "ready_for_review"
@@ -305,12 +310,14 @@ def build_product_diagnosis(state: RunState) -> dict[str, Any]:
         "chunk_count": len(state.chunks),
         "retrieved_chunk_count": len(retrieved),
         "evidence_count": len(evidence),
+        "answer_source_map_count": len(source_map),
         "unresolved_count": len(unresolved),
         "unresolved": unresolved,
         "supporting_trace_refs": [
             {"path": "documents", "reason": "Active user corpus and load errors."},
             {"path": "retrieval_iterations[-1].retrieved_chunks", "reason": "Chunks selected from the corpus."},
             {"path": "final_packet.verified_evidence", "reason": "Evidence passed to synthesis or preview."},
+            {"path": "final_packet.answer_source_map", "reason": "Answer sections linked back to cited evidence."},
             {"path": "final_packet.unresolved", "reason": "Gaps that should be resolved before relying on output."},
         ],
     }
@@ -449,6 +456,52 @@ Return:
 - CONDITIONS_OR_REQUIREMENTS: notice, timing, approval, threshold, document, or procedural requirements.
 - GAPS: facts missing from the corpus that the drafter should not invent.
 - DRAFTING_NOTES: constraints for a clean user-facing answer."""
+
+
+def build_answer_source_map(answer: str, evidence_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    evidence_by_ref: dict[str, dict[str, Any]] = {}
+    for item in evidence_items:
+        source = item.get("source") or {}
+        for ref in [source.get("doc_id"), source.get("chunk_id")]:
+            if ref:
+                evidence_by_ref[str(ref)] = item
+    rows: list[dict[str, Any]] = []
+    for index, section in enumerate(split_answer_sections(answer), 1):
+        refs = sorted(set(re.findall(r"doc_\d{4}(?:_chunk_\d{4})?", section)))
+        if not refs:
+            continue
+        support = []
+        for ref in refs:
+            item = evidence_by_ref.get(ref)
+            if item is None and "_chunk_" in ref:
+                item = evidence_by_ref.get(ref.split("_chunk_", 1)[0])
+            if item is None:
+                continue
+            source = item.get("source") or {}
+            support.append(
+                {
+                    "ref": ref,
+                    "doc_id": source.get("doc_id"),
+                    "chunk_id": source.get("chunk_id"),
+                    "support": compact_compare_text(item.get("raw_support")),
+                }
+            )
+        rows.append(
+            {
+                "section_index": index,
+                "answer_excerpt": compact_compare_text(section, max_chars=420),
+                "source_refs": refs,
+                "support": support,
+            }
+        )
+    return rows
+
+
+def split_answer_sections(answer: str) -> list[str]:
+    sections = [section.strip() for section in re.split(r"\n\s*\n", answer or "") if section.strip()]
+    if len(sections) <= 1:
+        sections = [line.strip() for line in (answer or "").splitlines() if line.strip()]
+    return sections
 
 
 def build_deterministic_product_answer(state: RunState) -> str:

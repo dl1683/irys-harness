@@ -492,6 +492,8 @@ INDEX_HTML = r"""<!doctype html>
       <div class="list" id="documents"></div>
       <h2 style="margin-top:16px">Evidence</h2>
       <div class="list" id="evidence"></div>
+      <h2 style="margin-top:16px">Answer Sources</h2>
+      <div class="list" id="answerSources"></div>
     </section>
   </main>
   <script>
@@ -513,6 +515,7 @@ INDEX_HTML = r"""<!doctype html>
       $("events").innerHTML = "";
       $("documents").innerHTML = "";
       $("evidence").innerHTML = "";
+      $("answerSources").innerHTML = "";
       status.textContent = "";
     });
     run.addEventListener("click", async () => {
@@ -634,6 +637,11 @@ INDEX_HTML = r"""<!doctype html>
       $("evidence").innerHTML = evidence.map(item => card(
         item.claim || "Evidence",
         (item.raw_support || "") + "\n" + JSON.stringify(item.source || {}, null, 2)
+      )).join("");
+      const answerSources = ((trace.final_packet || {}).answer_source_map || []);
+      $("answerSources").innerHTML = answerSources.map(item => card(
+        "Section " + (item.section_index || ""),
+        (item.answer_excerpt || "") + "\n" + JSON.stringify(item.source_refs || [], null, 2)
       )).join("");
     }
     function card(title, body) {

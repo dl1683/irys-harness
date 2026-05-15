@@ -6,8 +6,14 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from irys_harness.config import load_config
-from irys_harness.product import compare_product_traces, discover_corpus_paths, run_product_matter, sanitize_matter_id
-from irys_harness.product import build_product_synthesis_prompt
+from irys_harness.product import (
+    build_answer_source_map,
+    build_product_synthesis_prompt,
+    compare_product_traces,
+    discover_corpus_paths,
+    run_product_matter,
+    sanitize_matter_id,
+)
 from irys_harness.product_ui import (
     parse_paths,
     rerun_from_trace,
@@ -59,6 +65,7 @@ class ProductMatterTests(unittest.TestCase):
             self.assertIn("10 day cure period", trace["rendered_answer"])
             self.assertEqual(trace["diagnosis"]["status"], "ready_for_review")
             self.assertEqual(trace["diagnosis"]["evidence_count"], 1)
+            self.assertGreaterEqual(trace["diagnosis"]["answer_source_map_count"], 1)
 
     def test_run_product_matter_flags_no_matching_evidence(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -221,6 +228,21 @@ class ProductMatterTests(unittest.TestCase):
 
             self.assertIn("Worker analysis:", prompt)
             self.assertIn("MATERIAL_FACTS: payment default cure is 5 days.", prompt)
+
+    def test_build_answer_source_map_links_answer_sections_to_evidence(self) -> None:
+        evidence = [
+            {
+                "raw_support": "The payment default cure period is 5 business days after notice.",
+                "source": {"doc_id": "doc_0001", "chunk_id": "doc_0001_chunk_0000"},
+            }
+        ]
+        answer = "Payment default has a 5 business day cure period (doc_0001_chunk_0000)."
+
+        source_map = build_answer_source_map(answer, evidence)
+
+        self.assertEqual(len(source_map), 1)
+        self.assertEqual(source_map[0]["source_refs"], ["doc_0001_chunk_0000"])
+        self.assertEqual(source_map[0]["support"][0]["doc_id"], "doc_0001")
 
     def test_compare_product_traces_reports_evidence_and_metric_deltas(self) -> None:
         parent = {
