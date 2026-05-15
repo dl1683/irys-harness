@@ -5,12 +5,18 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import threading
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from uuid import uuid4
 
 from .config import HarnessConfig
 from .product import compare_product_traces, run_product_matter, sanitize_matter_id
 from .trace import load_trace, trace_summary
+
+
+RUN_JOBS: dict[str, dict[str, Any]] = {}
+RUN_JOBS_LOCK = threading.Lock()
 
 
 def serve_product_ui(
@@ -43,6 +49,14 @@ def build_handler(
                 return
             if parsed.path == "/api/health":
                 self.send_json({"ok": True})
+                return
+            if parsed.path == "/api/run-status":
+                query = parse_qs(parsed.query)
+                job_id = query.get("job_id", [""])[0]
+                try:
+                    self.send_json(snapshot_run_job(job_id))
+                except Exception as exc:  # noqa: BLE001 - UI endpoint should return structured error.
+                    self.send_json({"error": f"{type(exc).__name__}: {exc}"}, status=HTTPStatus.BAD_REQUEST)
                 return
             if parsed.path == "/api/trace":
                 query = parse_qs(parsed.query)
@@ -88,7 +102,7 @@ def build_handler(
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib handler API.
             parsed = urlparse(self.path)
-            if parsed.path not in {"/api/run", "/api/rerun", "/api/pick-path"}:
+            if parsed.path not in {"/api/run", "/api/run-async", "/api/rerun", "/api/rerun-async", "/api/pick-path"}:
                 self.send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
                 return
             try:
@@ -101,6 +115,28 @@ def build_handler(
                                 initial_dir=str(payload.get("initial_dir") or ""),
                             )
                         }
+                    )
+                    return
+                if parsed.path == "/api/run-async":
+                    self.send_json(
+                        start_product_run_job(
+                            payload,
+                            mode="run",
+                            config=config,
+                            trace_dir=trace_dir,
+                            output_dir=output_dir,
+                        )
+                    )
+                    return
+                if parsed.path == "/api/rerun-async":
+                    self.send_json(
+                        start_product_run_job(
+                            payload,
+                            mode="rerun",
+                            config=config,
+                            trace_dir=trace_dir,
+                            output_dir=output_dir,
+                        )
                     )
                     return
                 if parsed.path == "/api/rerun":
@@ -167,12 +203,135 @@ def build_handler(
     return ProductUIHandler
 
 
+def start_product_run_job(
+    payload: dict[str, Any],
+    *,
+    mode: str,
+    config: HarnessConfig,
+    trace_dir: str | Path,
+    output_dir: str | Path,
+) -> dict[str, Any]:
+    job_id = f"job_{uuid4().hex[:12]}"
+    job = {
+        "job_id": job_id,
+        "mode": mode,
+        "status": "running",
+        "started_at": datetime.now(UTC).isoformat(),
+        "events": [],
+        "result": None,
+        "error": None,
+    }
+    with RUN_JOBS_LOCK:
+        RUN_JOBS[job_id] = job
+        prune_run_jobs_locked()
+    append_run_job_event(job_id, "RUN", "queued product matter run", mode=mode)
+
+    def event_callback(event: dict[str, Any]) -> None:
+        append_run_job_event(job_id, event=event)
+
+    def worker() -> None:
+        try:
+            if mode == "rerun":
+                response = rerun_from_trace(
+                    payload,
+                    config=config,
+                    trace_dir=trace_dir,
+                    output_dir=output_dir,
+                    event_callback=event_callback,
+                )
+            else:
+                paths = parse_paths(payload.get("paths", []))
+                matter_id = str(payload.get("matter_id", "matter"))
+                result = run_product_matter(
+                    objective=str(payload.get("objective", "")),
+                    paths=paths,
+                    matter_id=matter_id,
+                    chat_id=str(payload.get("chat_id") or "main"),
+                    conversation_history=payload.get("conversation_history"),
+                    config=config,
+                    trace_dir=trace_dir,
+                    output_dir=output_dir,
+                    live_synthesis=bool(payload.get("live_synthesis", False)),
+                    top_k=int(payload.get("top_k", 12) or 12),
+                    max_files=parse_optional_int(payload.get("max_files")),
+                    verbose=False,
+                    event_callback=event_callback,
+                )
+                response = result.to_dict()
+                response["summary"] = trace_summary(result.state.to_trace())
+                response["trace"] = result.state.to_trace()
+            append_run_job_event(job_id, "DONE", "product matter run completed")
+            with RUN_JOBS_LOCK:
+                RUN_JOBS[job_id]["status"] = "completed"
+                RUN_JOBS[job_id]["result"] = response
+        except Exception as exc:  # noqa: BLE001 - async endpoint reports the normalized failure.
+            error = f"{type(exc).__name__}: {exc}"
+            append_run_job_event(job_id, "ERROR", "product matter run failed", error=error)
+            with RUN_JOBS_LOCK:
+                RUN_JOBS[job_id]["status"] = "failed"
+                RUN_JOBS[job_id]["error"] = error
+
+    threading.Thread(target=worker, name=f"irys-product-run-{job_id}", daemon=True).start()
+    return snapshot_run_job(job_id)
+
+
+def append_run_job_event(
+    job_id: str,
+    label: str | None = None,
+    message: str | None = None,
+    *,
+    event: dict[str, Any] | None = None,
+    **fields: Any,
+) -> None:
+    row = dict(event or {})
+    if not row:
+        row = {
+            "ts": datetime.now(UTC).isoformat(),
+            "label": label or "EVENT",
+            "message": message or "",
+            "fields": fields,
+        }
+    row.setdefault("ts", datetime.now(UTC).isoformat())
+    row.setdefault("label", label or "EVENT")
+    row.setdefault("message", message or "")
+    row.setdefault("fields", fields)
+    with RUN_JOBS_LOCK:
+        job = RUN_JOBS.get(job_id)
+        if job is not None:
+            job.setdefault("events", []).append(row)
+
+
+def snapshot_run_job(job_id: str) -> dict[str, Any]:
+    with RUN_JOBS_LOCK:
+        job = RUN_JOBS.get(job_id)
+        if job is None:
+            raise ValueError("run job not found")
+        return {
+            "job_id": job["job_id"],
+            "mode": job["mode"],
+            "status": job["status"],
+            "started_at": job["started_at"],
+            "events": list(job.get("events", [])),
+            "result": job.get("result"),
+            "error": job.get("error"),
+        }
+
+
+def prune_run_jobs_locked(*, keep: int = 50) -> None:
+    if len(RUN_JOBS) <= keep:
+        return
+    sorted_jobs = sorted(RUN_JOBS.items(), key=lambda item: str(item[1].get("started_at") or ""))
+    for job_id, _ in sorted_jobs[: max(0, len(sorted_jobs) - keep)]:
+        RUN_JOBS.pop(job_id, None)
+
+
 def rerun_from_trace(
     payload: dict[str, Any],
     *,
     config: HarnessConfig,
     trace_dir: str | Path,
     output_dir: str | Path,
+    event_callback: Any = None,
 ) -> dict[str, Any]:
     parent_path = resolve_trace_path(str(payload.get("trace_path") or ""), trace_dir)
     parent = load_trace(parent_path)
@@ -206,6 +365,7 @@ def rerun_from_trace(
         verbose=False,
         parent_trace_path=str(parent_path),
         user_nudge=nudge,
+        event_callback=event_callback,
     )
     child_trace = result.state.to_trace()
     response = result.to_dict()
@@ -549,7 +709,7 @@ INDEX_HTML = r"""<!doctype html>
       <div class="item">
         <strong>How to use this test UI</strong>
         <small>
-          Use Choose Folder, Choose File, or Choose Files to open a native picker on this machine. Paste local file or folder paths into Corpus Paths one per line when that is faster. Local folders are read recursively. No artificial file-count or per-document character cap is applied to local Corpus Paths. Matter ID groups saved runs and costs. Chat ID separates parallel conversations inside the same matter. Live synthesis calls the configured Gemini models; when it is off, the UI produces a deterministic preview without model cost. Top K is the number of retrieved chunks used for the evidence packet. Message Cost is the loaded run; Matter Cost totals saved traces for the matter.
+          Use Choose Folder, Choose File, or Choose Files to open a native picker on this machine. Paste local file or folder paths into Corpus Paths one per line when that is faster. Local folders are read recursively. No artificial file-count or per-document character cap is applied to local Corpus Paths. Matter ID groups saved runs and costs. Chat ID separates parallel conversations inside the same matter. Live synthesis calls the configured Gemini models; when it is off, the UI produces a deterministic preview without model cost. Top K is the number of retrieved chunks used for the evidence packet. Message Cost is the loaded run; Matter Cost totals saved traces for the matter. Live Trace shows observable run events while work is still in progress.
         </small>
       </div>
       <label for="matter">Matter ID</label>
@@ -611,6 +771,8 @@ INDEX_HTML = r"""<!doctype html>
       </div>
       <h2 style="margin-top:16px">Diagnosis</h2>
       <div class="list" id="diagnosis"></div>
+      <h2 style="margin-top:16px">Live Trace</h2>
+      <div class="list" id="liveEvents"></div>
       <h2 style="margin-top:16px">Recent Traces</h2>
       <div class="list" id="traceList"></div>
       <h2 style="margin-top:16px">Comparison</h2>
@@ -641,6 +803,7 @@ INDEX_HTML = r"""<!doctype html>
     const chooseRerunFile = $("chooseRerunFile");
     const chooseRerunFiles = $("chooseRerunFiles");
     let conversationByChat = {};
+    let activeJobPoll = null;
     $("clear").addEventListener("click", () => {
       $("objective").value = "";
       $("answer").innerHTML = "";
@@ -649,6 +812,7 @@ INDEX_HTML = r"""<!doctype html>
       $("nudge").value = "";
       $("rerunPaths").value = "";
       $("diagnosis").innerHTML = "";
+      $("liveEvents").innerHTML = "";
       $("traceList").innerHTML = "";
       $("comparison").innerHTML = "";
       $("events").innerHTML = "";
@@ -668,7 +832,7 @@ INDEX_HTML = r"""<!doctype html>
       run.disabled = true;
       status.textContent = "Running";
       try {
-        const response = await fetch("/api/run", {
+        const response = await fetch("/api/run-async", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify({
@@ -683,10 +847,8 @@ INDEX_HTML = r"""<!doctype html>
         });
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || "Run failed");
-        render(data);
-        await refreshTraceList({setStatus: false});
-        status.textContent = data.trace_path;
-        $("tracepath").value = data.trace_path || "";
+        renderLiveEvents(data.events || []);
+        await pollRunJob(data.job_id);
       } catch (error) {
         status.textContent = error.message;
       } finally {
@@ -724,7 +886,7 @@ INDEX_HTML = r"""<!doctype html>
       rerunTrace.disabled = true;
       status.textContent = "Rerunning";
       try {
-        const response = await fetch("/api/rerun", {
+        const response = await fetch("/api/rerun-async", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify({
@@ -738,10 +900,8 @@ INDEX_HTML = r"""<!doctype html>
         });
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || "Rerun failed");
-        render(data);
-        await refreshTraceList({setStatus: false});
-        status.textContent = data.trace_path;
-        $("tracepath").value = data.trace_path || "";
+        renderLiveEvents(data.events || []);
+        await pollRunJob(data.job_id);
       } catch (error) {
         status.textContent = error.message;
       } finally {
@@ -777,6 +937,37 @@ INDEX_HTML = r"""<!doctype html>
       }
       $(targetId).value = existing.join("\n");
     }
+    async function pollRunJob(jobId) {
+      if (!jobId) throw new Error("Missing run job id");
+      if (activeJobPoll) clearTimeout(activeJobPoll);
+      return new Promise((resolve, reject) => {
+        const poll = async () => {
+          try {
+            const response = await fetch("/api/run-status?job_id=" + encodeURIComponent(jobId));
+            const data = await response.json();
+            if (!response.ok || data.error) throw new Error(data.error || "Run status failed");
+            renderLiveEvents(data.events || []);
+            status.textContent = data.status === "running" ? "Running" : data.status;
+            if (data.status === "completed") {
+              render(data.result || {});
+              await refreshTraceList({setStatus: false});
+              status.textContent = (data.result || {}).trace_path || "Completed";
+              $("tracepath").value = (data.result || {}).trace_path || "";
+              resolve();
+              return;
+            }
+            if (data.status === "failed") {
+              reject(new Error(data.error || "Run failed"));
+              return;
+            }
+            activeJobPoll = setTimeout(poll, 800);
+          } catch (error) {
+            reject(error);
+          }
+        };
+        poll();
+      });
+    }
     function pathPayload(pathText) {
       const paths = String(pathText || "").split(/\r?\n/).map(line => line.trim()).filter(Boolean);
       return paths;
@@ -807,6 +998,7 @@ INDEX_HTML = r"""<!doctype html>
         typeof value === "string" || typeof value === "number" ? String(value) : JSON.stringify(value, null, 2)
       )).join("");
       $("comparison").innerHTML = renderComparison(data.comparison);
+      renderLiveEvents(trace.events || []);
       $("events").innerHTML = (trace.events || []).map(event => card(
         event.label + " - " + event.message,
         JSON.stringify(event.fields || {}, null, 2)
@@ -863,6 +1055,16 @@ INDEX_HTML = r"""<!doctype html>
       ];
       if (comparison.status === "unavailable") rows.push(["Comparison unavailable", comparison.error || "unknown error"]);
       return rows.map(([title, body]) => card(title, body)).join("");
+    }
+    function renderLiveEvents(events) {
+      if (!Array.isArray(events) || !events.length) {
+        $("liveEvents").innerHTML = "";
+        return;
+      }
+      $("liveEvents").innerHTML = events.map(event => card(
+        `${event.label || "EVENT"} - ${event.message || ""}`,
+        JSON.stringify(event.fields || {}, null, 2)
+      )).join("");
     }
     function activeChatKey() {
       return `${$("matter").value || "local-matter"}::${$("chat").value || "main"}`;

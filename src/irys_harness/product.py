@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Callable
 
 from .config import HarnessConfig
 from .events import EventLogger
@@ -67,6 +67,7 @@ def run_product_matter(
     verbose: bool = True,
     parent_trace_path: str | None = None,
     user_nudge: str | None = None,
+    event_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> ProductRunResult:
     if not objective.strip():
         raise ValueError("objective is required")
@@ -99,7 +100,7 @@ def run_product_matter(
         },
     )
     state = RunState(task=task, config=config, output_dir=str(Path(output_dir) / task_id))
-    log = EventLogger(state, verbose=verbose)
+    log = EventLogger(state, verbose=verbose, event_callback=event_callback)
     log.emit("RUN", "started product matter run", matter=task_id)
 
     state.documents, state.chunks = load_documents(

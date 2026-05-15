@@ -4,6 +4,7 @@ from pathlib import Path
 from http.server import ThreadingHTTPServer
 import json
 import threading
+import time
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -165,6 +166,11 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn('id="chooseFolder"', INDEX_HTML)
         self.assertIn('id="chooseFiles"', INDEX_HTML)
         self.assertIn("function appendPaths", INDEX_HTML)
+        self.assertIn('id="liveEvents"', INDEX_HTML)
+        self.assertIn("/api/run-async", INDEX_HTML)
+        self.assertIn("/api/rerun-async", INDEX_HTML)
+        self.assertIn("/api/run-status", INDEX_HTML)
+        self.assertIn("function pollRunJob", INDEX_HTML)
         self.assertNotIn("webkitdirectory", INDEX_HTML)
         self.assertNotIn("function uploadFiles", INDEX_HTML)
 
@@ -204,6 +210,60 @@ class ProductMatterTests(unittest.TestCase):
                 thread.join(timeout=5)
 
             self.assertEqual(data["paths"], [str(root / "selected")])
+
+    def test_async_run_endpoint_streams_live_events_until_completion(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            doc = root / "agreement.txt"
+            doc.write_text("Payment default has a 5 day cure period after notice.", encoding="utf-8")
+            trace_dir = root / "traces"
+            output_dir = root / "outputs"
+            handler = build_handler(
+                config=load_config(),
+                trace_dir=trace_dir,
+                output_dir=output_dir,
+            )
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/run-async",
+                    data=json.dumps(
+                        {
+                            "matter_id": "Live Matter",
+                            "paths": [str(doc)],
+                            "objective": "What cure period applies?",
+                            "live_synthesis": False,
+                        }
+                    ).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(request, timeout=5) as response:  # noqa: S310 - local test server.
+                    started = json.loads(response.read().decode("utf-8"))
+
+                status = started
+                for _ in range(20):
+                    with urlopen(  # noqa: S310 - local test server.
+                        f"http://127.0.0.1:{server.server_port}/api/run-status?job_id={started['job_id']}",
+                        timeout=5,
+                    ) as response:
+                        status = json.loads(response.read().decode("utf-8"))
+                    if status["status"] != "running":
+                        break
+                    time.sleep(0.05)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            self.assertEqual(status["status"], "completed")
+            self.assertIn("5 day cure period", status["result"]["rendered_answer"])
+            labels = [event["label"] for event in status["events"]]
+            self.assertIn("LOAD", labels)
+            self.assertIn("SEARCH", labels)
+            self.assertIn("SAVE", labels)
 
     def test_list_product_traces_filters_by_matter_and_chat(self) -> None:
         with TemporaryDirectory() as tmp:
