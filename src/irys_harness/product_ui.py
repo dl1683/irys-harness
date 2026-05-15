@@ -1854,6 +1854,7 @@ INDEX_HTML = r"""<!doctype html>
         rows.push(["Corpus read", `${docs.length} document(s), ${chunks.length} searchable chunk(s).`]);
         if (selected.length) rows.push(["First-read focus", selected.slice(0, 8).map(path => `- ${filenameFromPath(path)}`).join("\n") + (selected.length > 8 ? `\n- ... ${selected.length - 8} more` : "")]);
         rows.push(["Evidence status", `${evidence.length} evidence item(s), ${answerSources.length} answer-source link(s), ${unresolved.length} open question(s).`]);
+        if (comparison) rows.push(["What changed", comparisonTakeaway(comparison)]);
         rows.push(["Recommended next action", recommendedNextAction(trace, comparison)]);
       } else if (plan) {
         const firstRead = plan.first_read_paths || [];
@@ -1900,6 +1901,7 @@ INDEX_HTML = r"""<!doctype html>
       const metrics = comparison.metrics_delta || {};
       const rows = [
         ["Run", `${comparison.parent_task_id || ""} -> ${comparison.child_task_id || ""}`],
+        ["Plain-English takeaway", comparisonTakeaway(comparison)],
         ["Answer changed", String(Boolean(comparison.answer_changed))],
         ["Documents", `+${(documents.added || []).length} / -${(documents.removed || []).length} / kept ${documents.kept_count || 0}`],
         ["Evidence", `+${evidence.added_count || 0} / -${evidence.removed_count || 0} / kept ${evidence.kept_count || 0}`],
@@ -1915,6 +1917,37 @@ INDEX_HTML = r"""<!doctype html>
       if ((unresolved.added || []).length) rows.push(["New open questions", formatSimpleList(unresolved.added)]);
       if ((unresolved.removed || []).length) rows.push(["Cleared open questions", formatSimpleList(unresolved.removed)]);
       return rows.map(([title, body]) => card(title, body)).join("");
+    }
+    function comparisonTakeaway(comparison) {
+      if (!comparison) return "No prior run is loaded for comparison.";
+      if (comparison.status === "unavailable") return `Comparison is unavailable: ${comparison.error || "unknown error"}`;
+      const documents = comparison.document_delta || {};
+      const evidence = comparison.evidence_delta || {};
+      const unresolved = comparison.unresolved_delta || {};
+      const metrics = comparison.metrics_delta || {};
+      const addedDocs = (documents.added || []).length;
+      const removedDocs = (documents.removed || []).length;
+      const addedOpen = (unresolved.added || []).length;
+      const removedOpen = (unresolved.removed || []).length;
+      const lines = [];
+      if (comparison.answer_changed) {
+        lines.push("The answer changed. Review the changed answer against Sources Used before accepting it.");
+      } else {
+        lines.push("The answer text did not materially change.");
+      }
+      if (addedDocs || removedDocs) {
+        lines.push(`Source focus changed: ${addedDocs} document(s) added and ${removedDocs} removed.`);
+      }
+      if ((evidence.added_count || 0) || (evidence.removed_count || 0)) {
+        lines.push(`Evidence changed: ${evidence.added_count || 0} item(s) added and ${evidence.removed_count || 0} removed.`);
+      }
+      if (addedOpen || removedOpen) {
+        lines.push(`Open questions changed: ${addedOpen} new and ${removedOpen} cleared.`);
+      }
+      if (Number(metrics.estimated_cost || 0) !== 0) {
+        lines.push(`Cost delta: $${Number(metrics.estimated_cost || 0).toFixed(4)}.`);
+      }
+      return lines.join("\n");
     }
     function formatSimpleList(items, limit = 12) {
       return (items || []).slice(0, limit).map(item => `- ${item}`).join("\n") +

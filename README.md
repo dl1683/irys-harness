@@ -202,6 +202,7 @@ The product UI supports:
 - first-read audit showing documents that were held back and one-click controls to read them in the next pass;
 - live workstream events while the run is active;
 - source review, open-question summaries, and source-ignore steering for the next pass;
+- plain-English run comparison after reruns, including answer, source, evidence, open-question, token, and cost deltas;
 - large diagnostic panels summarized in the browser while full details remain in saved traces;
 - multiple chats per matter;
 - conversation history limited to user questions and final answers;
