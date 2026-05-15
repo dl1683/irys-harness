@@ -199,7 +199,7 @@ The product UI supports:
 - optional worker source planning that reviews the file inventory before first read and falls back to deterministic path scoring if model planning is unavailable;
 - editable first-read plan preview before a run;
 - steering-note plan preview before a rerun, so users can inspect changed source focus before applying it;
-- first-read audit showing documents that were held back and why;
+- first-read audit showing documents that were held back and one-click controls to read them in the next pass;
 - live workstream events while the run is active;
 - source review and open-question summaries;
 - multiple chats per matter;
