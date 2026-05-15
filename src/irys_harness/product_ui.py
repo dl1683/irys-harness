@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -61,11 +62,20 @@ def build_handler(
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib handler API.
             parsed = urlparse(self.path)
-            if parsed.path != "/api/run":
+            if parsed.path not in {"/api/run", "/api/rerun"}:
                 self.send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
                 return
             try:
                 payload = self.read_json()
+                if parsed.path == "/api/rerun":
+                    response = rerun_from_trace(
+                        payload,
+                        config=config,
+                        trace_dir=trace_dir,
+                        output_dir=output_dir,
+                    )
+                    self.send_json(response)
+                    return
                 paths_raw = payload.get("paths", [])
                 if isinstance(paths_raw, str):
                     paths = [line.strip() for line in paths_raw.splitlines() if line.strip()]
@@ -126,6 +136,47 @@ def build_handler(
             print("[UI]", format % args)
 
     return ProductUIHandler
+
+
+def rerun_from_trace(
+    payload: dict[str, Any],
+    *,
+    config: HarnessConfig,
+    trace_dir: str | Path,
+    output_dir: str | Path,
+) -> dict[str, Any]:
+    parent_path = resolve_trace_path(str(payload.get("trace_path") or ""), trace_dir)
+    parent = load_trace(parent_path)
+    task = parent.get("task") or {}
+    original_objective = str(task.get("question") or "")
+    nudge = str(payload.get("nudge") or "").strip()
+    if not nudge:
+        raise ValueError("nudge is required")
+    paths = [str(item) for item in task.get("context_files", []) if str(item).strip()]
+    if not paths:
+        raise ValueError("parent trace does not contain context_files")
+    base_matter_id = str(task.get("task_id") or "matter")
+    suffix = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+    matter_id = sanitize_matter_id(f"{base_matter_id}-nudge-{suffix}")
+    objective = f"{original_objective}\n\nUser steering note: {nudge}"
+    result = run_product_matter(
+        objective=objective,
+        paths=paths,
+        matter_id=matter_id,
+        config=config,
+        trace_dir=trace_dir,
+        output_dir=output_dir,
+        live_synthesis=bool(payload.get("live_synthesis", False)),
+        top_k=int(payload.get("top_k", 12) or 12),
+        max_files=int(payload.get("max_files", 80) or 80),
+        verbose=False,
+        parent_trace_path=str(parent_path),
+        user_nudge=nudge,
+    )
+    response = result.to_dict()
+    response["summary"] = trace_summary(result.state.to_trace())
+    response["trace"] = result.state.to_trace()
+    return response
 
 
 def resolve_trace_path(raw_path: str, trace_dir: str | Path) -> Path:
@@ -392,6 +443,11 @@ INDEX_HTML = r"""<!doctype html>
       <div class="row">
         <button class="secondary" id="loadTrace">Load Trace</button>
       </div>
+      <label for="nudge">Nudge</label>
+      <textarea id="nudge"></textarea>
+      <div class="row">
+        <button class="secondary" id="rerunTrace">Rerun</button>
+      </div>
       <h2 style="margin-top:16px">Diagnosis</h2>
       <div class="list" id="diagnosis"></div>
       <h2 style="margin-top:16px">Events</h2>
@@ -407,11 +463,13 @@ INDEX_HTML = r"""<!doctype html>
     const status = $("status");
     const run = $("run");
     const loadTrace = $("loadTrace");
+    const rerunTrace = $("rerunTrace");
     $("clear").addEventListener("click", () => {
       $("objective").value = "";
       $("files").value = "";
       $("answer").textContent = "";
       $("tracepath").value = "";
+      $("nudge").value = "";
       $("diagnosis").innerHTML = "";
       $("events").innerHTML = "";
       $("documents").innerHTML = "";
@@ -459,6 +517,31 @@ INDEX_HTML = r"""<!doctype html>
         status.textContent = error.message;
       } finally {
         loadTrace.disabled = false;
+      }
+    });
+    rerunTrace.addEventListener("click", async () => {
+      rerunTrace.disabled = true;
+      status.textContent = "Rerunning";
+      try {
+        const response = await fetch("/api/rerun", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            trace_path: $("tracepath").value,
+            nudge: $("nudge").value,
+            live_synthesis: $("live").checked,
+            top_k: Number($("topk").value || 12)
+          })
+        });
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || "Rerun failed");
+        render(data);
+        status.textContent = data.trace_path;
+        $("tracepath").value = data.trace_path || "";
+      } catch (error) {
+        status.textContent = error.message;
+      } finally {
+        rerunTrace.disabled = false;
       }
     });
     async function readUploads(fileList) {

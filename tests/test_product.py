@@ -7,7 +7,7 @@ import unittest
 
 from irys_harness.config import load_config
 from irys_harness.product import discover_corpus_paths, run_product_matter, sanitize_matter_id
-from irys_harness.product_ui import resolve_trace_path, safe_upload_filename, save_uploaded_files
+from irys_harness.product_ui import rerun_from_trace, resolve_trace_path, safe_upload_filename, save_uploaded_files
 
 
 class ProductMatterTests(unittest.TestCase):
@@ -112,6 +112,40 @@ class ProductMatterTests(unittest.TestCase):
 
     def test_safe_upload_filename_removes_path_and_control_chars(self) -> None:
         self.assertEqual(safe_upload_filename(r"..\folder/bad:name?.txt"), "bad-name-.txt")
+
+    def test_rerun_from_trace_links_parent_and_nudge(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            doc = root / "agreement.txt"
+            doc.write_text("Payment default has a 5 day cure period after notice.", encoding="utf-8")
+            trace_dir = root / "traces"
+            parent = run_product_matter(
+                objective="What cure period applies?",
+                paths=[str(doc)],
+                matter_id="Parent Matter",
+                config=load_config(),
+                trace_dir=trace_dir,
+                live_synthesis=False,
+                verbose=False,
+            )
+
+            response = rerun_from_trace(
+                {
+                    "trace_path": str(parent.trace_path),
+                    "nudge": "Focus only on payment defaults.",
+                    "live_synthesis": False,
+                    "top_k": 3,
+                },
+                config=load_config(),
+                trace_dir=trace_dir,
+                output_dir=root / "outputs",
+            )
+            trace = response["trace"]
+
+            self.assertTrue(response["trace_path"])
+            self.assertIn("User steering note: Focus only on payment defaults.", trace["task"]["question"])
+            self.assertEqual(trace["task"]["metadata"]["parent_trace_path"], str(parent.trace_path.resolve()))
+            self.assertEqual(trace["task"]["metadata"]["user_nudge"], "Focus only on payment defaults.")
 
 
 if __name__ == "__main__":

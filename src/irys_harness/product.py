@@ -60,6 +60,8 @@ def run_product_matter(
     max_files: int = 80,
     max_chars_per_doc: int | None = 200_000,
     verbose: bool = True,
+    parent_trace_path: str | None = None,
+    user_nudge: str | None = None,
 ) -> ProductRunResult:
     if not objective.strip():
         raise ValueError("objective is required")
@@ -82,6 +84,8 @@ def run_product_matter(
             "matter_id": matter_id,
             "document_boundary": "user_defined_corpus",
             "live_synthesis": live_synthesis,
+            "parent_trace_path": parent_trace_path,
+            "user_nudge": user_nudge,
         },
     )
     state = RunState(task=task, config=config, output_dir=str(Path(output_dir) / task_id))
