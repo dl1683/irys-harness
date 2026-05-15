@@ -45,6 +45,7 @@ traces/
 # Private local planning / agent-operation workspace.
 # Keep internal strategy, goal states, agent workflow notes, and IP-bearing
 # iteration artifacts here. These paths are intentionally not public docs.
+AGENTS.md
 .irys-private/
 .codex-private/
 private/
