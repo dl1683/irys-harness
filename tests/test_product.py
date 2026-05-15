@@ -240,6 +240,64 @@ class ProductMatterTests(unittest.TestCase):
             self.assertEqual(plan["planner_metrics"]["total_tokens"], 120)
             self.assertAlmostEqual(plan["planner_metrics"]["estimated_cost"], 0.0001)
 
+    def test_cheap_worker_source_planner_can_select_relevant_directory(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            emails = root / "matter_emails"
+            background = root / "background_rules"
+            emails.mkdir()
+            background.mkdir()
+            first_email = emails / "thread_001.txt"
+            second_email = emails / "thread_002.txt"
+            rulebook = background / "generic_policy.txt"
+            first_email.write_text("The dispute is discussed here.", encoding="utf-8")
+            second_email.write_text("Follow-up email with issue detail.", encoding="utf-8")
+            rulebook.write_text("Generic background rule.", encoding="utf-8")
+
+            class FakeRouter:
+                def __init__(self, config: object) -> None:
+                    self.config = config
+
+                def generate(self, **kwargs: object) -> SimpleNamespace:
+                    return SimpleNamespace(
+                        text=json.dumps(
+                            {
+                                "selected_paths": [],
+                                "selected_directories": [str(emails.resolve())],
+                                "rejected_paths": [str(rulebook.resolve())],
+                                "should_read_full_corpus": False,
+                                "reason": "The emails folder is the case-specific narrative source.",
+                                "needed_information": ["event timeline"],
+                                "confidence": "high",
+                            }
+                        ),
+                        usage=ModelCallRecord(
+                            module="product_source_planner",
+                            tier=ModelTier.CHEAP_WORKER,
+                            model="fake-cheap-worker",
+                            input_tokens=100,
+                            output_tokens=30,
+                            estimated_cost=0.0002,
+                        ),
+                    )
+
+            with patch("irys_harness.product.GeminiModelRouter", FakeRouter):
+                plan = build_product_plan_preview(
+                    objective="What is the main issue here?",
+                    paths=[str(root)],
+                    config=load_config(),
+                    use_llm_planning=True,
+                )
+
+            self.assertEqual(
+                plan["first_read_paths"],
+                [str(first_email.resolve()), str(second_email.resolve())],
+            )
+            self.assertEqual(plan["source_planner"]["status"], "used")
+            self.assertEqual(plan["source_planner"]["selected_count"], 2)
+            self.assertEqual(plan["source_planner"]["selected_directories"], [str(emails.resolve())])
+            self.assertNotIn(str(rulebook.resolve()), plan["first_read_paths"])
+
     def test_source_planner_prompt_uses_bounded_inventory(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -263,6 +321,8 @@ class ProductMatterTests(unittest.TestCase):
             )
 
             self.assertIn(target.name, prompt)
+            self.assertIn('"selected_directories"', prompt)
+            self.assertIn('"directory_summary"', prompt)
             self.assertIn('"omitted_candidate_count"', prompt)
             self.assertNotIn("irrelevant-299.txt", prompt)
 

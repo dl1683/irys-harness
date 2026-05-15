@@ -838,7 +838,12 @@ def plan_with_cheap_source_planner(
             max_output_tokens=MAX_SOURCE_PLANNER_OUTPUT_TOKENS,
         )
         payload = parse_json_object(result.text)
-        selected_paths = resolve_planner_selected_paths(payload, paths)
+        selected_paths = unique_paths(
+            [
+                *resolve_planner_selected_paths(payload, paths),
+                *resolve_planner_selected_directories(payload, paths),
+            ]
+        )
         if payload.get("should_read_full_corpus") is True:
             selected_paths = paths
         status = "used" if selected_paths else "empty_selection"
@@ -849,6 +854,9 @@ def plan_with_cheap_source_planner(
             "should_read_full_corpus": bool(payload.get("should_read_full_corpus")),
             "selected_count": len(selected_paths),
             "selected_paths": [str(path) for path in selected_paths],
+            "selected_directories": [str(item) for item in payload.get("selected_directories", [])[:50]]
+            if isinstance(payload.get("selected_directories"), list)
+            else [],
             "rejected_paths": [str(item) for item in payload.get("rejected_paths", [])[:50]]
             if isinstance(payload.get("rejected_paths"), list)
             else [],
@@ -883,6 +891,7 @@ def build_source_planner_prompt(
         "Return JSON only with this shape:\n"
         "{\n"
         '  "selected_paths": ["exact path strings from candidate_paths"],\n'
+        '  "selected_directories": ["exact directory strings from directory_summary if a whole folder should be read"],\n'
         '  "rejected_paths": ["exact path strings from candidate_paths that look lower priority"],\n'
         '  "should_read_full_corpus": false,\n'
         '  "reason": "short practical explanation",\n'
@@ -1001,6 +1010,49 @@ def resolve_planner_selected_paths(payload: dict[str, Any], paths: list[Path]) -
         if match is not None and match not in selected:
             selected.append(match)
     return selected
+
+
+def resolve_planner_selected_directories(payload: dict[str, Any], paths: list[Path]) -> list[Path]:
+    raw_items = payload.get("selected_directories", [])
+    if not isinstance(raw_items, list):
+        return []
+    resolved_paths = [path.resolve() for path in paths]
+    known_dirs = {str(path.parent.resolve()).lower(): path.parent.resolve() for path in resolved_paths}
+    selected_dirs: list[Path] = []
+    for raw_item in raw_items:
+        raw = str(raw_item or "").strip()
+        if not raw:
+            continue
+        try:
+            candidate = Path(raw).expanduser().resolve()
+        except OSError:
+            continue
+        key = str(candidate).lower()
+        if key in known_dirs and candidate not in selected_dirs:
+            selected_dirs.append(candidate)
+
+    if not selected_dirs:
+        return []
+
+    selected_paths: list[Path] = []
+    seen: set[str] = set()
+    for path in resolved_paths:
+        parent = path.parent.resolve()
+        if not any(path_is_relative_to(parent, directory) for directory in selected_dirs):
+            continue
+        key = str(path).lower()
+        if key not in seen:
+            selected_paths.append(path)
+            seen.add(key)
+    return selected_paths
+
+
+def path_is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
 
 
 def unique_strings(items: list[Any]) -> list[str]:
