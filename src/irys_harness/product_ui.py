@@ -791,6 +791,32 @@ INDEX_HTML = r"""<!doctype html>
       font-size: 12px;
       line-height: 1.35;
     }
+    .action-summary {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 6px;
+    }
+    .action-pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+      color: #2f3b46;
+      padding: 3px 8px;
+      font-size: 12px;
+      line-height: 1.2;
+    }
+    .action-pill.important {
+      border-color: #9fc2e8;
+      background: #f2f8ff;
+    }
+    .action-pill.warn {
+      border-color: #d8c1ad;
+      background: #fff8f0;
+    }
     .command-actions {
       display: flex;
       flex-wrap: wrap;
@@ -1000,6 +1026,13 @@ INDEX_HTML = r"""<!doctype html>
       box-shadow: 0 2px 10px rgba(23, 32, 42, 0.08);
     }
     .steering-panel label:first-child { margin-top: 0; }
+    .next-pass-setup {
+      margin-top: 10px;
+      background: #fff;
+    }
+    .next-pass-setup .row {
+      margin-top: 8px;
+    }
     .empty {
       color: var(--muted);
       font-size: 13px;
@@ -1071,6 +1104,7 @@ INDEX_HTML = r"""<!doctype html>
     <div>
       <strong id="commandStepTitle">Ready</strong>
       <small id="commandStepDetail">Choose a corpus, ask a question, review the source plan, then run.</small>
+      <div class="action-summary" id="nextPassSummary"></div>
     </div>
     <div class="command-actions">
       <button class="secondary" id="topPlan">Review Source Plan</button>
@@ -1197,6 +1231,10 @@ INDEX_HTML = r"""<!doctype html>
           <button class="secondary" id="previewNudgePlan">Preview Steering Plan</button>
           <button class="secondary" id="rerunTrace">Run Corrected Pass</button>
         </div>
+        <div class="item next-pass-setup" id="nextPassSetup">
+          <strong>Next Pass Setup</strong>
+          <small>No corrections selected yet.</small>
+        </div>
       </div>
       <h2 style="margin-top:16px">Current Work</h2>
       <div class="item" id="currentStep"><strong>Idle</strong><small>No run has started.</small></div>
@@ -1276,6 +1314,7 @@ INDEX_HTML = r"""<!doctype html>
     topPreviewNudge.addEventListener("click", () => previewNudgePlan.click());
     topApplyNudge.addEventListener("click", () => rerunTrace.click());
     syncCommandButtons();
+    renderNextPassSetup();
     $("clear").addEventListener("click", () => {
       $("objective").value = "";
       $("answer").innerHTML = "";
@@ -1313,11 +1352,16 @@ INDEX_HTML = r"""<!doctype html>
       $("answerSources").innerHTML = "";
       updateCommandStep("Ready", "Choose a corpus, ask a question, review the source plan, then run.");
       syncCommandButtons();
+      renderNextPassSetup();
       status.textContent = "";
     });
     $("firstReadPaths").addEventListener("input", () => {
       if (!suppressFirstReadDirty) firstReadPathsDirty = true;
+      renderNextPassSetup();
     });
+    $("nudge").addEventListener("input", renderNextPassSetup);
+    $("rerunPaths").addEventListener("input", renderNextPassSetup);
+    $("tracepath").addEventListener("input", renderNextPassSetup);
     stopRun.addEventListener("click", async () => {
       if (!activeJobId) return;
       stopRun.disabled = true;
@@ -1389,7 +1433,7 @@ INDEX_HTML = r"""<!doctype html>
           status.textContent = "Plan ready. Review first-read documents, then click Run Approved Plan again.";
           return;
         }
-        applyCheckedCandidatePaths({silent: true});
+        if (!firstReadPathsDirty) applyCheckedCandidatePaths({silent: true});
         const response = await fetch("/api/run-async", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
@@ -1538,12 +1582,16 @@ INDEX_HTML = r"""<!doctype html>
         seen.add(clean.toLowerCase());
       }
       $(targetId).value = existing.join("\n");
+      if (targetId === "firstReadPaths" || targetId === "rerunPaths" || targetId === "paths") {
+        renderNextPassSetup();
+      }
     }
     function setFirstReadPaths(paths, {dirty = false} = {}) {
       suppressFirstReadDirty = true;
       $("firstReadPaths").value = (paths || []).join("\n");
       suppressFirstReadDirty = false;
       firstReadPathsDirty = dirty;
+      renderNextPassSetup();
     }
     function syncCommandButtons() {
       topRun.disabled = run.disabled;
@@ -1602,6 +1650,7 @@ INDEX_HTML = r"""<!doctype html>
       currentPlanObjective = $("objective").value;
       currentPlanMode = mode;
       currentPlanPathKey = pathKey;
+      renderNextPassSetup();
       const candidates = (plan.top_candidates || []).slice(0, 6).map(item =>
         `- ${item.filename || item.path}: score ${item.score}; ${(item.reasons || []).join("; ")}`
       );
@@ -1712,10 +1761,12 @@ INDEX_HTML = r"""<!doctype html>
         .filter(Boolean);
       if (!checked.length) {
         if (!silent) status.textContent = "No checked document candidates";
+        renderNextPassSetup();
         return;
       }
       setFirstReadPaths(checked, {dirty: true});
       if (!silent) status.textContent = `Applied ${checked.length} first-read document(s)`;
+      renderNextPassSetup();
     }
     function formatPlannerSummary(planner, metrics) {
       if (!planner) return "Not available for this run.";
@@ -1772,6 +1823,11 @@ INDEX_HTML = r"""<!doctype html>
     document.addEventListener("click", (event) => {
       const target = event.target;
       if (!target || !target.matches) return;
+      if (target.matches(".candidate-check")) {
+        applyCheckedCandidatePaths({silent: true});
+        status.textContent = `Updated first-read set to ${pathPayload($("firstReadPaths").value).length} document(s)`;
+        return;
+      }
       if (target.matches(".trace-load")) {
         $("tracepath").value = target.getAttribute("data-path") || "";
         loadTrace.click();
@@ -1782,7 +1838,7 @@ INDEX_HTML = r"""<!doctype html>
         removeExcludedSourcePath(path);
         appendPaths("firstReadPaths", [path]);
         firstReadPathsDirty = true;
-        if (!$("nudge").value.trim()) $("nudge").value = `Read ${filenameFromPath(path)} in the next pass.`;
+        appendSteeringInstruction(`Read ${filenameFromPath(path)} in the next pass.`);
         status.textContent = `Added ${filenameFromPath(path)} to the next first-read set`;
         return;
       }
@@ -1791,7 +1847,7 @@ INDEX_HTML = r"""<!doctype html>
         removeExcludedSourcePath(path);
         appendPaths("firstReadPaths", [path]);
         firstReadPathsDirty = true;
-        if (!$("nudge").value.trim()) $("nudge").value = `Read ${filenameFromPath(path)} more closely in the next pass.`;
+        appendSteeringInstruction(`Read ${filenameFromPath(path)} more closely in the next pass.`);
         status.textContent = `Added ${filenameFromPath(path)} for a deeper next pass`;
         return;
       }
@@ -1801,7 +1857,7 @@ INDEX_HTML = r"""<!doctype html>
         addPinnedSourcePath(path);
         appendPaths("firstReadPaths", [path]);
         firstReadPathsDirty = true;
-        if (!$("nudge").value.trim()) $("nudge").value = `Keep ${filenameFromPath(path)} pinned in synthesis next pass.`;
+        appendSteeringInstruction(`Keep ${filenameFromPath(path)} pinned in synthesis next pass.`);
         status.textContent = `Pinned ${filenameFromPath(path)} for synthesis next pass`;
         return;
       }
@@ -1812,13 +1868,19 @@ INDEX_HTML = r"""<!doctype html>
         status.textContent = `Unpinned ${filenameFromPath(path)} for the next pass`;
         return;
       }
+      if (target.matches(".unignore-source-next")) {
+        const path = target.getAttribute("data-path") || "";
+        removeExcludedSourcePath(path);
+        status.textContent = `Removed ${filenameFromPath(path)} from ignored sources`;
+        return;
+      }
       if (target.matches(".ignore-source-next")) {
         const path = target.getAttribute("data-path") || "";
         addExcludedSourcePath(path);
         removePinnedSourcePath(path);
         removePathFromFirstRead(path);
         firstReadPathsDirty = true;
-        if (!$("nudge").value.trim()) $("nudge").value = `Ignore ${filenameFromPath(path)} in the next pass.`;
+        appendSteeringInstruction(`Ignore ${filenameFromPath(path)} in the next pass.`);
         status.textContent = `Marked ${filenameFromPath(path)} to ignore next pass`;
       }
     });
@@ -1834,8 +1896,9 @@ INDEX_HTML = r"""<!doctype html>
       $("matter").value = metadata.matter_id || (trace.task || {}).task_id || $("matter").value;
       $("chat").value = metadata.chat_id || $("chat").value || "main";
       $("objective").value = (trace.task || {}).question || $("objective").value;
-      renderTracePlan(metadata, trace);
       excludedSourcePaths = [];
+      renderTracePlan(metadata, trace);
+      renderNextPassSetup();
       renderRunBrief({trace, comparison: data.comparison});
       $("answer").innerHTML = renderMarkdown(data.rendered_answer || trace.rendered_answer || "");
       updateConversationHistoryFromTrace(trace);
@@ -2058,10 +2121,12 @@ INDEX_HTML = r"""<!doctype html>
       if (!clean) return;
       const key = clean.toLowerCase();
       if (!excludedSourcePaths.some(item => String(item || "").toLowerCase() === key)) excludedSourcePaths.push(clean);
+      renderNextPassSetup();
     }
     function removeExcludedSourcePath(path) {
       const key = String(path || "").toLowerCase();
       excludedSourcePaths = excludedSourcePaths.filter(item => String(item || "").toLowerCase() !== key);
+      renderNextPassSetup();
     }
     function addPinnedSourcePath(path) {
       const clean = String(path || "").trim();
@@ -2069,11 +2134,68 @@ INDEX_HTML = r"""<!doctype html>
       const key = clean.toLowerCase();
       if (!pinnedSourcePaths.some(item => String(item || "").toLowerCase() === key)) pinnedSourcePaths.push(clean);
       renderPinnedSources();
+      renderNextPassSetup();
     }
     function removePinnedSourcePath(path) {
       const key = String(path || "").toLowerCase();
       pinnedSourcePaths = pinnedSourcePaths.filter(item => String(item || "").toLowerCase() !== key);
       renderPinnedSources();
+      renderNextPassSetup();
+    }
+    function appendSteeringInstruction(text) {
+      const clean = String(text || "").trim();
+      if (!clean) return;
+      const existing = $("nudge").value.trim();
+      if (!existing) {
+        $("nudge").value = clean;
+      } else if (!existing.toLowerCase().includes(clean.toLowerCase())) {
+        $("nudge").value = `${existing}\n${clean}`;
+      }
+      renderNextPassSetup();
+    }
+    function renderNextPassSetup() {
+      const firstRead = pathPayload($("firstReadPaths").value);
+      const addedPaths = pathPayload($("rerunPaths").value);
+      const nudge = $("nudge").value.trim();
+      const traceLoaded = Boolean($("tracepath").value.trim());
+      const pills = [
+        pill(`${firstRead.length} first-read`, firstRead.length ? "important" : ""),
+        pill(`${pinnedSourcePaths.length} pinned`, pinnedSourcePaths.length ? "important" : ""),
+        pill(`${excludedSourcePaths.length} ignored`, excludedSourcePaths.length ? "warn" : ""),
+        pill(`${addedPaths.length} added path${addedPaths.length === 1 ? "" : "s"}`, addedPaths.length ? "important" : ""),
+        pill(nudge ? "steering note ready" : "no steering note", nudge ? "important" : ""),
+        pill(traceLoaded ? "saved run loaded" : "no saved run loaded", traceLoaded ? "important" : "")
+      ].join("");
+      $("nextPassSummary").innerHTML = pills;
+      const nextAction = traceLoaded
+        ? "Preview Steering Plan to re-check source routing, then Run Corrected Pass."
+        : "Review Source Plan, adjust first-read documents, then Run Approved Plan.";
+      const details = [
+        `First-read documents: ${firstRead.length}${firstReadPathsDirty ? " (edited by you)" : ""}.`,
+        `Pinned into synthesis: ${pinnedSourcePaths.length}.`,
+        `Ignored next pass: ${excludedSourcePaths.length}.`,
+        `Additional corpus paths: ${addedPaths.length}.`,
+        `Steering note: ${nudge ? "present" : "empty"}.`,
+        `Next action: ${nextAction}`
+      ];
+      const lists = [];
+      if (firstRead.length) lists.push(["First-read set", firstRead.slice(0, 8).map(filenameFromPath)]);
+      if (pinnedSourcePaths.length) lists.push(["Pinned", pinnedSourcePaths.slice(0, 8).map(filenameFromPath)]);
+      if (excludedSourcePaths.length) lists.push(["Ignored", excludedSourcePaths.slice(0, 8).map(filenameFromPath)]);
+      const listHtml = lists.map(([title, items]) =>
+        `<div class="hint"><strong>${escapeHtml(title)}:</strong> ${escapeHtml(items.join(", "))}</div>`
+      ).join("");
+      const ignoredControls = excludedSourcePaths.length
+        ? `<div class="row">${excludedSourcePaths.slice(0, 6).map(path =>
+            `<button class="secondary unignore-source-next" data-path="${escapeAttr(path)}">Unignore ${escapeHtml(filenameFromPath(path))}</button>`
+          ).join("")}</div>`
+        : "";
+      $("nextPassSetup").innerHTML =
+        `<strong>Next Pass Setup</strong><small><pre>${escapeHtml(details.join("\n"))}</pre></small>${listHtml}${ignoredControls}`;
+    }
+    function pill(text, tone = "") {
+      const cls = tone ? `action-pill ${tone}` : "action-pill";
+      return `<span class="${cls}">${escapeHtml(text)}</span>`;
     }
     function renderRunHealth(trace) {
       const diagnosis = trace.diagnosis || {};
