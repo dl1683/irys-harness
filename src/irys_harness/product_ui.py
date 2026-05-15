@@ -1132,6 +1132,8 @@ INDEX_HTML = r"""<!doctype html>
     let currentPlan = null;
     let currentPlanNote = "";
     let currentPlanObjective = "";
+    let currentPlanMode = "";
+    let currentPlanPathKey = "";
     let firstReadPathsDirty = false;
     let suppressFirstReadDirty = false;
     let excludedSourcePaths = [];
@@ -1150,6 +1152,8 @@ INDEX_HTML = r"""<!doctype html>
       currentPlan = null;
       currentPlanNote = "";
       currentPlanObjective = "";
+      currentPlanMode = "";
+      currentPlanPathKey = "";
       excludedSourcePaths = [];
       $("diagnosis").innerHTML = "";
       $("currentStep").innerHTML = "<strong>Idle</strong><small>No run has started.</small>";
@@ -1215,7 +1219,7 @@ INDEX_HTML = r"""<!doctype html>
       try {
         const plan = await requestPlan({paths: pathPayload($("paths").value)});
         currentPlan = plan;
-        renderPlan(plan);
+        renderPlan(plan, {mode: "initial", pathKey: initialPlanPathKey()});
         status.textContent = `Plan ready: ${plan.first_read_count || 0} first-read document(s)`;
       } catch (error) {
         status.textContent = error.message;
@@ -1230,7 +1234,7 @@ INDEX_HTML = r"""<!doctype html>
         if (planNeedsRefresh()) {
           const plan = await requestPlan({paths: pathPayload($("paths").value)});
           currentPlan = plan;
-          renderPlan(plan);
+          renderPlan(plan, {mode: "initial", pathKey: initialPlanPathKey()});
           status.textContent = "Plan ready. Review first-read documents, then click Run Approved Plan again.";
           return;
         }
@@ -1347,7 +1351,7 @@ INDEX_HTML = r"""<!doctype html>
         const plan = await response.json();
         if (!response.ok || plan.error) throw new Error(plan.error || "Nudge plan failed");
         currentPlan = plan;
-        renderPlan(plan);
+        renderPlan(plan, {mode: "rerun", pathKey: rerunPlanPathKey()});
         status.textContent = `Nudge plan ready: ${plan.first_read_count || 0} first-read document(s)`;
       } catch (error) {
         status.textContent = error.message;
@@ -1407,12 +1411,14 @@ INDEX_HTML = r"""<!doctype html>
       if (!response.ok || data.error) throw new Error(data.error || "Plan failed");
       return data;
     }
-    function renderPlan(plan) {
+    function renderPlan(plan, {mode = "initial", pathKey = initialPlanPathKey()} = {}) {
       const firstRead = plan.first_read_paths || [];
       setFirstReadPaths(firstRead, {dirty: false});
       currentPlan = plan;
       currentPlanNote = $("planNote").value;
       currentPlanObjective = $("objective").value;
+      currentPlanMode = mode;
+      currentPlanPathKey = pathKey;
       const candidates = (plan.top_candidates || []).slice(0, 6).map(item =>
         `- ${item.filename || item.path}: score ${item.score}; ${(item.reasons || []).join("; ")}`
       );
@@ -1434,7 +1440,15 @@ INDEX_HTML = r"""<!doctype html>
     function planNeedsRefresh() {
       if (!pathPayload($("firstReadPaths").value).length) return true;
       if (!currentPlan) return false;
+      if (currentPlanMode !== "initial") return true;
+      if (currentPlanPathKey !== initialPlanPathKey()) return true;
       return currentPlanNote !== $("planNote").value || currentPlanObjective !== $("objective").value;
+    }
+    function initialPlanPathKey() {
+      return pathPayload($("paths").value).join("\n");
+    }
+    function rerunPlanPathKey() {
+      return [String($("tracepath").value || ""), pathPayload($("rerunPaths").value).join("\n")].join("\n---\n");
     }
     function renderTracePlan(metadata, trace = null) {
       const scope = metadata.corpus_scope_decision || null;
@@ -1454,6 +1468,8 @@ INDEX_HTML = r"""<!doctype html>
         source_planner: (scope.signals || {}).source_planner || null
       };
       currentPlan = planLike;
+      currentPlanMode = "trace";
+      currentPlanPathKey = "";
       $("planPreview").innerHTML = [
         ["Task", $("objective").value || ""],
         contract && contract.interpreted_goal ? ["Answer target", contract.interpreted_goal] : null,
