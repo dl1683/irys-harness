@@ -7,7 +7,13 @@ import unittest
 
 from irys_harness.config import load_config
 from irys_harness.product import compare_product_traces, discover_corpus_paths, run_product_matter, sanitize_matter_id
-from irys_harness.product_ui import rerun_from_trace, resolve_trace_path, safe_upload_filename, save_uploaded_files
+from irys_harness.product_ui import (
+    parse_paths,
+    rerun_from_trace,
+    resolve_trace_path,
+    safe_upload_filename,
+    save_uploaded_files,
+)
 
 
 class ProductMatterTests(unittest.TestCase):
@@ -148,6 +154,51 @@ class ProductMatterTests(unittest.TestCase):
             self.assertEqual(trace["task"]["metadata"]["user_nudge"], "Focus only on payment defaults.")
             self.assertEqual(response["comparison"]["parent_task_id"], "Parent-Matter")
             self.assertTrue(response["comparison"]["objective_changed"])
+
+    def test_rerun_from_trace_can_add_uploaded_corpus(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            doc = root / "agreement.txt"
+            doc.write_text("Payment default has a 5 day cure period after notice.", encoding="utf-8")
+            trace_dir = root / "traces"
+            output_dir = root / "outputs"
+            parent = run_product_matter(
+                objective="What cure period applies?",
+                paths=[str(doc)],
+                matter_id="Corpus Matter",
+                config=load_config(),
+                trace_dir=trace_dir,
+                output_dir=output_dir,
+                live_synthesis=False,
+                verbose=False,
+            )
+
+            response = rerun_from_trace(
+                {
+                    "trace_path": str(parent.trace_path),
+                    "nudge": "Also consider the guaranty.",
+                    "uploads": [
+                        {
+                            "filename": "guaranty.txt",
+                            "content_base64": base64.b64encode(
+                                b"The guarantor cure period is 2 business days after written notice."
+                            ).decode("ascii"),
+                        }
+                    ],
+                },
+                config=load_config(),
+                trace_dir=trace_dir,
+                output_dir=output_dir,
+            )
+            trace = response["trace"]
+
+            self.assertEqual(len(trace["task"]["context_files"]), 2)
+            self.assertEqual(response["comparison"]["document_delta"]["kept_count"], 1)
+            self.assertEqual(len(response["comparison"]["document_delta"]["added"]), 1)
+
+    def test_parse_paths_accepts_textarea_or_list(self) -> None:
+        self.assertEqual(parse_paths(" a.txt \n\n b.txt "), ["a.txt", "b.txt"])
+        self.assertEqual(parse_paths([" a.txt ", ""]), ["a.txt"])
 
     def test_compare_product_traces_reports_evidence_and_metric_deltas(self) -> None:
         parent = {

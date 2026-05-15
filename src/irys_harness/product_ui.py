@@ -80,11 +80,7 @@ def build_handler(
                     )
                     self.send_json(response)
                     return
-                paths_raw = payload.get("paths", [])
-                if isinstance(paths_raw, str):
-                    paths = [line.strip() for line in paths_raw.splitlines() if line.strip()]
-                else:
-                    paths = [str(item) for item in paths_raw if str(item).strip()]
+                paths = parse_paths(payload.get("paths", []))
                 matter_id = str(payload.get("matter_id", "matter"))
                 upload_paths = save_uploaded_files(
                     payload.get("uploads", []),
@@ -162,6 +158,12 @@ def rerun_from_trace(
     base_matter_id = str(task.get("task_id") or "matter")
     suffix = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
     matter_id = sanitize_matter_id(f"{base_matter_id}-nudge-{suffix}")
+    paths.extend(parse_paths(payload.get("paths", [])))
+    upload_paths = save_uploaded_files(
+        payload.get("uploads", []),
+        upload_root=Path(output_dir) / "_uploads" / matter_id,
+    )
+    paths.extend(str(path) for path in upload_paths)
     objective = f"{original_objective}\n\nUser steering note: {nudge}"
     result = run_product_matter(
         objective=objective,
@@ -183,6 +185,12 @@ def rerun_from_trace(
     response["trace"] = child_trace
     response["comparison"] = compare_product_traces(parent, child_trace)
     return response
+
+
+def parse_paths(raw_paths: Any) -> list[str]:
+    if isinstance(raw_paths, str):
+        return [line.strip() for line in raw_paths.splitlines() if line.strip()]
+    return [str(item).strip() for item in raw_paths or [] if str(item).strip()]
 
 
 def comparison_from_parent(trace: dict[str, Any], *, trace_dir: str | Path) -> dict[str, Any] | None:
@@ -467,6 +475,10 @@ INDEX_HTML = r"""<!doctype html>
       </div>
       <label for="nudge">Nudge</label>
       <textarea id="nudge"></textarea>
+      <label for="rerunPaths">Additional Corpus Paths</label>
+      <textarea id="rerunPaths"></textarea>
+      <label for="rerunFiles">Additional Corpus Files</label>
+      <input id="rerunFiles" type="file" multiple />
       <div class="row">
         <button class="secondary" id="rerunTrace">Rerun</button>
       </div>
@@ -494,6 +506,8 @@ INDEX_HTML = r"""<!doctype html>
       $("answer").textContent = "";
       $("tracepath").value = "";
       $("nudge").value = "";
+      $("rerunPaths").value = "";
+      $("rerunFiles").value = "";
       $("diagnosis").innerHTML = "";
       $("comparison").innerHTML = "";
       $("events").innerHTML = "";
@@ -548,12 +562,15 @@ INDEX_HTML = r"""<!doctype html>
       rerunTrace.disabled = true;
       status.textContent = "Rerunning";
       try {
+        const uploads = await readUploads($("rerunFiles").files);
         const response = await fetch("/api/rerun", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify({
             trace_path: $("tracepath").value,
             nudge: $("nudge").value,
+            paths: $("rerunPaths").value,
+            uploads,
             live_synthesis: $("live").checked,
             top_k: Number($("topk").value || 12)
           })
