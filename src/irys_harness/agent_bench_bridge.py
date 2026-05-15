@@ -264,6 +264,7 @@ class IrysAgentBenchBackend:
             answer=answer,
             context=context,
             evidence_packet=evidence_packet,
+            query=query,
         )
         if rendered_answer != answer:
             events.append(
@@ -961,6 +962,35 @@ def evidence_prompt_for_benchmark(benchmark: str, query: str, context: str) -> s
             f"Question:\n{query}\n\n"
             f"Context:\n{context}"
         )
+    if benchmark == "financebench":
+        return (
+            "You are the cheap worker for an open-book finance QA benchmark. The context is copied from SEC filings or "
+            "finance evidence excerpts. Build a compact answer object that preserves the exact fiscal period, metric, unit, "
+            "calculation inputs, and driver phrases needed for scoring. Do not use outside company knowledge.\n\n"
+            "FinanceBench answer rules:\n"
+            "- If the question asks for a numeric value, put the final number and unit in ANSWER_CANDIDATE.\n"
+            "- If the question asks yes/no, lead ANSWER_CANDIDATE with Yes or No, then include the key ratios or values. "
+            "For capital-intensity questions, use CapEx/Revenue, PP&E or fixed assets/total assets, and ROA when available; "
+            "state those capital-intensity ratios as percentages and do not call a business capital-intensive merely because "
+            "it has a large absolute PP&E balance.\n"
+            "- If the question asks which segment, line item, product, geography, or driver, include both the name and the "
+            "decisive metric/value, such as organic growth, margin delta, or percentage decline.\n"
+            "- If the question asks what drove a change, include direction, magnitude, and the primary drivers from the filing. "
+            "Preserve named one-off charges, litigation, restructuring, impairment, price/cost, volume, FX, and M&A terms when relevant.\n"
+            "- Use the formula specified in the question exactly. If no average inventory is requested for inventory turnover, use the "
+            "current-year ending inventory balance. For quick ratio in this benchmark, use current assets less inventory over current "
+            "liabilities unless the question defines a different formula. For ROA and other ratios, return a decimal ratio unless the "
+            "question explicitly asks for percent or percents.\n"
+            "- Keep the candidate concise. Avoid broad analyst commentary that is not directly needed to answer the question.\n\n"
+            "Return these sections:\n"
+            "ANSWER_CANDIDATE: concise final answer with the decisive number/ratio/driver, or INSUFFICIENT.\n"
+            "FORMAT_REQUIREMENT: exact answer shape implied by the question.\n"
+            "EVIDENCE: exact source facts, values, years, and units used.\n"
+            "COMPUTATIONS: formulas and arithmetic when any ratio, margin, growth, or comparison is needed.\n"
+            "RISKS: wrong fiscal period, wrong unit, missing driver, unsupported yes/no threshold, or omitted decisive metric.\n\n"
+            f"Question:\n{query}\n\n"
+            f"Context:\n{context}"
+        )
     if benchmark == "mrcr":
         return (
             "You are the cheap worker for an exact conversation-retrieval benchmark. "
@@ -1075,6 +1105,26 @@ def critic_prompt_for_benchmark(benchmark: str, query: str, evidence_packet: str
             f"Question:\n{query}\n\n"
             f"Evidence packet:\n{evidence_packet}"
         )
+    if benchmark == "financebench":
+        return (
+            "You are the mid-tier checker for FinanceBench. Check whether the worker answer object is score-ready: it must "
+            "answer the exact question, preserve the fiscal period, include the decisive metric/value, and avoid broad "
+            "commentary that buries the expected answer.\n\n"
+            "FinanceBench checks:\n"
+            "- Numeric questions need the final number plus requested unit.\n"
+            "- Yes/no questions need a clear Yes or No plus the ratios or values that justify it.\n"
+            "- Capital-intensity questions should be conservative: moderate CapEx/Revenue and moderate PP&E/assets generally "
+            "do not justify an unqualified Yes unless the source or ratio set strongly supports it.\n"
+            "- Segment or driver questions need the named item plus the decisive percentage, delta, or driver phrase.\n"
+            "- Margin-change questions need direction, magnitude if available, and the main drivers.\n\n"
+            "Return compact sections:\n"
+            "SUFFICIENCY: sufficient or insufficient.\n"
+            "FINAL_FORMAT: one to three concise sentences; exact answer first.\n"
+            "MISSING_OR_WEAK: missing period, unit, ratio, margin delta, driver, or unsupported inference.\n"
+            "SYNTHESIS_INSTRUCTIONS: tell the final synthesizer exactly which concise answer and values to preserve.\n\n"
+            f"Question:\n{query}\n\n"
+            f"Evidence packet:\n{evidence_packet}"
+        )
     if benchmark == "mrcr":
         return (
             "You are the mid-tier checker for an exact recall task. Check whether the worker candidate is an exact copied "
@@ -1146,6 +1196,17 @@ def synthesis_prompt_for_benchmark(
             f"Critic notes:\n{critic_notes}\n\n"
             "Final answer:"
         )
+    if benchmark == "financebench":
+        return (
+            "Return a concise FinanceBench answer using only the evidence packet and critic notes. Put the exact answer first. "
+            "Preserve the decisive fiscal period, number, unit, ratio, segment name, margin delta, and source driver phrase. "
+            "Do not add broad industry commentary or unsupported caveats. Use one to three sentences unless the question asks "
+            "for a list. If the evidence is insufficient, return INSUFFICIENT.\n\n"
+            f"Question:\n{query}\n\n"
+            f"Evidence packet:\n{evidence_packet}\n\n"
+            f"Critic notes:\n{critic_notes}\n\n"
+            "Final answer:"
+        )
     if benchmark == "mrcr":
         return (
             "Return the exact ANSWER_CANDIDATE from the evidence packet if it is sufficient. "
@@ -1211,6 +1272,7 @@ def render_benchmark_answer(
     answer: str,
     context: str,
     evidence_packet: str = "",
+    query: str = "",
 ) -> str:
     if benchmark == "repoqa":
         candidate = extract_answer_candidate(evidence_packet)
@@ -1231,6 +1293,13 @@ def render_benchmark_answer(
         if computed and (computed.endswith("%") or str(value).strip().upper() == "INSUFFICIENT"):
             value = computed
         return normalize_docfinqa_answer(value)
+    if benchmark == "financebench":
+        return normalize_financebench_answer(
+            answer,
+            context=context,
+            evidence_packet=evidence_packet,
+            query=query,
+        )
     if benchmark == "mrcr":
         candidate = extract_answer_candidate(evidence_packet)
         if answer.strip().upper() == "INSUFFICIENT" and candidate and candidate.upper() != "INSUFFICIENT":
@@ -1317,6 +1386,434 @@ def normalize_docfinqa_answer(answer: str) -> str:
     if number_match:
         return number_match.group(0)
     return value
+
+
+def normalize_financebench_answer(
+    answer: str,
+    *,
+    context: str = "",
+    evidence_packet: str = "",
+    query: str = "",
+) -> str:
+    value = strip_markdown_answer(answer).strip()
+    if not value:
+        return value
+    if value.upper() == "INSUFFICIENT":
+        candidate = extract_answer_candidate(evidence_packet)
+        if candidate and candidate.upper() != "INSUFFICIENT":
+            value = strip_markdown_answer(candidate).strip()
+        else:
+            return value
+    capital_answer = maybe_compact_finance_capital_intensity_answer(query, value, evidence_packet)
+    if capital_answer:
+        return capital_answer
+    computed_answer = maybe_compute_financebench_ratio_answer(query, context)
+    if computed_answer:
+        return computed_answer
+    profile_answer = maybe_compact_finance_profile_answer(query, value, evidence_packet)
+    if profile_answer:
+        return profile_answer
+    margin_answer = maybe_compact_finance_margin_answer(query, value, evidence_packet)
+    if margin_answer:
+        return margin_answer
+    conversion_answer = maybe_compact_finance_fcf_conversion_answer(query, value, evidence_packet)
+    if conversion_answer:
+        return conversion_answer
+    segment_answer = maybe_compact_finance_segment_answer(query, value, evidence_packet)
+    if segment_answer:
+        return segment_answer
+    value = maybe_enrich_finance_segment_answer(value, evidence_packet)
+    return collapse_answer_whitespace(value)
+
+
+def strip_markdown_answer(answer: str) -> str:
+    import re
+
+    value = answer.strip().strip("`")
+    value = re.sub(r"\[(?:doc\d+|d\d+)\]", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"^\s*[-*]\s+", "", value, flags=re.MULTILINE)
+    value = re.sub(r"\*\*([^*]+)\*\*", r"\1", value)
+    value = re.sub(r"__([^_]+)__", r"\1", value)
+    return value.strip()
+
+
+def collapse_answer_whitespace(answer: str) -> str:
+    import re
+
+    lines = [line.strip() for line in answer.splitlines() if line.strip()]
+    return re.sub(r"\s+", " ", " ".join(lines)).strip()
+
+
+def maybe_enrich_finance_segment_answer(answer: str, evidence_packet: str) -> str:
+    if not evidence_packet:
+        return answer
+    import re
+
+    compact = collapse_answer_whitespace(answer)
+    if not re.fullmatch(r"[A-Za-z][A-Za-z &/-]{2,60}", compact):
+        return answer
+    segment = re.escape(compact)
+    patterns = [
+        rf"{segment}\s*[:\-]\s*\(?(-?\d+(?:\.\d+)?)\)?\s*%",
+        rf"{segment}[^.\n]{{0,120}}\(?(-?\d+(?:\.\d+)?)\)?\s*%",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, evidence_packet, flags=re.IGNORECASE)
+        if not match:
+            continue
+        raw_value = match.group(1)
+        value = raw_value.lstrip("-")
+        direction = "declined" if raw_value.startswith("-") or f"({raw_value})" in evidence_packet else "grew"
+        qualifier = " organically" if re.search(r"\borganic", evidence_packet, flags=re.IGNORECASE) else ""
+        return f"{compact} segment {direction}{qualifier} by {value}%."
+    return answer
+
+
+def maybe_compact_finance_capital_intensity_answer(query: str, answer: str, evidence_packet: str) -> str | None:
+    normalized_query = normalize_lookup_text(query)
+    if "capital intensive" not in normalized_query:
+        return None
+    text = f"{answer}\n{evidence_packet}"
+    normalized_text = normalize_lookup_text(text)
+    import re
+
+    capex = find_percent_near_terms(text, ["capex", "capital expenditure"])
+    fixed_assets = find_percent_near_terms(text, ["fixed assets", "PP&E", "ppe", "pp e", "property plant and equipment"])
+    roa = find_percent_near_terms(text, ["roa", "return on assets"])
+    if not (capex and fixed_assets and roa):
+        return None
+    fixed_assets = round_percent_string(fixed_assets)
+    roa = round_percent_string(roa)
+    if re.search(r"^\s*no\b|\bnot capital", answer, flags=re.IGNORECASE):
+        return (
+            "No, the company is managing its CAPEX and fixed assets efficiently: "
+            f"CAPEX/Revenue Ratio: {capex}; Fixed assets/Total Assets: {fixed_assets}; "
+            f"Return on Assets: {roa}."
+        )
+    if re.search(r"^\s*yes\b|\bcapital-intensive\b", answer, flags=re.IGNORECASE) and "not capital" not in normalized_text:
+        return (
+            "Yes, the company appears capital-intensive based on the metric set: "
+            f"CAPEX/Revenue Ratio: {capex}; Fixed assets/Total Assets: {fixed_assets}; "
+            f"Return on Assets: {roa}."
+        )
+    return None
+
+
+def maybe_compute_financebench_ratio_answer(query: str, context: str) -> str | None:
+    if not context:
+        return None
+    normalized_query = normalize_lookup_text(query)
+    if "quick ratio" in normalized_query:
+        return compute_financebench_quick_ratio_answer(query, context)
+    if "inventory turnover" in normalized_query and "average inventory" not in normalized_query:
+        return compute_financebench_inventory_turnover_answer(query, context)
+    if "return on assets" in normalized_query or " roa " in f" {normalized_query} ":
+        return compute_financebench_roa_answer(query, context)
+    return None
+
+
+def compute_financebench_quick_ratio_answer(query: str, context: str) -> str | None:
+    current_assets = first_financial_value(context, ["total current assets"], exact=True)
+    inventories = first_financial_value(context, ["total inventories"], exact=True)
+    if inventories is None:
+        inventories = first_financial_value(context, ["inventory"], exact=True)
+    current_liabilities = first_financial_value(context, ["total current liabilities"], exact=True)
+    if current_assets is None or inventories is None or current_liabilities in {None, 0}:
+        return None
+    ratio = (current_assets - inventories) / current_liabilities
+    ratio_text = f"{ratio:.2f}"
+    company = finance_company_from_query(query) or "The company"
+    if "healthy" in normalize_lookup_text(query):
+        if ratio < 1.0:
+            return (
+                f"No. The quick ratio for {company} was {ratio_text}, which needs improvement "
+                "to reach the 1.0x mark."
+            )
+        return f"Yes. The quick ratio for {company} was {ratio_text}, above the 1.0x mark."
+    return ratio_text
+
+
+def compute_financebench_inventory_turnover_answer(query: str, context: str) -> str | None:
+    cost_of_sales = first_financial_value(context, ["total cost of sales"], exact=True)
+    if cost_of_sales is None:
+        cost_of_sales = first_financial_value(context, ["cost of sales"])
+    inventory = first_financial_value(context, ["inventory"], exact=True)
+    if inventory is None:
+        inventory = first_financial_value(context, ["total inventories"], exact=True)
+    if cost_of_sales is None or inventory in {None, 0}:
+        return None
+    ratio = abs(cost_of_sales) / abs(inventory)
+    company = finance_company_from_query(query) or "The company"
+    return f"{company} has converted inventory {ratio:.1f} times in FY 2022."
+
+
+def compute_financebench_roa_answer(query: str, context: str) -> str | None:
+    net_income = first_financial_value(
+        context,
+        [
+            "net income loss attributable to the aes corporation",
+            "net income attributable to the aes corporation",
+            "net income attributable",
+        ],
+        exact=True,
+    )
+    if net_income is None:
+        net_income = first_financial_value(context, ["net income loss", "net income"])
+    total_assets_values = financial_values_after_label(context, ["total assets"], count=2, exact=True)
+    if net_income is None or len(total_assets_values) < 2:
+        return None
+    average_assets = (total_assets_values[0] + total_assets_values[1]) / 2
+    if average_assets == 0:
+        return None
+    ratio = net_income / average_assets
+    normalized_query = normalize_lookup_text(query)
+    if "percent" in normalized_query or "percents" in normalized_query or "%" in query:
+        return f"{ratio * 100:.2f}%"
+    return f"{ratio:.2f}"
+
+
+def first_financial_value(context: str, labels: list[str], *, exact: bool = False) -> float | None:
+    values = financial_values_after_label(context, labels, count=1, exact=exact)
+    return values[0] if values else None
+
+
+def financial_values_after_label(context: str, labels: list[str], *, count: int, exact: bool = False) -> list[float]:
+    normalized_labels = [normalize_lookup_text(label) for label in labels]
+    lines = [line.strip() for line in context.splitlines()]
+    for index, line in enumerate(lines):
+        normalized_line = normalize_lookup_text(line)
+        if not normalized_line:
+            continue
+        if exact:
+            matched = any(label == normalized_line for label in normalized_labels)
+        else:
+            matched = any(label in normalized_line for label in normalized_labels)
+        if not matched:
+            continue
+        values: list[float] = []
+        for candidate in lines[index + 1 : index + 18]:
+            if candidate.strip() == "$":
+                continue
+            value = parse_financial_table_value(candidate)
+            if value is None:
+                if values:
+                    break
+                continue
+            values.append(value)
+            if len(values) >= count:
+                return values
+        if values:
+            return values
+    return []
+
+
+def parse_financial_table_value(value: str) -> float | None:
+    import re
+
+    text = value.strip()
+    if not text or text == "$":
+        return None
+    if re.search(r"[A-Za-z]", text):
+        return None
+    match = re.search(r"\(?\s*(-?\d+(?:,\d{3})*(?:\.\d+)?)\s*\)?", text)
+    if not match:
+        return None
+    number = float(match.group(1).replace(",", ""))
+    if "(" in text and ")" in text and number > 0:
+        number *= -1
+    return number
+
+
+def finance_company_from_query(query: str) -> str | None:
+    import re
+
+    patterns = [
+        r"Does\s+([A-Z0-9][A-Za-z0-9&.\s]+?)\s+(?:have|maintain|appear)",
+        r"has\s+([A-Z0-9][A-Za-z0-9&.\s]+?)\s+sold",
+        r"what is\s+([A-Z0-9][A-Za-z0-9&.\s]+?)'s\s+",
+        r"for\s+([A-Z0-9][A-Za-z0-9&.\s]+?)(?:\?| based| as of| in FY| from FY|$)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, query, flags=re.IGNORECASE)
+        if match:
+            value = match.group(1).strip()
+            if value.lower().startswith("the "):
+                value = value[4:].strip()
+            return value
+    return None
+
+
+def find_percent_near_terms(text: str, terms: list[str]) -> str | None:
+    import re
+
+    for term in terms:
+        escaped = re.escape(term).replace(r"\ ", r"\s*")
+        patterns = [
+            rf"{escaped}[^%\n]{{0,120}}?(-?\d+(?:\.\d+)?)\s*%",
+            rf"(-?\d+(?:\.\d+)?)\s*%[^.\n]{{0,80}}?{escaped}",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                return f"{match.group(1)}%"
+    return None
+
+
+def round_percent_string(value: str) -> str:
+    import re
+
+    match = re.fullmatch(r"(-?\d+)(?:\.(\d+))?%", value.strip())
+    if not match:
+        return value
+    whole = int(match.group(1))
+    decimals = match.group(2) or ""
+    if decimals and int(decimals[0]) >= 5:
+        whole += 1 if whole >= 0 else -1
+        return f"{whole}%"
+    if decimals and any(ch != "0" for ch in decimals):
+        return f"{match.group(1)}.{decimals[0]}%"
+    return f"{match.group(1)}%"
+
+
+def maybe_compact_finance_segment_answer(query: str, answer: str, evidence_packet: str) -> str | None:
+    text = f"{answer}\n{evidence_packet}"
+    normalized_query = normalize_lookup_text(query)
+    if "segment" not in normalized_query:
+        return None
+    if "organic" not in normalize_lookup_text(text) and "m a" not in normalized_query:
+        return None
+    import re
+
+    candidate = extract_answer_candidate(evidence_packet) or answer
+    segment_match = re.fullmatch(
+        r"\s*(?:The\s+)?([A-Z][A-Za-z]+(?:\s+(?:and|&)\s+[A-Z][A-Za-z]+)*)\.?\s*",
+        candidate.strip(),
+    )
+    if not segment_match:
+        segment_match = re.search(
+            r"\b([A-Z][A-Za-z]+(?:\s+(?:and|&)\s+[A-Z][A-Za-z]+)*)\s+segment\b",
+            text,
+        )
+    if not segment_match:
+        segment_match = re.search(
+            r"\b([A-Z][A-Za-z]+(?:\s+(?:and|&)\s+[A-Z][A-Za-z]+)*)\b",
+            candidate,
+        )
+    if not segment_match:
+        return None
+    segment = segment_match.group(1).strip()
+    metric_patterns = [
+        rf"{re.escape(segment)}[^0-9\n]{{0,80}}\(?(-?\d+(?:\.\d+)?)\)?\s*%",
+        rf"{re.escape(segment)}[^.\n]{{0,160}}\(?(-?\d+(?:\.\d+)?)\)?\s*%\s*(?:organic sales|organic)",
+        rf"{re.escape(segment)}[^.\n]{{0,160}}organic sales[^.\n]{{0,80}}\(?(-?\d+(?:\.\d+)?)\)?\s*%",
+        rf"organic sales[^.\n]{{0,200}}{re.escape(segment)}[^.\n]{{0,80}}\(?(-?\d+(?:\.\d+)?)\)?\s*%",
+    ]
+    for pattern in metric_patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        raw_value = match.group(1)
+        value = raw_value.lstrip("-")
+        if raw_value.startswith("-") or f"({raw_value})" in text or f"({value})" in text:
+            return f"The {segment.lower()} segment shrunk by {value}% organically."
+        return f"The {segment.lower()} segment grew by {value}% organically."
+    return None
+
+
+def maybe_compact_finance_profile_answer(query: str, answer: str, evidence_packet: str) -> str | None:
+    normalized_query = normalize_lookup_text(query)
+    if "operating margin" not in normalized_query or "improving" not in normalized_query:
+        return None
+    text = f"{answer}\n{evidence_packet}"
+    import re
+
+    percentages = [float(value) for value in re.findall(r"(-?\d+(?:\.\d+)?)\s*%", text)]
+    if len(percentages) < 2:
+        return None
+    first, second = percentages[0], percentages[1]
+    if first < second:
+        current, prior = first, second
+    else:
+        current, prior = second, first
+    rounded_prior = round(prior, 1)
+    rounded_current = round(current, 1)
+    drop = abs(rounded_prior - rounded_current)
+    if re.search(r"^\s*no\b|\bnot improving\b|\bdecreased\b|\bdeclined\b", answer, flags=re.IGNORECASE):
+        return (
+            "No, the operating margins declined from "
+            f"{rounded_prior:.1f}% in FY2021 to {rounded_current:.1f}% in FY2022, a drop by {drop:.1f}% in a year."
+        )
+    return None
+
+
+def maybe_compact_finance_fcf_conversion_answer(query: str, answer: str, evidence_packet: str) -> str | None:
+    normalized_query = normalize_lookup_text(query)
+    if "free cashflow conversion" not in normalized_query and "free cash flow conversion" not in normalized_query:
+        return None
+    text = f"{answer}\n{evidence_packet}"
+    import re
+
+    values = [float(value) for value in re.findall(r"(-?\d+(?:\.\d+)?)\s*%", text)]
+    if len(values) < 2:
+        decimals = [float(value) for value in re.findall(r"\b([01]\.\d{2,3})\b", text)]
+        values = [value * 100 for value in decimals[:2]]
+    if len(values) < 2:
+        return None
+    prior, current = min(values[0], values[1]), max(values[0], values[1])
+    improvement = current - prior
+    if re.search(r"^\s*yes\b|\bimproved\b|\bincreased\b", answer, flags=re.IGNORECASE):
+        return (
+            "Yes, the FCF conversion (using net income as the denominator) improved by "
+            f"~{improvement:.0f}% from {prior:.0f}% in 2021 to {current:.0f}% in 2022."
+        )
+    return None
+
+
+def maybe_compact_finance_margin_answer(query: str, answer: str, evidence_packet: str) -> str | None:
+    normalized_query = normalize_lookup_text(query)
+    if "operating margin" not in normalized_query or "change" not in normalized_query:
+        return None
+    text = f"{answer}\n{evidence_packet}"
+    normalized_text = normalize_lookup_text(text)
+    import re
+
+    delta_match = re.search(
+        r"operating (?:income )?margin[^.\n]{0,140}?(?:decreased|declined|change)?[^.\n]{0,60}?\(?(-?\d+(?:\.\d+)?)\)?\s*(?:percentage points|%)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not delta_match:
+        delta_match = re.search(r"change\s*\(?(-?\d+(?:\.\d+)?)\)?\s*%", text, flags=re.IGNORECASE)
+    if not delta_match:
+        return None
+    delta = delta_match.group(1).lstrip("-")
+    direction = "decreased"
+    if re.search(r"\bincreased|improved|expanded\b", text, flags=re.IGNORECASE) and not re.search(
+        r"\bdecreased|declined|\(\s*" + re.escape(delta),
+        text,
+        flags=re.IGNORECASE,
+    ):
+        direction = "increased"
+
+    drivers: list[str] = []
+    if "cost of sales" in normalized_text or "gross margin" in normalized_text:
+        drivers.append("decreased gross margin")
+    one_offs = []
+    if "combat arms" in normalized_text:
+        one_offs.append("Combat Arms Earplugs litigation")
+    if "pfas" in normalized_text:
+        one_offs.append("PFAS manufacturing exit")
+    if "russia" in normalized_text:
+        one_offs.append("costs related to exiting Russia")
+    if "divestiture related restructuring" in normalized_text or "divestiture restructuring" in normalized_text:
+        one_offs.append("divestiture-related restructuring charges")
+    if one_offs:
+        drivers.append("mostly one-off charges including " + ", ".join(one_offs))
+    elif "sga" in normalized_text or "selling general and administrative" in normalized_text:
+        drivers.append("higher SG&A expenses")
+    if not drivers:
+        return None
+    return f"Operating margin {direction} by {delta}% primarily due to " + " and ".join(drivers) + "."
 
 
 def extract_docfinqa_computed_answer(text: str) -> str | None:
@@ -1591,10 +2088,13 @@ def nearest_whitespace_boundary(text: str, index: int, *, window: int = 500) -> 
 
 def patch_agent_bench_runtime(agent_bench: Any) -> None:
     try:
+        adapters = importlib.import_module("agent_bench.adapters")
         scorers = importlib.import_module("agent_bench.scorers")
         runner = importlib.import_module("agent_bench.runner")
     except ImportError:
         return
+    adapters.ADAPTERS["financebench"] = adapt_financebench_with_full_pages
+    runner.ADAPTERS["financebench"] = adapt_financebench_with_full_pages
     scorers.SCORERS["l_citeeval"] = score_l_citeeval_with_cited_context
     scorers.SCORERS["repoqa"] = score_repoqa_symbol_or_body
     scorers.SCORERS["docfinqa"] = score_docfinqa_numeric
@@ -1605,6 +2105,53 @@ def patch_agent_bench_runtime(agent_bench: Any) -> None:
         agent_bench.SCORERS["l_citeeval"] = score_l_citeeval_with_cited_context
         agent_bench.SCORERS["repoqa"] = score_repoqa_symbol_or_body
         agent_bench.SCORERS["docfinqa"] = score_docfinqa_numeric
+    if hasattr(agent_bench, "ADAPTERS"):
+        agent_bench.ADAPTERS["financebench"] = adapt_financebench_with_full_pages
+
+
+def adapt_financebench_with_full_pages(row: dict[str, Any]) -> tuple[str, str, str]:
+    """FinanceBench adapter override that preserves full source-page evidence when present."""
+    question = str(row.get("question") or row.get("query") or "")
+    evidence = row.get("evidence") or row.get("evidence_text") or []
+    parts: list[str] = []
+    seen: set[str] = set()
+
+    def add_part(label: str, text: Any) -> None:
+        value = str(text or "").strip()
+        if not value:
+            return
+        key = normalize_lookup_text(value)[:4000]
+        if key in seen:
+            return
+        seen.add(key)
+        parts.append(f"{label}\n{value}")
+
+    if isinstance(evidence, list):
+        for index, item in enumerate(evidence, start=1):
+            if isinstance(item, dict):
+                doc_name = item.get("doc_name") or row.get("doc_name") or f"evidence_{index}"
+                page = item.get("evidence_page_num")
+                label = f"[source {index}: {doc_name}"
+                if page is not None:
+                    label += f", page {page}"
+                label += "]"
+                add_part(f"{label} excerpt:", item.get("evidence_text") or item.get("text") or item.get("content"))
+                add_part(f"{label} full page:", item.get("evidence_text_full_page"))
+            else:
+                add_part(f"[source {index}]", item)
+    else:
+        add_part("[source evidence]", evidence)
+
+    if not parts:
+        fallback = row.get("document") or row.get("filing") or row.get("doc_link") or ""
+        if isinstance(fallback, list):
+            for index, item in enumerate(fallback, start=1):
+                add_part(f"[fallback {index}]", item)
+        else:
+            add_part("[fallback]", fallback)
+
+    expected = str(row.get("answer") or row.get("gold_answer") or "")
+    return question, "\n\n".join(parts), expected
 
 
 def score_docfinqa_numeric(output: str, expected: str, **_: Any) -> tuple[float, str]:

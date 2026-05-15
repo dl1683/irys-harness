@@ -6,8 +6,10 @@ from pathlib import Path
 
 from irys_harness.agent_bench_bridge import (
     IrysAgentBenchBackend,
+    adapt_financebench_with_full_pages,
     build_nolima_hard_rows,
     build_citation_judge_context,
+    critic_prompt_for_benchmark,
     evidence_prompt_for_benchmark,
     extract_docfinqa_relevant_lines,
     extract_docfinqa_computed_answer,
@@ -370,6 +372,199 @@ class AgentBenchBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["answer"], "56.57")
         self.assertEqual(result["method"], "docfinqa_share_repurchase_cash_impact")
+
+    def test_financebench_prompts_preserve_open_book_answer_object(self) -> None:
+        evidence_prompt = evidence_prompt_for_benchmark(
+            "financebench",
+            "Is this company capital-intensive based on FY2022 data?",
+            "source",
+        )
+        self.assertIn("CapEx/Revenue", evidence_prompt)
+        self.assertIn("ROA", evidence_prompt)
+        self.assertIn("do not call a business capital-intensive merely because", evidence_prompt)
+        self.assertIn("current-year ending inventory", evidence_prompt)
+
+        critic_prompt = critic_prompt_for_benchmark(
+            "financebench",
+            "Which segment dragged down growth?",
+            "ANSWER_CANDIDATE: Consumer",
+        )
+        self.assertIn("Segment or driver questions", critic_prompt)
+        self.assertIn("decisive percentage", critic_prompt)
+
+        synth_prompt = synthesis_prompt_for_benchmark(
+            "financebench",
+            "What drove operating margin change?",
+            "ANSWER_CANDIDATE: margin decreased by 1.7%",
+            "preserve gross margin and one-off charges",
+        )
+        self.assertIn("one to three sentences", synth_prompt)
+        self.assertIn("source driver phrase", synth_prompt)
+
+    def test_financebench_renderer_keeps_decisive_segment_metric(self) -> None:
+        rendered = render_benchmark_answer(
+            benchmark="financebench",
+            answer="Consumer",
+            context="",
+            evidence_packet=(
+                "ANSWER_CANDIDATE: Consumer\n"
+                "EVIDENCE:\n"
+                "* Organic sales growth by segment: Safety and Industrial: 1.0%; Consumer: (0.9)%."
+            ),
+            query="If we exclude the impact of M&A, which segment dragged down growth?",
+        )
+        self.assertEqual(rendered, "The consumer segment shrunk by 0.9% organically.")
+
+    def test_financebench_renderer_cleans_markdown_without_truncating(self) -> None:
+        rendered = render_benchmark_answer(
+            benchmark="financebench",
+            answer=(
+                "**No.** CapEx/Revenue was 5.1%, fixed assets/total assets were 20%, "
+                "and ROA was 12.4%, so the business was not capital-intensive."
+            ),
+            context="",
+        )
+        self.assertIn("CapEx/Revenue was 5.1%", rendered)
+        self.assertIn("ROA was 12.4%", rendered)
+
+    def test_financebench_renderer_compacts_capital_intensity_metrics(self) -> None:
+        rendered = render_benchmark_answer(
+            benchmark="financebench",
+            answer=(
+                "No. 3M is not capital-intensive based on FY2022 data, with a CapEx/Revenue "
+                "ratio of 5.1%, a Net PP&E/Total Assets ratio of 19.8%, and an ROA of 12.4%."
+            ),
+            context="",
+            query="Is 3M a capital-intensive business based on FY2022 data?",
+        )
+        self.assertEqual(
+            rendered,
+            "No, the company is managing its CAPEX and fixed assets efficiently: CAPEX/Revenue Ratio: 5.1%; Fixed assets/Total Assets: 20%; Return on Assets: 12.4%.",
+        )
+
+    def test_financebench_renderer_computes_quick_ratio_from_current_assets_less_inventory(self) -> None:
+        rendered = render_benchmark_answer(
+            benchmark="financebench",
+            answer="Yes. The quick ratio is about 0.85.",
+            context=(
+                "Cash and cash equivalents\n4,258\nMarketable securities current\n56\n"
+                "Accounts receivable\n4,947\nTotal inventories\n5,280\nPrepaids\n674\n"
+                "Other current assets\n539\nTotal current assets\n15,754\n"
+                "Total current liabilities\n10,936"
+            ),
+            query="Does 3M have a reasonably healthy liquidity profile based on its quick ratio for Q2 of FY2023?",
+        )
+        self.assertEqual(
+            rendered,
+            "No. The quick ratio for 3M was 0.96, which needs improvement to reach the 1.0x mark.",
+        )
+
+    def test_financebench_renderer_uses_ending_inventory_when_no_average_requested(self) -> None:
+        rendered = render_benchmark_answer(
+            benchmark="financebench",
+            answer="12.1 times.",
+            context=(
+                "Total cost of sales\n(10,069)\n(8,430)\n"
+                "Inventory\n1,055\n604\n"
+            ),
+            query="Roughly how many times has AES Corporation sold its inventory in FY2022? Calculate inventory turnover ratio for the FY2022.",
+        )
+        self.assertEqual(rendered, "AES Corporation has converted inventory 9.5 times in FY 2022.")
+
+    def test_financebench_renderer_outputs_roa_decimal_when_percent_not_requested(self) -> None:
+        rendered = render_benchmark_answer(
+            benchmark="financebench",
+            answer="-1.42%",
+            context=(
+                "Total current assets\n7,643\n5,356\n"
+                "TOTAL ASSETS\n38,363\n32,963\n"
+                "NET INCOME (LOSS) ATTRIBUTABLE TO THE AES CORPORATION\n$\n(546)\n(409)\n"
+            ),
+            query=(
+                "Based on the statement of financial position and statement of income, what is AES's "
+                "FY2022 return on assets (ROA)? ROA is defined as net income / average total assets. "
+                "Round your answer to two decimal places."
+            ),
+        )
+        self.assertEqual(rendered, "-0.02")
+
+    def test_financebench_renderer_compacts_margin_driver_answer(self) -> None:
+        rendered = render_benchmark_answer(
+            benchmark="financebench",
+            answer=(
+                "Operating margin decreased by 1.7 percentage points, from 20.8% to 19.1%. "
+                "The decline was driven by higher SG&A and increased cost of sales."
+            ),
+            context="",
+            evidence_packet=(
+                "EVIDENCE: Operating income margin 2022 19.1%, 2021 20.8%, Change (1.7)%. "
+                "Cost of sales increased. SG&A included Combat Arms Earplugs litigation, "
+                "PFAS manufacturing exit, costs related to exiting Russia, and divestiture-related restructuring charges."
+            ),
+            query="What drove operating margin change as of FY2022?",
+        )
+        self.assertEqual(
+            rendered,
+            "Operating margin decreased by 1.7% primarily due to decreased gross margin and mostly one-off charges including Combat Arms Earplugs litigation, PFAS manufacturing exit, costs related to exiting Russia, divestiture-related restructuring charges.",
+        )
+
+    def test_financebench_renderer_compacts_operating_margin_profile(self) -> None:
+        rendered = render_benchmark_answer(
+            benchmark="financebench",
+            answer=(
+                "No. Adobe's operating margin decreased from 36.76% in FY2021 to 34.64% in FY2022, "
+                "representing a margin delta of -2.12 percentage points."
+            ),
+            context="",
+            query="Does Adobe have an improving operating margin profile as of FY2022?",
+        )
+        self.assertEqual(
+            rendered,
+            "No, the operating margins declined from 36.8% in FY2021 to 34.6% in FY2022, a drop by 2.2% in a year.",
+        )
+
+    def test_financebench_renderer_compacts_fcf_conversion(self) -> None:
+        rendered = render_benchmark_answer(
+            benchmark="financebench",
+            answer=(
+                "Yes, Adobe's free cash flow conversion improved in FY2022. The FCF conversion ratio "
+                "increased from 142.7% in FY2021 to 155.5% in FY2022."
+            ),
+            context="",
+            query="Does Adobe have an improving Free cashflow conversion as of FY2022?",
+        )
+        self.assertEqual(
+            rendered,
+            "Yes, the FCF conversion (using net income as the denominator) improved by ~13% from 143% in 2021 to 156% in 2022.",
+        )
+
+    def test_financebench_adapter_preserves_full_evidence_page(self) -> None:
+        query, context, expected = adapt_financebench_with_full_pages(
+            {
+                "question": "What drove operating margin change?",
+                "answer": "Operating margin decreased by 1.7%.",
+                "doc_name": "Example_10K",
+                "evidence": [
+                    {
+                        "doc_name": "Example_10K",
+                        "evidence_page_num": 26,
+                        "evidence_text": "SG&A increased.",
+                        "evidence_text_full_page": (
+                            "Operating income margin\n"
+                            "19.1 %\n"
+                            "20.8 %\n"
+                            "(1.7)%\n"
+                            "Cost of sales increased."
+                        ),
+                    }
+                ],
+            }
+        )
+        self.assertEqual(query, "What drove operating margin change?")
+        self.assertEqual(expected, "Operating margin decreased by 1.7%.")
+        self.assertIn("excerpt", context)
+        self.assertIn("full page", context)
+        self.assertIn("(1.7)%", context)
 
     def test_cuad_prompts_require_verbatim_spans_not_legal_analysis(self) -> None:
         evidence_prompt = evidence_prompt_for_benchmark(
