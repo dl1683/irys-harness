@@ -15,6 +15,8 @@ class TraceWriter:
 
     def write(self, state: RunState) -> Path:
         target = self.trace_dir / state.task.benchmark / f"{state.task.task_id}.json"
+        if target.exists():
+            target = target.with_name(f"{target.stem}--{state.run_id}.json")
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("w", encoding="utf-8") as handle:
             json.dump(state.to_trace(), handle, indent=2, sort_keys=True)

@@ -143,7 +143,7 @@ def build_handler(
                             max_files=parse_optional_int(payload.get("max_files")),
                             selected_paths=parse_paths(payload.get("selected_paths", [])) or None,
                             plan_note=str(payload.get("plan_note") or ""),
-                            top_k=int(payload.get("top_k", 12) or 12),
+                            top_k=int(payload.get("top_k", 36) or 36),
                             config=config,
                             use_llm_planning=bool(payload.get("use_llm_planning", False)),
                         )
@@ -201,7 +201,7 @@ def build_handler(
                     trace_dir=trace_dir,
                     output_dir=output_dir,
                     live_synthesis=bool(payload.get("live_synthesis", False)),
-                    top_k=int(payload.get("top_k", 12) or 12),
+                    top_k=int(payload.get("top_k", 36) or 36),
                     max_files=parse_optional_int(payload.get("max_files")),
                     selected_paths=parse_paths(payload.get("selected_paths", [])) or None,
                     pinned_paths=parse_paths(payload.get("pinned_paths", [])) or None,
@@ -310,7 +310,7 @@ def start_product_run_job(
                     trace_dir=trace_dir,
                     output_dir=output_dir,
                     live_synthesis=bool(payload.get("live_synthesis", False)),
-                    top_k=int(payload.get("top_k", 12) or 12),
+                    top_k=int(payload.get("top_k", 36) or 36),
                     max_files=parse_optional_int(payload.get("max_files")),
                     verbose=False,
                     event_callback=event_callback,
@@ -485,7 +485,7 @@ def rerun_from_trace(
         trace_dir=trace_dir,
         output_dir=output_dir,
         live_synthesis=bool(payload.get("live_synthesis", False)),
-        top_k=int(payload.get("top_k", 12) or 12),
+        top_k=int(payload.get("top_k", 36) or 36),
         max_files=parse_optional_int(payload.get("max_files")),
         verbose=False,
         parent_trace_path=str(parent_path),
@@ -529,7 +529,7 @@ def rerun_plan_from_trace(
         max_files=parse_optional_int(payload.get("max_files")),
         selected_paths=selected_paths_for_rerun_payload(payload),
         plan_note=build_rerun_plan_note(payload.get("plan_note"), nudge),
-        top_k=int(payload.get("top_k", 12) or 12),
+        top_k=int(payload.get("top_k", 36) or 36),
         config=config,
         use_llm_planning=bool(payload.get("use_llm_planning", False)),
     )
@@ -945,6 +945,18 @@ INDEX_HTML = r"""<!doctype html>
       margin-top: 10px;
       background: #f7f9fb;
     }
+    .steering-panel {
+      position: sticky;
+      top: 8px;
+      z-index: 4;
+      margin-bottom: 12px;
+      border: 1px solid #bfd4de;
+      border-radius: 6px;
+      padding: 10px;
+      background: #f8fbfd;
+      box-shadow: 0 2px 10px rgba(23, 32, 42, 0.08);
+    }
+    .steering-panel label:first-child { margin-top: 0; }
     .empty {
       color: var(--muted);
       font-size: 13px;
@@ -1024,7 +1036,7 @@ INDEX_HTML = r"""<!doctype html>
       <details class="control-help">
         <summary>What the controls mean</summary>
         <small>
-          Folders are read recursively. No artificial file-count or per-document character cap is applied to local corpus paths. Matter ID groups saved runs and costs. Chat ID keeps separate conversations inside the same matter. Smart source planning reviews the file inventory before the first read and falls back to path scoring if model planning is unavailable. Draft final answer is on by default and calls the configured drafting model; turn it off only for a cheap dry run. Evidence chunks controls how many retrieved chunks are used for the answer packet. Source actions let you read a document more deeply, pin it into synthesis, or hold it back on the next pass. Message Cost is the loaded run; Matter Cost totals saved traces for the matter.
+          Folders are read recursively. No artificial file-count or per-document character cap is applied to local corpus paths. Matter ID groups saved runs and costs. Chat ID keeps separate conversations inside the same matter. Smart source planning reviews the file inventory before the first read and falls back to path scoring if model planning is unavailable. Draft final answer is on by default and calls the configured drafting model; turn it off only for a cheap dry run. Evidence chunks controls how many retrieved chunks are used for the answer packet; the default favors source coverage over minimal token use. Source actions let you read a document more deeply, pin it into synthesis, or hold it back on the next pass. Message Cost is the loaded run; Matter Cost totals saved traces for the matter.
         </small>
       </details>
       <label for="matter">Matter ID</label>
@@ -1043,7 +1055,7 @@ INDEX_HTML = r"""<!doctype html>
         <label class="toggle"><input id="usePlanner" type="checkbox" checked /> Smart source planning</label>
         <label class="toggle"><input id="live" type="checkbox" checked /> Draft final answer</label>
         <label for="topk">Evidence chunks</label>
-        <input id="topk" type="number" min="1" max="50" value="12" />
+        <input id="topk" type="number" min="1" max="200" value="36" />
       </div>
       <div class="row">
         <button id="run">Run Approved Plan</button>
@@ -1074,6 +1086,9 @@ INDEX_HTML = r"""<!doctype html>
       <textarea id="firstReadPaths" placeholder="Review Plan fills this with the files Irys intends to read first. Edit it before running if the plan is wrong."></textarea>
       <label for="planNote">Plan Correction</label>
       <textarea id="planNote" placeholder="Correct the plan here: focus on 10-Ks, start with the latest amendment, ignore draft folders, include quarterly reports, or compare all agreements."></textarea>
+      <div class="row">
+        <button class="secondary" id="applyPlanCorrection">Apply Plan Correction</button>
+      </div>
       <h2 style="margin-top:16px">Detailed Plan</h2>
       <div class="list" id="planPreview">
         <div class="empty">Choose a corpus and objective, then review the plan before running.</div>
@@ -1105,22 +1120,24 @@ INDEX_HTML = r"""<!doctype html>
       <h2>Workstream</h2>
       <div class="timeline" id="runTimeline"></div>
       <div class="item" id="currentStep"><strong>Idle</strong><small>No run has started.</small></div>
+      <div class="steering-panel">
+        <label for="nudge">Steer the Next Pass</label>
+        <textarea id="nudge" placeholder="Example: focus on the 2024 10-K only, ignore Form 4s, compare against the latest amendment, read the guaranty more closely, or answer only the EPS question."></textarea>
+        <div class="hint">This stays available while a run is working. Preview shows how the next pass re-plans which files to read; Apply Nudge reruns the same matter with your correction.</div>
+        <label for="rerunPaths">Additional Corpus Paths</label>
+        <textarea id="rerunPaths" placeholder="Optional: add another local file or folder path for the next pass."></textarea>
+        <div class="row">
+          <button class="secondary" id="chooseRerunFolder">Choose Folder</button>
+          <button class="secondary" id="chooseRerunFile">Choose File</button>
+          <button class="secondary" id="chooseRerunFiles">Choose Files</button>
+        </div>
+        <div class="row">
+          <button class="secondary" id="previewNudgePlan">Preview Nudge Plan</button>
+          <button class="secondary" id="rerunTrace">Apply Nudge</button>
+        </div>
+      </div>
       <h2 style="margin-top:16px">What Irys Is Doing</h2>
       <div class="list" id="liveEvents"></div>
-      <label for="nudge">Steer the Next Pass</label>
-      <textarea id="nudge" placeholder="Example: focus on the 2024 10-K only, ignore Form 4s, compare against the latest amendment, read the guaranty more closely, or answer only the EPS question."></textarea>
-      <div class="hint">This keeps the same matter and reruns with your correction. By default the next pass re-plans which files to read; edit or apply First-Read Documents only when you want to force a specific source set.</div>
-      <label for="rerunPaths">Additional Corpus Paths</label>
-      <textarea id="rerunPaths" placeholder="Optional: add another local file or folder path for the next pass."></textarea>
-      <div class="row">
-        <button class="secondary" id="chooseRerunFolder">Choose Folder</button>
-        <button class="secondary" id="chooseRerunFile">Choose File</button>
-        <button class="secondary" id="chooseRerunFiles">Choose Files</button>
-      </div>
-      <div class="row">
-        <button class="secondary" id="previewNudgePlan">Preview Nudge Plan</button>
-        <button class="secondary" id="rerunTrace">Apply Nudge</button>
-      </div>
       <h2 style="margin-top:16px">Run Health</h2>
       <div class="list" id="diagnosis"></div>
       <h2 style="margin-top:16px">Saved Runs</h2>
@@ -1156,6 +1173,7 @@ INDEX_HTML = r"""<!doctype html>
     const status = $("status");
     const run = $("run");
     const planRun = $("planRun");
+    const applyPlanCorrection = $("applyPlanCorrection");
     const stopRun = $("stopRun");
     const loadTrace = $("loadTrace");
     const rerunTrace = $("rerunTrace");
@@ -1275,6 +1293,9 @@ INDEX_HTML = r"""<!doctype html>
         planRun.disabled = false;
       }
     });
+    applyPlanCorrection.addEventListener("click", () => {
+      planRun.click();
+    });
     run.addEventListener("click", async () => {
       run.disabled = true;
       status.textContent = "Running";
@@ -1298,7 +1319,7 @@ INDEX_HTML = r"""<!doctype html>
             conversation_history: activeConversationHistory(),
             live_synthesis: $("live").checked,
             use_llm_planning: $("usePlanner").checked,
-            top_k: Number($("topk").value || 12),
+            top_k: Number($("topk").value || 36),
             selected_paths: pathPayload($("firstReadPaths").value),
             pinned_paths: pinnedSourcePaths,
             plan_note: $("planNote").value
@@ -1365,7 +1386,7 @@ INDEX_HTML = r"""<!doctype html>
             paths: pathPayload($("rerunPaths").value),
             live_synthesis: $("live").checked,
             use_llm_planning: $("usePlanner").checked,
-            top_k: Number($("topk").value || 12),
+            top_k: Number($("topk").value || 36),
             selected_paths: firstReadPathsDirty ? pathPayload($("firstReadPaths").value) : [],
             selected_paths_locked: firstReadPathsDirty,
             excluded_paths: excludedSourcePaths,
@@ -1445,7 +1466,7 @@ INDEX_HTML = r"""<!doctype html>
           selected_paths,
           plan_note: $("planNote").value,
           use_llm_planning: $("usePlanner").checked,
-          top_k: Number($("topk").value || 12)
+          top_k: Number($("topk").value || 36)
         })
       });
       const data = await response.json();
@@ -1461,7 +1482,7 @@ INDEX_HTML = r"""<!doctype html>
           nudge: $("nudge").value,
           paths: pathPayload($("rerunPaths").value),
           use_llm_planning: $("usePlanner").checked,
-          top_k: Number($("topk").value || 12),
+          top_k: Number($("topk").value || 36),
           selected_paths: firstReadPathsDirty ? pathPayload($("firstReadPaths").value) : [],
           selected_paths_locked: firstReadPathsDirty,
           excluded_paths: excludedSourcePaths,
@@ -2199,6 +2220,7 @@ INDEX_HTML = r"""<!doctype html>
       if (fields.error) lines.push(`Error: ${fields.error}`);
       if (fields.detail) lines.push(`Detail: ${fields.detail}`);
       if (fields.user_nudge) lines.push(`Your instruction: ${fields.user_nudge}`);
+      if (fields.planner) lines.push(`Planner: ${fields.planner === "cheap_worker" ? "cheap worker source planner" : fields.planner}`);
       if (fields.source_selection_mode) lines.push(`Source plan: ${formatSourceSelectionMode(fields.source_selection_mode)}`);
       if (fields.reason) lines.push(`Why: ${fields.reason}`);
       if (fields.search_queries) lines.push(`Search targets: ${formatInlineList(fields.search_queries, 12)}`);

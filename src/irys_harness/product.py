@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 from .config import HarnessConfig
 from .events import EventLogger
-from .indexing import load_documents, retrieve_chunks, tokenize
+from .indexing import RetrievedChunk, load_documents, retrieve_chunks, tokenize
 from .metrics import ModelCallRecord
 from .models.gemini import GeminiModelRouter
 from .state import BenchmarkTask, RunState
@@ -33,7 +33,10 @@ SUPPORTED_PRODUCT_EXTENSIONS = {
 }
 
 DEFAULT_PRODUCT_MAX_FILES: int | None = None
+DEFAULT_PRODUCT_TOP_K = 36
 MAX_SOURCE_PLANNER_PATHS = 4000
+MAX_SOURCE_PLANNER_CANDIDATE_PATHS = 240
+MAX_SOURCE_PLANNER_DIRECTORY_ROWS = 80
 MAX_SOURCE_PLANNER_OUTPUT_TOKENS = 4096
 
 
@@ -90,7 +93,7 @@ def run_product_matter(
     trace_dir: str | Path = "traces/product",
     output_dir: str | Path = "outputs/product",
     live_synthesis: bool = False,
-    top_k: int = 12,
+    top_k: int = DEFAULT_PRODUCT_TOP_K,
     max_files: int | None = DEFAULT_PRODUCT_MAX_FILES,
     max_chars_per_doc: int | None = None,
     verbose: bool = True,
@@ -130,6 +133,27 @@ def run_product_matter(
     corpus_paths = discover_corpus_paths(paths, max_files=max_files)
     if not corpus_paths:
         raise ValueError("at least one supported document path is required")
+    emit_pre_event(
+        pre_events,
+        event_callback,
+        "SCOPE",
+        "Found supported documents",
+        summary=f"Found {len(corpus_paths)} supported document(s).",
+        document_count=len(corpus_paths),
+        sample_documents=[path.name for path in corpus_paths[:12]],
+        omitted_document_count=max(0, len(corpus_paths) - 12),
+        next_step="Choose the best first-read set before extracting text.",
+    )
+    emit_pre_event(
+        pre_events,
+        event_callback,
+        "SCOPE",
+        "Choosing first-read documents",
+        summary="Ranking the file inventory against your question before reading full documents.",
+        document_count=len(corpus_paths),
+        planner="cheap_worker" if use_llm_planning else "path_scoring",
+        next_step="Select the most relevant files to read first, or keep the full corpus if narrowing is unsafe.",
+    )
     scope_decision = plan_product_corpus_scope(
         objective=objective,
         paths=corpus_paths,
@@ -150,17 +174,6 @@ def run_product_matter(
             omitted_document_count=max(0, len(pinned_corpus_paths) - 12),
             next_step="Include pinned sources even if the automatic first-read plan would not select them.",
         )
-    emit_pre_event(
-        pre_events,
-        event_callback,
-        "SCOPE",
-        "Found supported documents",
-        summary=f"Found {len(corpus_paths)} supported document(s).",
-        document_count=len(corpus_paths),
-        sample_documents=[path.name for path in corpus_paths[:12]],
-        omitted_document_count=max(0, len(corpus_paths) - 12),
-        next_step="Choose the best first-read set before extracting text.",
-    )
     if len(scope_decision.selected_paths) < len(scope_decision.discovered_paths):
         emit_pre_event(
             pre_events,
@@ -291,14 +304,17 @@ def run_product_matter(
         steer_hint="If these search targets miss the point, stop and rephrase the question or add a steering note.",
     )
     check_product_cancel(should_cancel)
-    retrieved = retrieve_chunks(state.chunks, queries, top_k=top_k)
+    retrieved = retrieve_product_chunks(state.chunks, queries, state.documents, top_k=top_k)
+    source_coverage = build_source_coverage(state.documents, retrieved)
     state.retrieval_iterations.append(
         {
             "iteration": 1,
             "queries": queries,
             "retrieved_chunks": [item.to_dict() for item in retrieved],
-            "reason": "Product matter retrieval from current objective, filenames, and corpus inventory. Conversation history is intentionally excluded from retrieval queries.",
+            "reason": "Product matter retrieval from the current objective and answer target. Conversation history is intentionally excluded from retrieval queries.",
             "conversation_history_used": False,
+            "strategy": "global_plus_source_diverse_retrieval",
+            "source_coverage": source_coverage,
         }
     )
     log.emit(
@@ -308,10 +324,11 @@ def run_product_matter(
         top_k=top_k,
         summary=f"Selected {len(retrieved)} candidate passage(s) for evidence review.",
         selected_sources=summarize_retrieved_sources(retrieved, state.documents),
+        source_coverage=source_coverage,
         next_step="Extract usable evidence from the selected passages.",
     )
 
-    evidence_items = build_product_evidence_items(retrieved)
+    evidence_items = build_product_evidence_items(retrieved, queries=queries)
     state.extraction_records.append(
         {
             "mode": "deterministic_product_snippet_extraction",
@@ -335,6 +352,70 @@ def run_product_matter(
         next_step="Draft the answer from the evidence packet.",
     )
 
+    packet_review: dict[str, Any] | None = None
+    if live_synthesis:
+        packet_review = review_product_packet_with_cheap_worker(
+            state=state,
+            queries=queries,
+            evidence_items=evidence_items,
+            source_coverage=source_coverage,
+            log=log,
+            should_cancel=should_cancel,
+        )
+        revised_queries = [
+            str(query).strip()
+            for query in (packet_review.get("revised_queries", []) if packet_review else [])
+            if str(query).strip()
+        ][:8]
+        if packet_review and packet_review.get("continue_retrieval") is True and revised_queries:
+            check_product_cancel(should_cancel)
+            supplemental = retrieve_product_chunks(
+                state.chunks,
+                revised_queries,
+                state.documents,
+                top_k=top_k,
+            )
+            retrieved = merge_retrieved_chunks(retrieved, supplemental, limit=top_k)
+            source_coverage = build_source_coverage(state.documents, retrieved)
+            state.retrieval_iterations.append(
+                {
+                    "iteration": len(state.retrieval_iterations) + 1,
+                    "queries": revised_queries,
+                    "retrieved_chunks": [item.to_dict() for item in retrieved],
+                    "reason": "Cheap worker packet reviewer requested a second retrieval pass before synthesis.",
+                    "conversation_history_used": False,
+                    "strategy": "worker_review_retrieval_expansion",
+                    "source_coverage": source_coverage,
+                }
+            )
+            log.emit(
+                "SEARCH",
+                "expanded evidence after packet review",
+                chunks=len(retrieved),
+                top_k=top_k,
+                summary="A cheap worker reviewed the packet and requested another retrieval pass before drafting.",
+                queries=revised_queries,
+                selected_sources=summarize_retrieved_sources(retrieved, state.documents),
+                source_coverage=source_coverage,
+                next_step="Rebuild the evidence packet with the expanded sources.",
+            )
+            evidence_items = build_product_evidence_items(retrieved, queries=queries + revised_queries)
+            state.extraction_records.append(
+                {
+                    "mode": "expanded_product_snippet_extraction",
+                    "evidence_items": evidence_items,
+                    "reviewer_queries": revised_queries,
+                }
+            )
+            state.verification_records.append(
+                {
+                    "mode": "expanded_source_chunk_presence_check",
+                    "accepted": [item["claim"] for item in evidence_items],
+                    "rejected": [],
+                    "weak": [],
+                }
+            )
+
     state.final_packet = {
         "mode": "product_user_corpus_packet",
         "question": objective.strip(),
@@ -344,14 +425,20 @@ def run_product_matter(
         "document_boundary": "user_defined_corpus",
         "documents": state.documents,
         "retrieved_chunks": [item.to_dict() for item in retrieved],
+        "source_coverage": source_coverage,
         "verified_evidence": evidence_items,
+        "packet_review": packet_review or {"status": "not_run"},
         "pinned_sources": build_pinned_source_records(
             state.documents,
             state.chunks,
             pinned_paths=[str(path) for path in pinned_corpus_paths],
             evidence_items=evidence_items,
         ),
-        "unresolved": build_unresolved_items(state),
+        "unresolved": build_unresolved_items(
+            state,
+            source_coverage=source_coverage,
+            packet_review=packet_review,
+        ),
     }
 
     if live_synthesis:
@@ -622,7 +709,7 @@ def build_product_plan_preview(
     max_files: int | None = DEFAULT_PRODUCT_MAX_FILES,
     selected_paths: list[str] | None = None,
     plan_note: str | None = None,
-    top_k: int = 12,
+    top_k: int = DEFAULT_PRODUCT_TOP_K,
     config: HarnessConfig | None = None,
     use_llm_planning: bool = False,
 ) -> dict[str, Any]:
@@ -727,41 +814,98 @@ def build_source_planner_prompt(
     paths: list[Path],
     scored_paths: list[dict[str, Any]],
 ) -> str:
-    inventory_rows = []
+    inventory = build_source_planner_inventory(paths=paths, scored_paths=scored_paths)
+    return (
+        "You are a cheap worker model helping route a user-defined document corpus before expensive reading.\n"
+        "Decide which files should be read first for the user's objective. Use semantic judgment over path names, "
+        "folder structure, file types, dates, and deterministic hints. Prefer high-quality work product over minimal token use.\n"
+        "If the objective likely requires broad comparison or the candidate list is too ambiguous, set should_read_full_corpus true.\n"
+        "Do not overfit to finance or legal filings; this may be legal, finance, biomedical, governance, email, research, or another document set.\n\n"
+        f"User objective:\n{objective.strip()}\n\n"
+        f"User plan correction:\n{(plan_note or '').strip() or '- None.'}\n\n"
+        "Return JSON only with this shape:\n"
+        "{\n"
+        '  "selected_paths": ["exact path strings from candidate_paths"],\n'
+        '  "rejected_paths": ["exact path strings from candidate_paths that look lower priority"],\n'
+        '  "should_read_full_corpus": false,\n'
+        '  "reason": "short practical explanation",\n'
+        '  "needed_information": ["what the run must find"],\n'
+        '  "confidence": "low|medium|high"\n'
+        "}\n\n"
+        "Compact corpus inventory JSON:\n"
+        f"{json.dumps(inventory, indent=2)}"
+    )
+
+
+def build_source_planner_inventory(*, paths: list[Path], scored_paths: list[dict[str, Any]]) -> dict[str, Any]:
     score_by_path = {str(item.get("path") or ""): item for item in scored_paths}
-    for index, path in enumerate(paths, 1):
-        scored = score_by_path.get(str(path), {})
+    candidate_source_rows = scored_paths[:MAX_SOURCE_PLANNER_CANDIDATE_PATHS]
+    seen_candidates = {str(row.get("path") or "") for row in candidate_source_rows}
+    if len(candidate_source_rows) < min(len(paths), MAX_SOURCE_PLANNER_CANDIDATE_PATHS):
+        for path in paths:
+            key = str(path)
+            if key in seen_candidates:
+                continue
+            candidate_source_rows.append(score_by_path.get(key) or {"path": key, "score": 0, "reasons": []})
+            seen_candidates.add(key)
+            if len(candidate_source_rows) >= MAX_SOURCE_PLANNER_CANDIDATE_PATHS:
+                break
+
+    candidate_rows = []
+    score_by_path = {str(item.get("path") or ""): item for item in scored_paths}
+    for index, row in enumerate(candidate_source_rows, 1):
+        path = Path(str(row.get("path") or ""))
+        scored = score_by_path.get(str(path), row)
         reasons = "; ".join(str(reason) for reason in scored.get("reasons", [])[:4])
-        inventory_rows.append(
+        candidate_rows.append(
             {
                 "index": index,
                 "path": str(path),
                 "filename": path.name,
                 "suffix": path.suffix.lower(),
                 "deterministic_score": int(scored.get("score") or 0),
-                "deterministic_reasons": reasons,
+                "deterministic_reasons": compact_snippet(reasons, max_chars=280),
             }
         )
-    return (
-        "You are a cheap worker model helping route a user-defined document corpus before expensive reading.\n"
-        "Decide which files should be read first for the user's objective. Use semantic judgment over path names, "
-        "folder structure, file types, dates, and deterministic hints. Prefer high-quality work product over minimal token use.\n"
-        "If the objective likely requires broad comparison or the path inventory is too ambiguous, set should_read_full_corpus true.\n"
-        "Do not overfit to finance or legal filings; this may be legal, finance, biomedical, governance, email, research, or another document set.\n\n"
-        f"User objective:\n{objective.strip()}\n\n"
-        f"User plan correction:\n{(plan_note or '').strip() or '- None.'}\n\n"
-        "Return JSON only with this shape:\n"
-        "{\n"
-        '  "selected_paths": ["exact path strings from the inventory"],\n'
-        '  "rejected_paths": ["exact path strings that look lower priority"],\n'
-        '  "should_read_full_corpus": false,\n'
-        '  "reason": "short practical explanation",\n'
-        '  "needed_information": ["what the run must find"],\n'
-        '  "confidence": "low|medium|high"\n'
-        "}\n\n"
-        "Path inventory JSON:\n"
-        f"{json.dumps(inventory_rows, indent=2)}"
-    )
+
+    directory_rows = summarize_corpus_directories(paths)
+    extension_counts: dict[str, int] = {}
+    for path in paths:
+        extension_counts[path.suffix.lower() or "<none>"] = extension_counts.get(path.suffix.lower() or "<none>", 0) + 1
+    return {
+        "total_path_count": len(paths),
+        "candidate_path_count": len(candidate_rows),
+        "omitted_candidate_count": max(0, len(paths) - len(candidate_rows)),
+        "extension_counts": dict(sorted(extension_counts.items())),
+        "directory_summary": directory_rows,
+        "candidate_paths": candidate_rows,
+        "candidate_rule": (
+            "candidate_paths contains the strongest deterministic path matches plus a bounded sample. "
+            "Select exact candidate path strings or request full corpus if the answer likely needs omitted files."
+        ),
+    }
+
+
+def summarize_corpus_directories(paths: list[Path]) -> list[dict[str, Any]]:
+    by_parent: dict[str, dict[str, Any]] = {}
+    for path in paths:
+        key = str(path.parent)
+        row = by_parent.setdefault(
+            key,
+            {
+                "directory": key,
+                "file_count": 0,
+                "extensions": {},
+                "sample_files": [],
+            },
+        )
+        row["file_count"] += 1
+        suffix = path.suffix.lower() or "<none>"
+        row["extensions"][suffix] = row["extensions"].get(suffix, 0) + 1
+        if len(row["sample_files"]) < 5:
+            row["sample_files"].append(path.name)
+    rows = sorted(by_parent.values(), key=lambda row: (-int(row["file_count"]), str(row["directory"]).lower()))
+    return rows[:MAX_SOURCE_PLANNER_DIRECTORY_ROWS]
 
 
 def parse_json_object(text: str) -> dict[str, Any]:
@@ -1245,7 +1389,7 @@ def normalize_path_text(path: Path) -> str:
 
 
 def accession_from_path(path: Path) -> str | None:
-    match = re.search(r"\b\d{10}-\d{2}-\d{6}\b", path.name)
+    match = re.search(r"(?<!\d)\d{10}-\d{2}-\d{6}(?!\d)", path.name)
     return match.group(0) if match else None
 
 
@@ -1324,18 +1468,23 @@ def compact_history_text(value: Any, *, max_chars: int = 6000) -> str:
 
 
 def build_product_contract(state: RunState, *, top_k: int) -> dict[str, Any]:
-    return {
-        "version": 1,
-        "interpreted_goal": state.task.question,
-        "required_output_format": "clean product answer or draft work product",
-        "document_boundary": "user_defined_corpus",
-        "needed_information": [
+    profile = build_objective_profile(state.task.question, plan_note=state.task.metadata.get("plan_note"))
+    needed_information = unique_strings(
+        [
             "user objective",
             "active corpus inventory",
             "most relevant source chunks",
             "source-grounded facts and gaps",
             "clean answer or artifact draft",
-        ],
+            *infer_needed_information(profile),
+        ]
+    )
+    return {
+        "version": 1,
+        "interpreted_goal": state.task.question,
+        "required_output_format": "clean product answer or draft work product",
+        "document_boundary": "user_defined_corpus",
+        "needed_information": needed_information,
         "search_queries": build_product_queries(state.task.question, state.documents),
         "verification_requirements": [
             "Use only user-provided corpus unless external tools are explicitly enabled.",
@@ -1352,15 +1501,325 @@ def build_product_contract(state: RunState, *, top_k: int) -> dict[str, Any]:
 
 
 def build_product_queries(objective: str, documents: list[dict[str, Any]]) -> list[str]:
-    filename_terms = " ".join(str(doc.get("filename", "")) for doc in documents)
-    objective_terms = " ".join(tokenize(objective))
-    return [objective, objective_terms, filename_terms]
+    profile = build_objective_profile(objective)
+    objective_terms = " ".join(profile.get("tokens", []) or tokenize(objective))
+    queries = [objective, objective_terms]
+    families = set(profile.get("requested_families", []))
+    if "annual_report" in families or "quarterly_report" in families:
+        queries.extend(
+            [
+                "earnings per share diluted basic weighted average shares",
+                "net income loss per share diluted basic fiscal year financial highlights",
+            ]
+        )
+    if "current_report" in families:
+        queries.append("press release announcement financial results business highlights priorities")
+    if profile.get("issue_discovery"):
+        queries.append("email correspondence timeline issue dispute problem parties events")
+    if "agreement" in families:
+        queries.append("agreement covenant obligation termination notice cure exception")
+    if "regulatory_or_policy" in families:
+        queries.append("rule policy regulation section requirement exception effective date")
+    if "research_paper" in families:
+        queries.append("study method result finding conclusion population trial")
+    return unique_strings([query for query in queries if query.strip()])
 
 
-def build_product_evidence_items(retrieved: list[Any]) -> list[dict[str, Any]]:
+def retrieve_product_chunks(
+    chunks: list[dict[str, Any]],
+    queries: list[str],
+    documents: list[dict[str, Any]],
+    *,
+    top_k: int,
+) -> list[Any]:
+    global_hits = retrieve_chunks(chunks, queries, top_k=max(top_k, min(top_k * 2, 120)))
+    chunks_by_doc: dict[str, list[dict[str, Any]]] = {}
+    for chunk in chunks:
+        chunks_by_doc.setdefault(str(chunk.get("doc_id")), []).append(chunk)
+
+    per_doc_hits: list[Any] = []
+    doc_count = len([doc for doc in documents if not doc.get("load_error")])
+    if doc_count <= max(top_k, 80):
+        per_doc_limit = 2 if top_k >= doc_count * 2 else 1
+        for doc in documents:
+            doc_id = str(doc.get("doc_id") or "")
+            doc_chunks = chunks_by_doc.get(doc_id) or []
+            if not doc_chunks:
+                continue
+            per_doc_hits.extend(retrieve_chunks(doc_chunks, queries, top_k=per_doc_limit))
+
+    by_key: dict[tuple[str, str], Any] = {}
+    for item in [*global_hits, *per_doc_hits]:
+        by_key[(item.doc_id, item.chunk_id)] = item
+
+    if not by_key:
+        return []
+
+    best_by_doc: dict[str, Any] = {}
+    for item in by_key.values():
+        current = best_by_doc.get(item.doc_id)
+        if current is None or item.score > current.score:
+            best_by_doc[item.doc_id] = item
+
+    selected: list[Any] = []
+    seen: set[tuple[str, str]] = set()
+    if doc_count <= max(top_k, 80):
+        for item in sorted(best_by_doc.values(), key=lambda hit: hit.score, reverse=True):
+            key = (item.doc_id, item.chunk_id)
+            if key not in seen:
+                selected.append(item)
+                seen.add(key)
+            if len(selected) >= top_k:
+                return hydrate_retrieved_chunks_with_neighbors(selected, chunks)
+
+    for item in sorted(by_key.values(), key=lambda hit: hit.score, reverse=True):
+        key = (item.doc_id, item.chunk_id)
+        if key in seen:
+            continue
+        selected.append(item)
+        seen.add(key)
+        if len(selected) >= top_k:
+            break
+    return hydrate_retrieved_chunks_with_neighbors(selected, chunks)
+
+
+def hydrate_retrieved_chunks_with_neighbors(retrieved: list[Any], chunks: list[dict[str, Any]]) -> list[RetrievedChunk]:
+    chunk_by_id = {str(chunk.get("chunk_id") or ""): chunk for chunk in chunks}
+    hydrated: list[RetrievedChunk] = []
+    for item in retrieved:
+        current = chunk_by_id.get(str(item.chunk_id)) or {}
+        parts: list[str] = []
+        prev_id = str(current.get("prev_chunk") or "")
+        next_id = str(current.get("next_chunk") or "")
+        if prev_id and prev_id in chunk_by_id:
+            parts.append("[Previous chunk tail]\n" + tail_text(str(chunk_by_id[prev_id].get("text") or ""), 1800))
+        parts.append("[Matched chunk]\n" + str(item.text or ""))
+        if next_id and next_id in chunk_by_id:
+            parts.append("[Next chunk head]\n" + head_text(str(chunk_by_id[next_id].get("text") or ""), 1800))
+        hydrated.append(
+            RetrievedChunk(
+                chunk_id=item.chunk_id,
+                doc_id=item.doc_id,
+                score=item.score,
+                text="\n\n".join(parts),
+            )
+        )
+    return hydrated
+
+
+def build_source_coverage(documents: list[dict[str, Any]], retrieved: list[Any]) -> dict[str, Any]:
+    represented_doc_ids = {str(item.doc_id) for item in retrieved}
+    loaded_documents = [doc for doc in documents if not doc.get("load_error")]
+    missing_documents = [doc for doc in loaded_documents if str(doc.get("doc_id")) not in represented_doc_ids]
+    represented_documents = [doc for doc in loaded_documents if str(doc.get("doc_id")) in represented_doc_ids]
+    return {
+        "loaded_document_count": len(loaded_documents),
+        "represented_document_count": len(represented_documents),
+        "missing_document_count": len(missing_documents),
+        "represented_documents": [
+            {
+                "doc_id": doc.get("doc_id"),
+                "filename": doc.get("filename"),
+                "path": doc.get("path"),
+            }
+            for doc in represented_documents[:40]
+        ],
+        "missing_documents": [
+            {
+                "doc_id": doc.get("doc_id"),
+                "filename": doc.get("filename"),
+                "path": doc.get("path"),
+            }
+            for doc in missing_documents[:40]
+        ],
+    }
+
+
+def merge_retrieved_chunks(existing: list[Any], supplemental: list[Any], *, limit: int) -> list[Any]:
+    by_key: dict[tuple[str, str], Any] = {}
+    for item in [*supplemental, *existing]:
+        key = (str(item.doc_id), str(item.chunk_id))
+        current = by_key.get(key)
+        if current is None or float(item.score) > float(current.score):
+            by_key[key] = item
+    if not by_key:
+        return []
+    best_by_doc: dict[str, Any] = {}
+    for item in by_key.values():
+        current = best_by_doc.get(item.doc_id)
+        if current is None or float(item.score) > float(current.score):
+            best_by_doc[item.doc_id] = item
+    selected: list[Any] = []
+    seen: set[tuple[str, str]] = set()
+    for item in sorted(best_by_doc.values(), key=lambda hit: float(hit.score), reverse=True):
+        key = (str(item.doc_id), str(item.chunk_id))
+        selected.append(item)
+        seen.add(key)
+        if len(selected) >= limit:
+            return selected
+    for item in sorted(by_key.values(), key=lambda hit: float(hit.score), reverse=True):
+        key = (str(item.doc_id), str(item.chunk_id))
+        if key in seen:
+            continue
+        selected.append(item)
+        seen.add(key)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def review_product_packet_with_cheap_worker(
+    *,
+    state: RunState,
+    queries: list[str],
+    evidence_items: list[dict[str, Any]],
+    source_coverage: dict[str, Any],
+    log: EventLogger,
+    should_cancel: Callable[[], bool] | None,
+) -> dict[str, Any]:
+    check_product_cancel(should_cancel)
+    log.emit(
+        "ANALYZE",
+        "reviewing packet before synthesis",
+        summary="Asking a cheap worker to check whether the evidence packet is sufficient before drafting.",
+        next_step="Expand retrieval if the worker finds missing source coverage or weak evidence.",
+    )
+    prompt = build_product_packet_review_prompt(
+        state=state,
+        queries=queries,
+        evidence_items=evidence_items,
+        source_coverage=source_coverage,
+    )
+    try:
+        result = GeminiModelRouter(state.config).generate(
+            module="product_packet_reviewer",
+            prompt=prompt,
+            temperature=0.0,
+            max_output_tokens=8192,
+        )
+        state.metrics.add_call(result.usage)
+        payload = parse_json_object(result.text)
+        review = normalize_packet_review(payload)
+        review.update(
+            {
+                "status": "used",
+                "model": result.usage.model,
+                "raw_response": compact_snippet(result.text, max_chars=6000),
+            }
+        )
+        state.critic_records.append(
+            {
+                "mode": "cheap_worker_product_packet_review",
+                **review,
+            }
+        )
+        log.emit(
+            "ANALYZE",
+            "packet review complete",
+            model=result.usage.model,
+            summary=str(review.get("assessment") or "Packet review complete."),
+            continue_retrieval=review.get("continue_retrieval"),
+            revised_queries=review.get("revised_queries", []),
+            missing_information=review.get("missing_information", []),
+            next_step="Use the reviewed packet or run an additional retrieval pass.",
+        )
+        return review
+    except Exception as exc:  # noqa: BLE001 - live packet review should not block final synthesis.
+        review = {
+            "status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+            "sufficient": None,
+            "continue_retrieval": False,
+            "revised_queries": [],
+            "missing_information": [],
+            "assessment": "Packet review failed; proceeding with deterministic evidence packet.",
+        }
+        state.critic_records.append({"mode": "cheap_worker_product_packet_review", **review})
+        log.emit(
+            "ANALYZE",
+            "packet review unavailable",
+            summary=review["assessment"],
+            error=review["error"],
+            next_step="Proceed with the current evidence packet.",
+        )
+        return review
+
+
+def build_product_packet_review_prompt(
+    *,
+    state: RunState,
+    queries: list[str],
+    evidence_items: list[dict[str, Any]],
+    source_coverage: dict[str, Any],
+) -> str:
+    contract = state.answer_contract_versions[-1] if state.answer_contract_versions else {}
+    return f"""Review a user-corpus evidence packet before final synthesis.
+
+Use semantic judgment. This is a cheap worker step, so favor quality and missing-evidence detection over saving tokens.
+Do not answer the user. Decide whether the current packet is enough for the final synthesizer, whether some loaded documents should be treated as low value, and whether another retrieval pass should run.
+
+Return JSON only:
+{{
+  "sufficient": true,
+  "continue_retrieval": false,
+  "assessment": "short practical assessment",
+  "missing_information": ["..."],
+  "revised_queries": ["..."],
+  "relevant_source_ids": ["doc_0001"],
+  "low_value_source_ids": ["doc_0002"],
+  "coverage_risks": ["..."]
+}}
+
+Rules:
+- If the task asks for a year, period, entity, agreement, issue, or deliverable and the evidence does not directly cover it, set sufficient false.
+- If selected documents exist but evidence is dominated by the wrong source family or stale period, set continue_retrieval true and provide better queries.
+- If the answer would say information is unavailable, require strong coverage across likely source documents first.
+- Queries should include synonyms and source-specific terms, not huge filename lists.
+- Use the source IDs in the active corpus. Do not invent sources.
+
+User objective:
+{state.task.question}
+
+Answer needs:
+{format_list(list(contract.get("needed_information", []) or []))}
+
+Current retrieval queries:
+{format_list(queries)}
+
+Active corpus:
+{format_documents_for_prompt(state.documents)}
+
+Source coverage:
+{json.dumps(source_coverage, indent=2)}
+
+Evidence packet:
+{format_evidence_for_prompt(evidence_items)}
+"""
+
+
+def normalize_packet_review(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "sufficient": bool(payload.get("sufficient")) if payload.get("sufficient") is not None else None,
+        "continue_retrieval": bool(payload.get("continue_retrieval")),
+        "assessment": str(payload.get("assessment") or "").strip(),
+        "missing_information": normalize_string_list(payload.get("missing_information"), limit=20),
+        "revised_queries": normalize_string_list(payload.get("revised_queries"), limit=12),
+        "relevant_source_ids": normalize_string_list(payload.get("relevant_source_ids"), limit=80),
+        "low_value_source_ids": normalize_string_list(payload.get("low_value_source_ids"), limit=80),
+        "coverage_risks": normalize_string_list(payload.get("coverage_risks"), limit=20),
+    }
+
+
+def normalize_string_list(value: Any, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return unique_strings([str(item).strip() for item in value if str(item).strip()])[:limit]
+
+
+def build_product_evidence_items(retrieved: list[Any], *, queries: list[str] | None = None) -> list[dict[str, Any]]:
     evidence: list[dict[str, Any]] = []
     for index, item in enumerate(retrieved, 1):
-        snippet = compact_snippet(item.text)
+        snippet = compact_relevant_snippet(item.text, queries=queries or [], max_chars=2400)
         evidence.append(
             {
                 "claim": f"Relevant source excerpt {index} from {item.doc_id}.",
@@ -1384,7 +1843,81 @@ def compact_snippet(text: str, *, max_chars: int = 900) -> str:
     return cleaned[: max_chars - 3].rstrip() + "..."
 
 
-def build_unresolved_items(state: RunState) -> list[str]:
+def compact_relevant_snippet(text: str, *, queries: list[str], max_chars: int = 1600) -> str:
+    cleaned = " ".join(str(text or "").split())
+    if len(cleaned) <= max_chars:
+        return cleaned
+    lower = cleaned.lower()
+    query_text = " ".join(str(query or "") for query in queries)
+    query_terms = [term for term in tokenize(query_text) if len(term) >= 4 or term == "eps"]
+    phrases = []
+    if any(term in {"eps", "share", "shares", "income", "loss", "diluted", "basic"} for term in query_terms):
+        phrases.extend(
+            [
+                "net income per share after",
+                "net loss per share after",
+                "earnings per share after",
+                "net income per share",
+                "net loss per share",
+                "earnings per share",
+                "per share",
+                "diluted",
+                "basic",
+            ]
+        )
+    phrases.extend(sorted(set(query_terms), key=len, reverse=True))
+    positions = [lower.find(phrase) for phrase in phrases if phrase and lower.find(phrase) >= 0]
+    if not positions:
+        return compact_snippet(cleaned, max_chars=max_chars)
+    center = min(positions)
+    query_lower = query_text.lower()
+    if "before" not in query_lower and has_before_after_adjustment_per_share(lower):
+        after_match = re.search(
+            r"\b(?:net\s+income|net\s+loss|earnings)?\s*per\s+share\s+after\b.{0,160}?(?:tax|adjustment|adjustments)",
+            lower,
+        )
+        if after_match:
+            center = after_match.start()
+    start = max(0, center - max_chars // 3)
+    end = min(len(cleaned), start + max_chars)
+    start = max(0, end - max_chars)
+    snippet = cleaned[start:end].strip()
+    if start > 0:
+        snippet = "... " + snippet
+    if end < len(cleaned):
+        snippet += " ..."
+    return snippet
+
+
+def has_before_after_adjustment_per_share(text: str) -> bool:
+    normalized_words = re.sub(r"[^a-z0-9]+", " ", str(text or "").lower())
+    has_before_adjustment = bool(
+        re.search(r"\bbefore\b(?:\s+\w+){0,12}\s+(?:tax|adjustment|adjustments)", normalized_words)
+    )
+    has_after_adjustment = bool(
+        re.search(r"\bafter\b(?:\s+\w+){0,12}\s+(?:tax|adjustment|adjustments)", normalized_words)
+    )
+    return has_before_adjustment and has_after_adjustment and ("per share" in normalized_words or "eps" in normalized_words)
+
+
+def head_text(text: str, max_chars: int) -> str:
+    cleaned = str(text or "")
+    return cleaned[:max_chars]
+
+
+def tail_text(text: str, max_chars: int) -> str:
+    cleaned = str(text or "")
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return cleaned[-max_chars:]
+
+
+def build_unresolved_items(
+    state: RunState,
+    *,
+    source_coverage: dict[str, Any] | None = None,
+    packet_review: dict[str, Any] | None = None,
+) -> list[str]:
     items: list[str] = []
     if (
         state.task.metadata.get("conversation_history_turns")
@@ -1403,6 +1936,19 @@ def build_unresolved_items(state: RunState) -> list[str]:
         retrieved = state.retrieval_iterations[-1].get("retrieved_chunks", [])
         if not retrieved:
             items.append("No chunks matched the objective; revise the objective or add relevant documents.")
+    coverage = source_coverage or {}
+    loaded_count = int(coverage.get("loaded_document_count") or 0)
+    missing_count = int(coverage.get("missing_document_count") or 0)
+    if loaded_count > 1 and missing_count:
+        items.append(
+            f"{missing_count} loaded source document(s) did not contribute retrieved evidence; review source coverage before making absence claims."
+        )
+    if packet_review:
+        if packet_review.get("sufficient") is False:
+            assessment = str(packet_review.get("assessment") or "Cheap worker packet review found the evidence insufficient.")
+            items.append(assessment)
+        for missing in packet_review.get("missing_information", [])[:6]:
+            items.append(f"Packet review missing information: {missing}")
     return items
 
 
@@ -1434,6 +1980,7 @@ def build_product_diagnosis(state: RunState) -> dict[str, Any]:
     source_map = list(packet.get("answer_source_map", []) or [])
     unresolved = list(packet.get("unresolved", []) or [])
     pinned_sources = list(packet.get("pinned_sources", []) or [])
+    source_coverage = dict(packet.get("source_coverage") or {})
     load_errors = [doc for doc in state.documents if doc.get("load_error")]
     status = "ready_for_review"
     if load_errors or not state.chunks or not evidence or unresolved:
@@ -1448,6 +1995,7 @@ def build_product_diagnosis(state: RunState) -> dict[str, Any]:
         "evidence_count": len(evidence),
         "answer_source_map_count": len(source_map),
         "pinned_source_count": len(pinned_sources),
+        "source_coverage": source_coverage,
         "unresolved_count": len(unresolved),
         "unresolved": unresolved,
         "supporting_trace_refs": [
@@ -1638,6 +2186,7 @@ def build_pinned_source_records(
 
 def build_product_synthesis_prompt(state: RunState) -> str:
     packet = state.final_packet or {}
+    metric_notes = build_metric_selection_notes(packet.get("verified_evidence", []))
     return f"""Produce the requested legal work product or answer using only the user-provided corpus.
 
 Conversation history:
@@ -1660,14 +2209,22 @@ Evidence packet:
 Worker analysis:
 {packet.get("worker_analysis") or "- Not run."}
 
+Metric selection notes:
+{format_list(metric_notes)}
+
 Unresolved gaps:
 {format_list(packet.get("unresolved", []))}
+
+Numeric and table evidence: preserve row labels, column labels, periods, classes, and basic/diluted distinctions. Do not collapse nearby values into one figure unless the source explicitly says they are identical. When a table gives paired values for the same requested metric, report the pair unless the user asked for only one side.
+If a reconciliation table includes both before-adjustment and after-adjustment versions of a metric, treat before-adjustment rows as intermediate reconciliation rows. Use the final or after-adjustment row for a general adjusted/non-GAAP answer unless the user explicitly asks for the before-adjustment figure.
+If the metric selection notes identify final/after-adjustment evidence, that evidence controls over any worker analysis sentence that only mentions before-adjustment values.
 
 Write a clean answer. Cite source doc IDs and chunk IDs when relying on evidence. If the corpus does not contain enough support, state the gap plainly."""
 
 
 def build_product_worker_analysis_prompt(state: RunState) -> str:
     packet = state.final_packet or {}
+    metric_notes = build_metric_selection_notes(packet.get("verified_evidence", []))
     return f"""Analyze the retrieved user-corpus evidence for the product objective.
 
 Return compact structured notes for the final drafter. Use only the provided evidence.
@@ -1686,12 +2243,57 @@ Evidence packet:
 Pinned sources:
 {format_pinned_sources_for_prompt(packet.get("pinned_sources", []))}
 
+Metric selection notes:
+{format_list(metric_notes)}
+
 Return:
 - ANSWER_TARGET: the exact question or artifact to satisfy.
 - MATERIAL_FACTS: concise source-grounded facts with doc/chunk IDs.
 - CONDITIONS_OR_REQUIREMENTS: notice, timing, approval, threshold, document, or procedural requirements.
 - GAPS: facts missing from the corpus that the drafter should not invent.
-- DRAFTING_NOTES: constraints for a clean user-facing answer."""
+- DRAFTING_NOTES: constraints for a clean user-facing answer.
+
+For numeric or table evidence, preserve row labels, column labels, periods, classes, and basic/diluted distinctions. Do not collapse adjacent rows or columns into one value unless the source explicitly says they are identical. When a table gives paired values for the same requested metric, keep the pair unless the user asked for only one side.
+If a reconciliation table includes both before-adjustment and after-adjustment versions of a metric, treat before-adjustment rows as intermediate reconciliation rows. Use the final or after-adjustment row for a general adjusted/non-GAAP answer unless the user explicitly asks for the before-adjustment figure."""
+
+
+def build_metric_selection_notes(evidence_items: list[dict[str, Any]]) -> list[str]:
+    evidence_text = "\n".join(str(item.get("raw_support") or "") for item in evidence_items).lower()
+    notes: list[str] = []
+    if has_before_after_adjustment_per_share(evidence_text):
+        notes.append(
+            "This packet contains both before-adjustment and after-adjustment per-share rows. "
+            "Before-adjustment rows are intermediate reconciliation rows; use the final/after-adjustment per-share row for a general adjusted or non-GAAP EPS answer unless the user asked for before-adjustment EPS."
+        )
+        notes.extend(extract_adjusted_metric_windows(evidence_items, limit=2))
+    return notes
+
+
+def extract_adjusted_metric_windows(evidence_items: list[dict[str, Any]], *, limit: int) -> list[str]:
+    candidates: list[tuple[int, str]] = []
+    for item in evidence_items:
+        display_text = " ".join(str(item.get("raw_support") or "").replace("\xa0", " ").split())
+        lower_display = display_text.lower()
+        row_matches = list(
+            re.finditer(
+                r"\bper\s+share\s+after\b.{0,120}?(?:tax|adjustment|adjustments)",
+                lower_display,
+            )
+        )
+        if not row_matches:
+            row_matches = list(re.finditer(r"\bafter\b.{0,120}?(?:tax|adjustment|adjustments)", lower_display))
+        source = item.get("source") or {}
+        source_ref = " / ".join(str(part) for part in [source.get("doc_id"), source.get("chunk_id")] if part)
+        period_score = 0 if any(term in lower_display for term in ["year ended", "fiscal year", "full year"]) else 1
+        for match in row_matches:
+            start = max(0, match.start() - 80)
+            end = min(len(display_text), match.end() + 360)
+            window = display_text[start:end].strip()
+            if "per share" not in window.lower():
+                continue
+            prefix = f"{source_ref}: " if source_ref else ""
+            candidates.append((period_score, f"Detected final/after-adjustment per-share evidence: {prefix}{window}"))
+    return unique_strings([item for _, item in sorted(candidates, key=lambda pair: pair[0])])[:limit]
 
 
 def write_product_answer_artifact(state: RunState, *, diagnostic: bool) -> dict[str, Any]:
@@ -1699,7 +2301,7 @@ def write_product_answer_artifact(state: RunState, *, diagnostic: bool) -> dict[
         raise ValueError("state.output_dir is required for product artifact writing")
     output_dir = Path(state.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / "answer.md"
+    path = output_dir / f"answer-{state.run_id}.md"
     path.write_text(state.rendered_answer or "", encoding="utf-8")
     return {
         "type": "diagnostic_preview_markdown" if diagnostic else "answer_markdown",

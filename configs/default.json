@@ -26,6 +26,7 @@
     "contract": "mid_orchestrator",
     "retrieval": "cheap_worker",
     "extraction": "cheap_worker",
+    "product_packet_reviewer": "cheap_worker",
     "critic": "mid_orchestrator",
     "verification": "mid_orchestrator",
     "product_source_planner": "cheap_worker",

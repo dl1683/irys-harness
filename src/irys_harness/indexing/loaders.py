@@ -8,6 +8,25 @@ from markitdown import MarkItDown
 from openpyxl import load_workbook
 
 
+PDF_EXTRACTION_GLYPH_MAP = str.maketrans(
+    {
+        "\ue534": "0",
+        "\ue536": "1",
+        "\ue537": "2",
+        "\ue538": "3",
+        "\ue539": "4",
+        "\ue53a": "5",
+        "\ue53b": "6",
+        "\ue53c": "7",
+        "\ue53d": "8",
+        "\ue53e": "9",
+        "\ue389": "ff",
+        "\ue38c": "fi",
+        "\ue38d": "fl",
+    }
+)
+
+
 @dataclass(frozen=True)
 class DocumentRecord:
     doc_id: str
@@ -133,7 +152,7 @@ def load_document(
     source_posture: str = "benchmark_provided_context",
 ) -> tuple[DocumentRecord, str]:
     try:
-        text = convert_to_text(path, converter=converter)
+        text = normalize_extracted_text(convert_to_text(path, converter=converter))
         if max_chars is not None:
             text = text[:max_chars]
         return (
@@ -175,6 +194,13 @@ def convert_to_text(path: Path, *, converter: MarkItDown | None = None) -> str:
         return structured
     result = (converter or MarkItDown()).convert(path)
     return result.text_content or ""
+
+
+def normalize_extracted_text(text: str) -> str:
+    """Clean common PDF extraction glyph artifacts before retrieval and synthesis."""
+    if not text:
+        return text
+    return text.translate(PDF_EXTRACTION_GLYPH_MAP)
 
 
 def workbook_to_text(path: Path) -> str:

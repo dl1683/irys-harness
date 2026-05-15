@@ -6,7 +6,7 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
-from irys_harness.indexing import chunk_text, load_documents
+from irys_harness.indexing import chunk_text, load_documents, normalize_extracted_text
 
 
 class IndexingTests(unittest.TestCase):
@@ -42,6 +42,12 @@ class IndexingTests(unittest.TestCase):
             self.assertIn("## Sheet: Covenants", text)
             self.assertIn("row 2: EBITDA | 20790000", text)
             self.assertNotIn("NaN", text)
+
+    def test_normalize_extracted_text_repairs_common_pdf_glyphs(self) -> None:
+        text = normalize_extracted_text(
+            "Net income per share - diluted $ \ue534.\ue536\ue538 and free cash \ue38dow e\ue389ects"
+        )
+        self.assertEqual(text, "Net income per share - diluted $ 0.13 and free cash flow effects")
 
 
 if __name__ == "__main__":

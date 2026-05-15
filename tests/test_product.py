@@ -15,13 +15,19 @@ from irys_harness.config import ModelTier, load_config
 from irys_harness.metrics import ModelCallRecord
 from irys_harness.product import (
     build_answer_source_map,
+    build_metric_selection_notes,
+    build_product_evidence_items,
     build_product_plan_preview,
     build_product_synthesis_prompt,
+    build_source_planner_prompt,
+    compact_relevant_snippet,
     compare_product_traces,
     discover_corpus_paths,
     plan_product_corpus_scope,
+    retrieve_product_chunks,
     run_product_matter,
     sanitize_matter_id,
+    score_corpus_paths,
 )
 from irys_harness.product_ui import (
     INDEX_HTML,
@@ -230,6 +236,53 @@ class ProductMatterTests(unittest.TestCase):
             self.assertEqual(plan["planner_metrics"]["total_tokens"], 120)
             self.assertAlmostEqual(plan["planner_metrics"]["estimated_cost"], 0.0001)
 
+    def test_source_planner_prompt_uses_bounded_inventory(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = []
+            for index in range(300):
+                path = root / "archive" / f"irrelevant-{index:03d}.txt"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("x", encoding="utf-8")
+                paths.append(path.resolve())
+            target = root / "filings" / "datadog-announces-fourth-quarter-and-fiscal-year-2024-financial.pdf"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("eps", encoding="utf-8")
+            paths.append(target.resolve())
+            scored = score_corpus_paths("tell me about eps in 2024", paths)
+
+            prompt = build_source_planner_prompt(
+                objective="tell me about eps in 2024",
+                plan_note=None,
+                paths=paths,
+                scored_paths=scored,
+            )
+
+            self.assertIn(target.name, prompt)
+            self.assertIn('"omitted_candidate_count"', prompt)
+            self.assertNotIn("irrelevant-299.txt", prompt)
+
+    def test_sec_fiscal_year_index_beats_filing_date_for_annual_report(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "filings" / "sec" / "10-K"
+            root.mkdir(parents=True)
+            index = root / "INDEX.md"
+            index.write_text(
+                "| Filing Date | Accession | Document | Form |\n"
+                "| 2025-02-20 | `0001561550-25-000025` | ddog-20241231.htm | 10-K |\n"
+                "| 2024-02-23 | `0001561550-24-000009` | ddog-20231231.htm | 10-K |\n",
+                encoding="utf-8",
+            )
+            fiscal_2024 = root / "2025-02-20_0001561550-25-000025.pdf"
+            fiscal_2023 = root / "2024-02-23_0001561550-24-000009.pdf"
+            fiscal_2024.write_text("2024 annual report", encoding="utf-8")
+            fiscal_2023.write_text("2023 annual report", encoding="utf-8")
+
+            rows = score_corpus_paths("tell me about the eps in 2024", [index, fiscal_2024, fiscal_2023])
+
+            self.assertEqual(Path(rows[0]["path"]).name, fiscal_2024.name)
+            self.assertIn("index maps accession to fiscal/report year 2024", rows[0]["reasons"])
+
     def test_product_scope_respects_user_approved_plan_paths(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -279,7 +332,92 @@ class ProductMatterTests(unittest.TestCase):
             self.assertGreaterEqual(trace["diagnosis"]["answer_source_map_count"], 1)
             self.assertTrue(Path(trace["artifacts"][0]["path"]).exists())
             self.assertTrue(trace["artifacts"][0]["diagnostic"])
-            self.assertEqual(result.to_dict()["artifacts"][0]["filename"], "answer.md")
+            self.assertTrue(result.to_dict()["artifacts"][0]["filename"].startswith("answer-run_"))
+            event_messages = [event["message"] for event in trace["events"]]
+            self.assertIn("Found supported documents", event_messages)
+            self.assertIn("Choosing first-read documents", event_messages)
+
+    def test_run_product_matter_preserves_repeated_message_traces(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            doc = root / "source.txt"
+            doc.write_text("The answer is preserved across repeated runs.", encoding="utf-8")
+            trace_dir = root / "traces"
+            kwargs = {
+                "objective": "What is preserved?",
+                "paths": [str(doc)],
+                "matter_id": "Repeated Matter",
+                "config": load_config(),
+                "trace_dir": trace_dir,
+                "live_synthesis": False,
+                "verbose": False,
+            }
+
+            first = run_product_matter(**kwargs)
+            second = run_product_matter(**kwargs)
+
+            self.assertTrue(first.trace_path.exists())
+            self.assertTrue(second.trace_path.exists())
+            self.assertNotEqual(first.trace_path, second.trace_path)
+            self.assertEqual(first.trace_path.name, "Repeated-Matter.json")
+            self.assertIn(second.state.run_id, second.trace_path.name)
+
+    def test_product_retrieval_keeps_source_diversity_for_selected_documents(self) -> None:
+        documents = [
+            {"doc_id": "doc_0001", "filename": "large-stale-report.txt"},
+            {"doc_id": "doc_0002", "filename": "short-target-release.txt"},
+        ]
+        chunks = [
+            {
+                "doc_id": "doc_0001",
+                "chunk_id": f"doc_0001_chunk_{index:04d}",
+                "text": "2024 financial report general policy " * 80,
+            }
+            for index in range(8)
+        ]
+        chunks.append(
+            {
+                "doc_id": "doc_0002",
+                "chunk_id": "doc_0002_chunk_0000",
+                "text": "Fiscal Year 2024 Financial Highlights: GAAP net income per diluted share was $0.52.",
+            }
+        )
+
+        retrieved = retrieve_product_chunks(
+            chunks,
+            ["2024 EPS", "earnings per share diluted basic"],
+            documents,
+            top_k=3,
+        )
+
+        self.assertIn("doc_0002", {item.doc_id for item in retrieved})
+
+    def test_product_retrieval_hydrates_neighbor_context_for_split_tables(self) -> None:
+        documents = [{"doc_id": "doc_0001", "filename": "annual-report.txt"}]
+        chunks = [
+            {
+                "doc_id": "doc_0001",
+                "chunk_id": "doc_0001_chunk_0000",
+                "index": 0,
+                "text": "Year ended December 31, 2024. Net income per share - basic $0.55.",
+                "prev_chunk": None,
+                "next_chunk": "doc_0001_chunk_0001",
+            },
+            {
+                "doc_id": "doc_0001",
+                "chunk_id": "doc_0001_chunk_0001",
+                "index": 1,
+                "text": "Net income per share - diluted $0.52. Weighted average shares 358,636.",
+                "prev_chunk": "doc_0001_chunk_0000",
+                "next_chunk": None,
+            },
+        ]
+
+        retrieved = retrieve_product_chunks(chunks, ["diluted earnings per share 2024"], documents, top_k=1)
+        evidence = build_product_evidence_items(retrieved, queries=["diluted earnings per share 2024"])
+
+        self.assertIn("basic $0.55", evidence[0]["raw_support"])
+        self.assertIn("diluted $0.52", evidence[0]["raw_support"])
 
     def test_run_product_matter_flags_no_matching_evidence(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -393,6 +531,8 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn("Draft final answer is on by default", INDEX_HTML)
         self.assertIn('id="live" type="checkbox" checked', INDEX_HTML)
         self.assertIn("Evidence chunks controls how many retrieved chunks", INDEX_HTML)
+        self.assertIn('id="topk" type="number" min="1" max="200" value="36"', INDEX_HTML)
+        self.assertIn("default favors source coverage over minimal token use", INDEX_HTML)
         self.assertIn('id="usePlanner"', INDEX_HTML)
         self.assertIn("/api/pick-path", INDEX_HTML)
         self.assertIn("/api/plan", INDEX_HTML)
@@ -411,6 +551,9 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn('id="restoreRecommendedCandidates"', INDEX_HTML)
         self.assertIn('id="firstReadPaths"', INDEX_HTML)
         self.assertIn('id="planNote"', INDEX_HTML)
+        self.assertIn('id="applyPlanCorrection"', INDEX_HTML)
+        self.assertIn("Apply Plan Correction", INDEX_HTML)
+        self.assertIn("steering-panel", INDEX_HTML)
         self.assertIn("function renderPlan", INDEX_HTML)
         self.assertIn("function initialPlanPathKey", INDEX_HTML)
         self.assertIn("function rerunPlanPathKey", INDEX_HTML)
@@ -937,6 +1080,40 @@ class ProductMatterTests(unittest.TestCase):
 
             self.assertIn("Worker analysis:", prompt)
             self.assertIn("MATERIAL_FACTS: payment default cure is 5 days.", prompt)
+            self.assertIn("preserve row labels, column labels, periods, classes, and basic/diluted distinctions", prompt)
+
+    def test_metric_selection_notes_flag_intermediate_reconciliation_rows(self) -> None:
+        evidence = [
+            {
+                "raw_support": (
+                    "Non-GAAP net income before non-GAAP tax adjustments. "
+                    "Net income per share before non-GAAP tax adjustments - diluted $2.25. "
+                    "Net income per share after non-GAAP\n| tax adjustments - basic $1.94. "
+                    "Net income per share after non-GAAP\n| tax adjustments - diluted $1.82."
+                )
+            }
+        ]
+
+        notes = build_metric_selection_notes(evidence)
+
+        self.assertGreaterEqual(len(notes), 2)
+        self.assertIn("Before-adjustment rows are intermediate reconciliation rows", notes[0])
+        self.assertIn("$1.82", "\n".join(notes))
+
+    def test_compact_relevant_snippet_centers_final_adjusted_metric_rows(self) -> None:
+        text = (
+            "Revenue was strong. " + ("filler " * 80)
+            + "Net income per share before non-GAAP tax adjustments - basic $2.40. "
+            + "Net income per share before non-GAAP tax adjustments - diluted $2.25. "
+            + "Net income per share after non-GAAP tax adjustments - basic $1.94. "
+            + "Net income per share after non-GAAP tax adjustments - diluted $1.82. "
+            + ("tail " * 80)
+        )
+
+        snippet = compact_relevant_snippet(text, queries=["tell me about EPS in 2024"], max_chars=220)
+
+        self.assertIn("$1.82", snippet)
+        self.assertIn("after non-GAAP tax adjustments", snippet)
 
     def test_build_answer_source_map_links_answer_sections_to_evidence(self) -> None:
         evidence = [
