@@ -959,6 +959,43 @@ INDEX_HTML = r"""<!doctype html>
       font-size: 13px;
       line-height: 1.5;
     }
+    .audit-board {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .audit-card {
+      border: 1px solid var(--line);
+      border-left: 4px solid #9aa6b2;
+      border-radius: 6px;
+      background: #fff;
+      padding: 10px;
+      min-height: 112px;
+      overflow-wrap: anywhere;
+    }
+    .audit-card.good { border-left-color: #2f8f5b; background: #f6fbf7; }
+    .audit-card.warn { border-left-color: #b36b2c; background: #fff8f0; }
+    .audit-card.bad { border-left-color: #bf3f3f; background: #fff6f6; }
+    .audit-card b {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 5px;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+    .audit-card strong {
+      display: block;
+      font-size: 15px;
+      margin-bottom: 6px;
+    }
+    .audit-card small {
+      display: block;
+      color: #2f3b46;
+      font-size: 12px;
+      line-height: 1.45;
+    }
     .hint {
       color: var(--muted);
       font-size: 12px;
@@ -1167,6 +1204,10 @@ INDEX_HTML = r"""<!doctype html>
       <div class="list" id="runBrief">
         <div class="empty">The brief will explain the current plan, what Irys is doing, and what you can change next.</div>
       </div>
+      <h2 style="margin-top:16px">Review Checklist</h2>
+      <div class="audit-board" id="reviewChecklist">
+        <div class="empty">After a plan or run, this checklist will show whether the answer has enough source support, what still needs review, and what to do next.</div>
+      </div>
       <details class="workspace-details" open>
         <summary>Review And Edit Source Plan</summary>
         <div class="hint">This is where you correct Irys before it spends time reading. Uncheck irrelevant documents, add missing first-read paths, or write a plan correction and preview again.</div>
@@ -1327,6 +1368,7 @@ INDEX_HTML = r"""<!doctype html>
       $("planNote").value = "";
       $("planPreview").innerHTML = emptyState("Choose a corpus and objective, then review the plan before running.");
       $("runBrief").innerHTML = emptyState("The brief will explain the current plan, what Irys is doing, and what you can change next.");
+      $("reviewChecklist").innerHTML = emptyState("After a plan or run, this checklist will show whether the answer has enough source support, what still needs review, and what to do next.");
       $("candidateReview").innerHTML = emptyState("Review Plan will show the highest-ranked documents here. Check or uncheck what Irys should read first.");
       currentPlan = null;
       currentPlanNote = "";
@@ -1669,6 +1711,7 @@ INDEX_HTML = r"""<!doctype html>
       $("planPreview").innerHTML = rows.map(([title, body]) => card(title, body)).join("");
       renderCandidateReview(plan.top_candidates || [], firstRead);
       renderRunBrief({plan});
+      renderReviewChecklist({plan});
     }
     function planNeedsRefresh() {
       if (!pathPayload($("firstReadPaths").value).length) return true;
@@ -1728,6 +1771,7 @@ INDEX_HTML = r"""<!doctype html>
       ].filter(Boolean).map(([title, body]) => card(title, body)).join("");
       renderCandidateReview(scope.scored_paths || [], selected);
       renderRunBrief({plan: planLike});
+      renderReviewChecklist({plan: planLike});
     }
     function latestAnswerContract(trace) {
       const versions = trace && Array.isArray(trace.answer_contract_versions) ? trace.answer_contract_versions : [];
@@ -1899,15 +1943,16 @@ INDEX_HTML = r"""<!doctype html>
       $("objective").value = (trace.task || {}).question || $("objective").value;
       excludedSourcePaths = [];
       renderTracePlan(metadata, trace);
+      renderLiveEvents(trace.events || []);
       renderNextPassSetup();
       renderRunBrief({trace, comparison: data.comparison});
+      renderReviewChecklist({trace, comparison: data.comparison});
       $("answer").innerHTML = renderMarkdown(data.rendered_answer || trace.rendered_answer || "");
       updateConversationHistoryFromTrace(trace);
       $("chatHistory").innerHTML = renderChatHistory(activeConversationHistory());
       renderSourceReview(trace);
       $("diagnosis").innerHTML = renderRunHealth(trace);
       $("comparison").innerHTML = renderComparison(data.comparison);
-      renderLiveEvents(trace.events || []);
       $("events").innerHTML = renderLimitedCards(trace.events || [], event => card(
         event.label + " - " + event.message,
         compactJsonForDisplay(event.fields || {})
@@ -2266,11 +2311,126 @@ INDEX_HTML = r"""<!doctype html>
         ? rows.map(([title, body]) => briefCard(title, body)).join("")
         : emptyState("The brief will explain the current plan, what Irys is doing, and what you can change next.");
     }
+    function renderReviewChecklist({plan = null, trace = null, events = null, comparison = null} = {}) {
+      const target = $("reviewChecklist");
+      if (!target) return;
+      const cards = [];
+      if (trace) {
+        const packet = trace.final_packet || {};
+        const diagnosis = trace.diagnosis || {};
+        const metrics = trace.metrics || {};
+        const metadata = (trace.task || {}).metadata || {};
+        const scope = metadata.corpus_scope_decision || {};
+        const docs = Array.isArray(trace.documents) ? trace.documents : [];
+        const chunks = Array.isArray(trace.chunks) ? trace.chunks : [];
+        const evidence = Array.isArray(packet.verified_evidence) ? packet.verified_evidence : [];
+        const answerSources = Array.isArray(packet.answer_source_map) ? packet.answer_source_map : [];
+        const unresolved = Array.isArray(packet.unresolved) ? packet.unresolved : [];
+        const selected = Array.isArray(scope.selected_paths) ? scope.selected_paths : [];
+        const loadErrors = docs.filter(doc => doc && doc.load_error);
+        const coverage = diagnosis.source_coverage || packet.source_coverage || {};
+        const missingDocs = Array.isArray(coverage.missing_documents) ? coverage.missing_documents : [];
+        const ready = !loadErrors.length && !unresolved.length && evidence.length && (trace.rendered_answer || trace.draft_answer);
+        const statusTone = loadErrors.length ? "bad" : ready ? "good" : "warn";
+        cards.push(auditCard(
+          "Ready to rely on?",
+          ready ? "Ready for lawyer review" : "Needs review",
+          loadErrors.length
+            ? `${loadErrors.length} file(s) could not be read. Fix those before relying on the answer.`
+            : ready
+              ? "The answer has source evidence and no logged open questions. Review the sources below before using it."
+              : "The run finished without enough support signals. Check evidence, source links, and open questions.",
+          statusTone
+        ));
+        cards.push(auditCard(
+          "Source focus",
+          selected.length ? `${selected.length} first-read document(s)` : `${docs.length} document(s) read`,
+          selected.length
+            ? selected.slice(0, 5).map(filenameFromPath).join("\n") + (selected.length > 5 ? `\n... ${selected.length - 5} more` : "")
+            : `${docs.length} document(s) and ${chunks.length} searchable passage(s) were loaded.`,
+          selected.length || docs.length ? "good" : "warn"
+        ));
+        cards.push(auditCard(
+          "Source support",
+          `${evidence.length} evidence item(s)`,
+          `${answerSources.length} answer-source link(s). ${missingDocs.length ? `${missingDocs.length} selected document(s) were not represented in retrieved evidence.` : "Selected source coverage is represented in the packet."}`,
+          evidence.length && !missingDocs.length ? "good" : "warn"
+        ));
+        cards.push(auditCard(
+          "Open questions",
+          unresolved.length ? `${unresolved.length} needs review` : "None logged",
+          unresolved.length ? unresolved.slice(0, 4).join("\n") + (unresolved.length > 4 ? `\n... ${unresolved.length - 4} more` : "") : "No unresolved gap was logged in the final packet.",
+          unresolved.length ? "warn" : "good"
+        ));
+        cards.push(auditCard(
+          "Cost",
+          "$" + Number(metrics.estimated_cost || 0).toFixed(4),
+          `${metrics.total_tokens || 0} token(s). Cheap worker share: ${formatPercent((metrics.token_share_by_tier || {}).cheap_worker)}. Strong synthesis share: ${formatPercent((metrics.token_share_by_tier || {}).strong_synthesizer)}.`,
+          "neutral"
+        ));
+        cards.push(auditCard(
+          "Next action",
+          comparison && comparison.answer_changed ? "Compare runs" : "Review sources",
+          recommendedNextAction(trace, comparison),
+          unresolved.length || loadErrors.length ? "warn" : "neutral"
+        ));
+        target.innerHTML = cards.join("");
+        return;
+      }
+      if (plan) {
+        const firstRead = Array.isArray(plan.first_read_paths) ? plan.first_read_paths : [];
+        const discovered = plan.discovered_count || firstRead.length || "the discovered corpus";
+        const planner = plan.source_planner || {};
+        cards.push(auditCard(
+          "Plan state",
+          "Review before running",
+          "Check that the selected first-read documents match the question. Edit the list or add a plan correction if the focus is wrong.",
+          "neutral"
+        ));
+        cards.push(auditCard(
+          "First-read focus",
+          `${firstRead.length} document(s)`,
+          firstRead.length
+            ? firstRead.slice(0, 6).map(filenameFromPath).join("\n") + (firstRead.length > 6 ? `\n... ${firstRead.length - 6} more` : "")
+            : "No narrow first-read set has been selected yet.",
+          firstRead.length ? "good" : "warn"
+        ));
+        cards.push(auditCard(
+          "Corpus triage",
+          `${firstRead.length} of ${discovered}`,
+          plan.document_strategy || planner.reason || "Irys ranked the corpus against the objective and file names.",
+          "neutral"
+        ));
+        cards.push(auditCard(
+          "Next action",
+          "Approve or correct",
+          "If the plan is right, run it. If it missed the right source family, write a plan correction and preview again.",
+          "neutral"
+        ));
+        target.innerHTML = cards.join("");
+        return;
+      }
+      if (Array.isArray(events) && events.length) {
+        const latest = events[events.length - 1] || {};
+        target.innerHTML = auditCard("Current work", friendlyEventTitle(latest), formatUserEventFields(latest.fields || {}) || "Working through the run.", "neutral");
+        return;
+      }
+      target.innerHTML = emptyState("After a plan or run, this checklist will show whether the answer has enough source support, what still needs review, and what to do next.");
+    }
     function briefCard(title, body) {
       return `<div class="item brief-card"><strong>${escapeHtml(title)}</strong><small>${formatPlainText(body || "")}</small></div>`;
     }
+    function auditCard(label, value, body, tone = "neutral") {
+      const safeTone = ["good", "warn", "bad", "neutral"].includes(tone) ? tone : "neutral";
+      return `<div class="audit-card ${safeTone}"><b>${escapeHtml(label)}</b><strong>${escapeHtml(value || "")}</strong><small>${formatPlainText(body || "")}</small></div>`;
+    }
     function formatPlainText(value) {
       return escapeHtml(value).replace(/\n/g, "<br>");
+    }
+    function formatPercent(value) {
+      const number = Number(value || 0);
+      if (!Number.isFinite(number) || number <= 0) return "0%";
+      return Math.round(number * 100) + "%";
     }
     function recommendedNextAction(trace, comparison) {
       const packet = trace.final_packet || {};
@@ -2359,6 +2519,7 @@ INDEX_HTML = r"""<!doctype html>
         $("currentStep").innerHTML = "<strong>Idle</strong><small>No run has started.</small>";
         updateCommandStep("Ready", "Choose a corpus, ask a question, review the source plan, then run.");
         if (currentPlan) renderRunBrief({plan: currentPlan});
+        if (currentPlan) renderReviewChecklist({plan: currentPlan});
         return;
       }
       const latest = events[events.length - 1] || {};
@@ -2366,6 +2527,7 @@ INDEX_HTML = r"""<!doctype html>
       $("currentStep").innerHTML = renderCurrentStep(latest);
       $("liveEvents").innerHTML = events.slice(-30).map(renderUserEvent).join("");
       renderRunBrief({plan: currentPlan, events});
+      renderReviewChecklist({plan: currentPlan, events});
     }
     function renderRunTimeline(events) {
       const stages = [
