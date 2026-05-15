@@ -1536,6 +1536,14 @@ INDEX_HTML = r"""<!doctype html>
         firstReadPathsDirty = true;
         if (!$("nudge").value.trim()) $("nudge").value = `Read ${filenameFromPath(path)} in the next pass.`;
         status.textContent = `Added ${filenameFromPath(path)} to the next first-read set`;
+        return;
+      }
+      if (target.matches(".ignore-source-next")) {
+        const path = target.getAttribute("data-path") || "";
+        removePathFromFirstRead(path);
+        firstReadPathsDirty = true;
+        if (!$("nudge").value.trim()) $("nudge").value = `Ignore ${filenameFromPath(path)} in the next pass.`;
+        status.textContent = `Marked ${filenameFromPath(path)} to ignore next pass`;
       }
     });
     function render(data) {
@@ -1643,25 +1651,33 @@ INDEX_HTML = r"""<!doctype html>
             const docName = docNameFor(source.doc_id, docs);
             return `- ${docName || source.doc_id || source.ref || "source"}: ${source.support || ""}`;
           });
+          const sourcePath = firstDocPathForSupport(support, docs);
           const body = [
             item.answer_excerpt || "",
             supportLines.length ? "\nSupport:" : "",
             ...supportLines
           ].filter(Boolean).join("\n");
-          return card(`Answer section ${item.section_index || index + 1}`, body);
+          return sourceCard(`Answer section ${item.section_index || index + 1}`, body, sourcePath);
         }).join("");
       }
       if (evidence.length) {
         return evidence.map((item, index) => {
           const source = item.source || {};
           const docName = docNameFor(source.doc_id, docs) || source.doc_id || "source";
-          return card(
+          return sourceCard(
             `Source ${index + 1}: ${docName}`,
-            `${item.raw_support || item.claim || ""}\n${source.chunk_id ? "Chunk: " + source.chunk_id : ""}`
+            `${item.raw_support || item.claim || ""}\n${source.chunk_id ? "Chunk: " + source.chunk_id : ""}`,
+            docPathFor(source.doc_id, docs)
           );
         }).join("");
       }
       return emptyState("No source support was captured for this answer.");
+    }
+    function sourceCard(title, body, path) {
+      const action = path
+        ? `<button class="secondary ignore-source-next" data-path="${escapeAttr(path)}">Ignore next pass</button>`
+        : "";
+      return `<div class="item"><strong>${escapeHtml(title)}</strong><small><pre>${escapeHtml(body || "")}</pre></small>${action}</div>`;
     }
     function renderHeldBackSources(scope) {
       const discovered = Array.isArray(scope.discovered_paths) ? scope.discovered_paths : [];
@@ -1696,6 +1712,23 @@ INDEX_HTML = r"""<!doctype html>
       if (!docId) return "";
       const match = docs.find(doc => String(doc.doc_id || "") === String(docId));
       return match ? (match.filename || match.path || String(docId)) : "";
+    }
+    function docPathFor(docId, docs) {
+      if (!docId) return "";
+      const match = docs.find(doc => String(doc.doc_id || "") === String(docId));
+      return match ? (match.path || "") : "";
+    }
+    function firstDocPathForSupport(support, docs) {
+      for (const item of support || []) {
+        const path = docPathFor(item.doc_id, docs);
+        if (path) return path;
+      }
+      return "";
+    }
+    function removePathFromFirstRead(path) {
+      const target = String(path || "").toLowerCase();
+      const kept = pathPayload($("firstReadPaths").value).filter(item => String(item || "").toLowerCase() !== target);
+      setFirstReadPaths(kept, {dirty: true});
     }
     function renderRunHealth(trace) {
       const diagnosis = trace.diagnosis || {};
