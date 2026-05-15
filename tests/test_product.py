@@ -21,6 +21,7 @@ from irys_harness.product import (
     build_product_evidence_items,
     build_product_plan_preview,
     build_product_synthesis_prompt,
+    build_product_worker_analysis_prompt,
     build_source_planner_prompt,
     compact_relevant_snippet,
     compare_product_traces,
@@ -1198,6 +1199,27 @@ class ProductMatterTests(unittest.TestCase):
             self.assertIn("Worker analysis:", prompt)
             self.assertIn("MATERIAL_FACTS: payment default cure is 5 days.", prompt)
             self.assertIn("preserve row labels, column labels, periods, classes, and basic/diluted distinctions", prompt)
+            self.assertIn("Do not label a three-month, quarterly, Q4, or interim value as fiscal-year or annual", prompt)
+
+    def test_product_worker_analysis_prompt_preserves_numeric_periods(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            doc = root / "earnings.txt"
+            doc.write_text("Fourth quarter diluted EPS was $0.13. Fiscal year diluted EPS was $0.52.", encoding="utf-8")
+            result = run_product_matter(
+                objective="Tell me about EPS in 2024.",
+                paths=[str(doc)],
+                matter_id="Metric Period Matter",
+                config=load_config(),
+                trace_dir=root / "traces",
+                live_synthesis=False,
+                verbose=False,
+            )
+
+            prompt = build_product_worker_analysis_prompt(result.state)
+
+            self.assertIn("preserve the source period exactly", prompt)
+            self.assertIn("Do not label a three-month, quarterly, Q4, or interim value as fiscal-year or annual", prompt)
 
     def test_metric_selection_notes_flag_intermediate_reconciliation_rows(self) -> None:
         evidence = [

@@ -2340,6 +2340,7 @@ Unresolved gaps:
 {format_list(packet.get("unresolved", []))}
 
 Numeric and table evidence: preserve row labels, column labels, periods, classes, and basic/diluted distinctions. Do not collapse nearby values into one figure unless the source explicitly says they are identical. When a table gives paired values for the same requested metric, report the pair unless the user asked for only one side.
+For every numeric fact, preserve the source period exactly. Do not label a three-month, quarterly, Q4, or interim value as fiscal-year or annual. Only call a value fiscal-year, full-year, or annual when the source row or heading says fiscal year, year ended, full year, or equivalent.
 If a reconciliation table includes both before-adjustment and after-adjustment versions of a metric, treat before-adjustment rows as intermediate reconciliation rows. Use the final or after-adjustment row for a general adjusted/non-GAAP answer unless the user explicitly asks for the before-adjustment figure.
 If the metric selection notes identify final/after-adjustment evidence, that evidence controls over any worker analysis sentence that only mentions before-adjustment values.
 
@@ -2378,6 +2379,7 @@ Return:
 - DRAFTING_NOTES: constraints for a clean user-facing answer.
 
 For numeric or table evidence, preserve row labels, column labels, periods, classes, and basic/diluted distinctions. Do not collapse adjacent rows or columns into one value unless the source explicitly says they are identical. When a table gives paired values for the same requested metric, keep the pair unless the user asked for only one side.
+For every numeric fact, preserve the source period exactly. Do not label a three-month, quarterly, Q4, or interim value as fiscal-year or annual. Only call a value fiscal-year, full-year, or annual when the source row or heading says fiscal year, year ended, full year, or equivalent.
 If a reconciliation table includes both before-adjustment and after-adjustment versions of a metric, treat before-adjustment rows as intermediate reconciliation rows. Use the final or after-adjustment row for a general adjusted/non-GAAP answer unless the user explicitly asks for the before-adjustment figure."""
 
 
