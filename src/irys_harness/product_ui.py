@@ -933,6 +933,8 @@ INDEX_HTML = r"""<!doctype html>
       <div class="answer" id="answer"></div>
       <h2 style="margin-top:16px">Source Review</h2>
       <div class="list" id="sourceSummary"></div>
+      <h2 style="margin-top:16px">Documents Held Back</h2>
+      <div class="list" id="heldBackSources"></div>
       <h2 style="margin-top:16px">Sources Used</h2>
       <div class="list" id="sourcesUsed"></div>
       <h2 style="margin-top:16px">Open Questions</h2>
@@ -1030,6 +1032,7 @@ INDEX_HTML = r"""<!doctype html>
       $("currentStep").innerHTML = "<strong>Idle</strong><small>No run has started.</small>";
       $("liveEvents").innerHTML = "";
       $("sourceSummary").innerHTML = "";
+      $("heldBackSources").innerHTML = "";
       $("sourcesUsed").innerHTML = "";
       $("openQuestions").innerHTML = "";
       $("traceList").innerHTML = "";
@@ -1451,6 +1454,8 @@ INDEX_HTML = r"""<!doctype html>
     }
     function renderSourceReview(trace) {
       const packet = trace.final_packet || {};
+      const metadata = (trace.task || {}).metadata || {};
+      const scope = metadata.corpus_scope_decision || {};
       const docs = Array.isArray(trace.documents) ? trace.documents : [];
       const chunks = Array.isArray(trace.chunks) ? trace.chunks : [];
       const evidence = Array.isArray(packet.verified_evidence) ? packet.verified_evidence : [];
@@ -1464,10 +1469,16 @@ INDEX_HTML = r"""<!doctype html>
         ["Sources selected", `${retrieved.length} retrieved passage(s) were considered.`],
         ["Open questions", unresolved.length ? `${unresolved.length} issue(s) still flagged.` : "No obvious gaps were logged."]
       ];
+      if (scope.reason) {
+        const planner = (scope.signals || {}).source_planner || null;
+        summaryRows.splice(1, 0, ["First-read plan", scope.reason]);
+        if (planner) summaryRows.splice(2, 0, ["Worker source planner", formatPlannerSummary(planner, {})]);
+      }
       if (loadErrors.length) {
         summaryRows.push(["Load issues", loadErrors.map(doc => `${doc.filename || doc.path}: ${doc.load_error}`).join("\n")]);
       }
       $("sourceSummary").innerHTML = summaryRows.map(([title, body]) => card(title, body)).join("");
+      $("heldBackSources").innerHTML = renderHeldBackSources(scope);
       $("sourcesUsed").innerHTML = renderSourcesUsed(answerSources, evidence, docs);
       $("openQuestions").innerHTML = unresolved.length
         ? unresolved.map((item, index) => card(`Open question ${index + 1}`, item)).join("")
@@ -1500,6 +1511,28 @@ INDEX_HTML = r"""<!doctype html>
         }).join("");
       }
       return emptyState("No source support was captured for this answer.");
+    }
+    function renderHeldBackSources(scope) {
+      const discovered = Array.isArray(scope.discovered_paths) ? scope.discovered_paths : [];
+      const selected = new Set((scope.selected_paths || []).map(path => String(path || "").toLowerCase()));
+      const heldBack = discovered.filter(path => !selected.has(String(path || "").toLowerCase()));
+      if (!heldBack.length) return emptyState("No documents were held back from the first-read corpus.");
+      const scoreByPath = {};
+      for (const item of scope.scored_paths || []) {
+        scoreByPath[String(item.path || "").toLowerCase()] = item;
+      }
+      return heldBack.slice(0, 25).map((path, index) => {
+        const item = scoreByPath[String(path || "").toLowerCase()] || {};
+        const body = [
+          item.score !== undefined ? `Score ${item.score}` : "",
+          Array.isArray(item.reasons) ? item.reasons.join("; ") : "",
+          String(path || "")
+        ].filter(Boolean).join("\n");
+        return card(`Held back ${index + 1}: ${filenameFromPath(path)}`, body);
+      }).join("") + (heldBack.length > 25 ? emptyState(`${heldBack.length - 25} additional document(s) were held back.`) : "");
+    }
+    function filenameFromPath(path) {
+      return String(path || "").split(/[\\/]/).filter(Boolean).pop() || String(path || "Document");
     }
     function docNameFor(docId, docs) {
       if (!docId) return "";
