@@ -796,6 +796,11 @@ INDEX_HTML = r"""<!doctype html>
       color: var(--muted);
       margin-top: 4px;
     }
+    .brief-card small {
+      color: #2f3b46;
+      font-size: 13px;
+      line-height: 1.5;
+    }
     .hint {
       color: var(--muted);
       font-size: 12px;
@@ -1609,6 +1614,7 @@ INDEX_HTML = r"""<!doctype html>
       } else if (plan) {
         const firstRead = plan.first_read_paths || [];
         rows.push(["Planned first read", `${firstRead.length} document(s) selected first out of ${plan.discovered_count || "the discovered corpus"}.`]);
+        if (firstRead.length) rows.push(["Files Irys will start with", firstRead.slice(0, 8).map(path => `- ${filenameFromPath(path)}`).join("\n") + (firstRead.length > 8 ? `\n- ... ${firstRead.length - 8} more` : "")]);
         rows.push(["Why these documents", plan.document_strategy || ((plan.source_planner || {}).reason) || "Irys ranked source paths against the question and document names."]);
         if ((plan.needed_information || []).length) rows.push(["What Irys will look for", (plan.needed_information || []).join("\n")]);
         rows.push(["What you can change", "Uncheck irrelevant first-read documents, add missing files, or write a Plan Correction before running."]);
@@ -1619,8 +1625,14 @@ INDEX_HTML = r"""<!doctype html>
         rows.push(["Current step", `${fields.summary || friendlyEventTitle(latest)}\n${formatUserEventFields(fields) || "Working through the next step."}`]);
       }
       $("runBrief").innerHTML = rows.length
-        ? rows.map(([title, body]) => card(title, body)).join("")
+        ? rows.map(([title, body]) => briefCard(title, body)).join("")
         : emptyState("The brief will explain the current plan, what Irys is doing, and what you can change next.");
+    }
+    function briefCard(title, body) {
+      return `<div class="item brief-card"><strong>${escapeHtml(title)}</strong><small>${formatPlainText(body || "")}</small></div>`;
+    }
+    function formatPlainText(value) {
+      return escapeHtml(value).replace(/\n/g, "<br>");
     }
     function recommendedNextAction(trace, comparison) {
       const packet = trace.final_packet || {};
