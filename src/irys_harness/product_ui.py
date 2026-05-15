@@ -1560,19 +1560,38 @@ INDEX_HTML = r"""<!doctype html>
     }
     function renderComparison(comparison) {
       if (!comparison) return "";
+      const documents = comparison.document_delta || {};
       const evidence = comparison.evidence_delta || {};
       const unresolved = comparison.unresolved_delta || {};
       const metrics = comparison.metrics_delta || {};
       const rows = [
         ["Run", `${comparison.parent_task_id || ""} -> ${comparison.child_task_id || ""}`],
         ["Answer changed", String(Boolean(comparison.answer_changed))],
+        ["Documents", `+${(documents.added || []).length} / -${(documents.removed || []).length} / kept ${documents.kept_count || 0}`],
         ["Evidence", `+${evidence.added_count || 0} / -${evidence.removed_count || 0} / kept ${evidence.kept_count || 0}`],
         ["Unresolved", `+${(unresolved.added || []).length} / -${(unresolved.removed || []).length} / kept ${unresolved.kept_count || 0}`],
         ["Tokens delta", String(metrics.total_tokens || 0)],
         ["Cost delta", "$" + Number(metrics.estimated_cost || 0).toFixed(4)]
       ];
       if (comparison.status === "unavailable") rows.push(["Comparison unavailable", comparison.error || "unknown error"]);
+      if ((documents.added || []).length) rows.push(["Documents added", formatSimpleList(documents.added)]);
+      if ((documents.removed || []).length) rows.push(["Documents removed", formatSimpleList(documents.removed)]);
+      if ((evidence.added || []).length) rows.push(["New evidence", formatEvidenceDelta(evidence.added)]);
+      if ((evidence.removed || []).length) rows.push(["Evidence no longer used", formatEvidenceDelta(evidence.removed)]);
+      if ((unresolved.added || []).length) rows.push(["New open questions", formatSimpleList(unresolved.added)]);
+      if ((unresolved.removed || []).length) rows.push(["Cleared open questions", formatSimpleList(unresolved.removed)]);
       return rows.map(([title, body]) => card(title, body)).join("");
+    }
+    function formatSimpleList(items) {
+      return (items || []).slice(0, 12).map(item => `- ${item}`).join("\n") +
+        ((items || []).length > 12 ? `\n- ... ${(items || []).length - 12} more` : "");
+    }
+    function formatEvidenceDelta(items) {
+      return (items || []).slice(0, 8).map(item => {
+        const source = [item.doc_id, item.chunk_id].filter(Boolean).join(" / ") || "source";
+        const support = item.support || item.claim || "";
+        return `- ${source}: ${support}`;
+      }).join("\n") + ((items || []).length > 8 ? `\n- ... ${(items || []).length - 8} more` : "");
     }
     function renderLiveEvents(events) {
       if (!Array.isArray(events) || !events.length) {
