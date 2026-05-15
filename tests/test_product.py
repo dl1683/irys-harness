@@ -16,6 +16,7 @@ from irys_harness.product import (
 )
 from irys_harness.product_ui import (
     INDEX_HTML,
+    list_product_traces,
     parse_paths,
     rerun_from_trace,
     resolve_trace_path,
@@ -139,6 +140,43 @@ class ProductMatterTests(unittest.TestCase):
         self.assertIn("conversation_history", INDEX_HTML)
         self.assertIn('id="chatHistory"', INDEX_HTML)
         self.assertIn("function renderChatHistory", INDEX_HTML)
+        self.assertIn('id="traceList"', INDEX_HTML)
+        self.assertIn("/api/traces", INDEX_HTML)
+
+    def test_list_product_traces_filters_by_matter_and_chat(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            doc = root / "agreement.txt"
+            doc.write_text("Payment default has a 5 day cure period after notice.", encoding="utf-8")
+            trace_dir = root / "traces"
+            run_product_matter(
+                objective="What cure period applies?",
+                paths=[str(doc)],
+                matter_id="Matter A",
+                chat_id="main",
+                config=load_config(),
+                trace_dir=trace_dir,
+                live_synthesis=False,
+                verbose=False,
+            )
+            run_product_matter(
+                objective="What cure period applies?",
+                paths=[str(doc)],
+                matter_id="Matter A",
+                chat_id="side",
+                config=load_config(),
+                trace_dir=trace_dir,
+                live_synthesis=False,
+                verbose=False,
+            )
+
+            all_rows = list_product_traces(trace_dir, matter_id="Matter A")
+            side_rows = list_product_traces(trace_dir, matter_id="Matter A", chat_id="side")
+
+            self.assertEqual(len(all_rows), 2)
+            self.assertEqual(len(side_rows), 1)
+            self.assertEqual(side_rows[0]["chat_id"], "side")
+            self.assertTrue(Path(side_rows[0]["path"]).exists())
 
     def test_rerun_from_trace_links_parent_and_nudge(self) -> None:
         with TemporaryDirectory() as tmp:

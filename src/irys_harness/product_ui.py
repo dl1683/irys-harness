@@ -62,6 +62,22 @@ def build_handler(
                 except Exception as exc:  # noqa: BLE001 - UI endpoint should return structured error.
                     self.send_json({"error": f"{type(exc).__name__}: {exc}"}, status=HTTPStatus.BAD_REQUEST)
                 return
+            if parsed.path == "/api/traces":
+                query = parse_qs(parsed.query)
+                try:
+                    self.send_json(
+                        {
+                            "traces": list_product_traces(
+                                trace_dir,
+                                matter_id=query.get("matter_id", [""])[0],
+                                chat_id=query.get("chat_id", [""])[0],
+                                limit=int(query.get("limit", ["100"])[0] or "100"),
+                            )
+                        }
+                    )
+                except Exception as exc:  # noqa: BLE001 - UI endpoint should return structured error.
+                    self.send_json({"error": f"{type(exc).__name__}: {exc}"}, status=HTTPStatus.BAD_REQUEST)
+                return
             self.send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib handler API.
@@ -228,6 +244,47 @@ def comparison_from_parent(trace: dict[str, Any], *, trace_dir: str | Path) -> d
             "status": "unavailable",
             "error": f"{type(exc).__name__}: {exc}",
         }
+
+
+def list_product_traces(
+    trace_dir: str | Path,
+    *,
+    matter_id: str = "",
+    chat_id: str = "",
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    root = Path(trace_dir).resolve()
+    product_dir = root / "product_matter"
+    if not product_dir.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for path in sorted(product_dir.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+        try:
+            trace = load_trace(path)
+        except Exception:  # noqa: BLE001 - ignore broken trace files in the browser list.
+            continue
+        task = trace.get("task") or {}
+        metadata = task.get("metadata") or {}
+        if matter_id and str(metadata.get("matter_id") or "") != matter_id:
+            continue
+        if chat_id and str(metadata.get("chat_id") or "") != chat_id:
+            continue
+        rows.append(
+            {
+                "path": str(path),
+                "run_id": trace.get("run_id"),
+                "task_id": trace.get("task_id"),
+                "matter_id": metadata.get("matter_id"),
+                "chat_id": metadata.get("chat_id"),
+                "started_at": trace.get("started_at"),
+                "question": task.get("question"),
+                "estimated_cost": (trace.get("metrics") or {}).get("estimated_cost"),
+                "total_tokens": (trace.get("metrics") or {}).get("total_tokens"),
+            }
+        )
+        if len(rows) >= max(1, limit):
+            break
+    return rows
 
 
 def resolve_trace_path(raw_path: str, trace_dir: str | Path) -> Path:
@@ -516,6 +573,7 @@ INDEX_HTML = r"""<!doctype html>
       <input id="tracepath" />
       <div class="row">
         <button class="secondary" id="loadTrace">Load Trace</button>
+        <button class="secondary" id="listTraces">List Traces</button>
       </div>
       <label for="nudge">Nudge</label>
       <textarea id="nudge"></textarea>
@@ -528,6 +586,8 @@ INDEX_HTML = r"""<!doctype html>
       </div>
       <h2 style="margin-top:16px">Diagnosis</h2>
       <div class="list" id="diagnosis"></div>
+      <h2 style="margin-top:16px">Recent Traces</h2>
+      <div class="list" id="traceList"></div>
       <h2 style="margin-top:16px">Comparison</h2>
       <div class="list" id="comparison"></div>
       <h2 style="margin-top:16px">Events</h2>
@@ -548,6 +608,7 @@ INDEX_HTML = r"""<!doctype html>
     const run = $("run");
     const loadTrace = $("loadTrace");
     const rerunTrace = $("rerunTrace");
+    const listTraces = $("listTraces");
     let conversationByChat = {};
     $("clear").addEventListener("click", () => {
       $("objective").value = "";
@@ -559,6 +620,7 @@ INDEX_HTML = r"""<!doctype html>
       $("rerunPaths").value = "";
       $("rerunFiles").value = "";
       $("diagnosis").innerHTML = "";
+      $("traceList").innerHTML = "";
       $("comparison").innerHTML = "";
       $("events").innerHTML = "";
       $("documents").innerHTML = "";
@@ -612,6 +674,23 @@ INDEX_HTML = r"""<!doctype html>
         loadTrace.disabled = false;
       }
     });
+    listTraces.addEventListener("click", async () => {
+      listTraces.disabled = true;
+      status.textContent = "Listing traces";
+      try {
+        const url = "/api/traces?matter_id=" + encodeURIComponent($("matter").value) +
+          "&chat_id=" + encodeURIComponent($("chat").value);
+        const response = await fetch(url);
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || "Trace list failed");
+        $("traceList").innerHTML = renderTraceList(data.traces || []);
+        status.textContent = `${(data.traces || []).length} traces`;
+      } catch (error) {
+        status.textContent = error.message;
+      } finally {
+        listTraces.disabled = false;
+      }
+    });
     rerunTrace.addEventListener("click", async () => {
       rerunTrace.disabled = true;
       status.textContent = "Rerunning";
@@ -662,6 +741,12 @@ INDEX_HTML = r"""<!doctype html>
         reader.readAsDataURL(file);
       });
     }
+    document.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!target || !target.matches || !target.matches(".trace-load")) return;
+      $("tracepath").value = target.getAttribute("data-path") || "";
+      loadTrace.click();
+    });
     function render(data) {
       const trace = data.trace || {};
       const metrics = trace.metrics || {};
@@ -746,6 +831,16 @@ INDEX_HTML = r"""<!doctype html>
         "User: " + (turn.user || "") + "\n\nFinal answer: " + (turn.assistant || "")
       )).join("");
     }
+    function renderTraceList(traces) {
+      if (!Array.isArray(traces) || !traces.length) return "";
+      return traces.map(trace => {
+        const title = `${trace.chat_id || "main"} - ${trace.started_at || ""}`;
+        const body = `${trace.question || ""}\n${trace.path || ""}\n` +
+          `tokens=${trace.total_tokens || 0} cost=$${Number(trace.estimated_cost || 0).toFixed(4)}`;
+        return `<div class="item"><strong>${escapeHtml(title)}</strong><small><pre>${escapeHtml(body)}</pre></small>` +
+          `<button class="secondary trace-load" data-path="${escapeAttr(trace.path || "")}">Load</button></div>`;
+      }).join("");
+    }
     function renderMarkdown(markdown) {
       const lines = String(markdown || "").split(/\r?\n/);
       const html = [];
@@ -818,6 +913,9 @@ INDEX_HTML = r"""<!doctype html>
         .replaceAll("<", "&lt;")
         .replaceAll(">", "&gt;")
         .replaceAll('"', "&quot;");
+    }
+    function escapeAttr(value) {
+      return escapeHtml(value).replaceAll("'", "&#39;");
     }
   </script>
 </body>
