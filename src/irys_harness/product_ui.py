@@ -827,6 +827,55 @@ INDEX_HTML = r"""<!doctype html>
       padding: 8px 10px;
       font-size: 12px;
     }
+    .control-dock {
+      display: grid;
+      grid-template-columns: minmax(220px, 0.8fr) minmax(360px, 1.2fr) auto;
+      gap: 12px;
+      align-items: start;
+      border-bottom: 1px solid var(--line);
+      padding: 10px 16px;
+      background: #ffffff;
+      position: sticky;
+      top: 113px;
+      z-index: 17;
+      box-shadow: 0 2px 12px rgba(23, 32, 42, 0.06);
+    }
+    .control-dock h2 {
+      margin-bottom: 6px;
+    }
+    .control-dock small {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    .control-dock textarea {
+      min-height: 58px;
+      max-height: 132px;
+      resize: vertical;
+    }
+    .control-dock-actions {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(130px, 1fr));
+      gap: 8px;
+      min-width: 300px;
+    }
+    .control-dock-actions button {
+      padding: 8px 10px;
+      font-size: 12px;
+    }
+    .dock-summary {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #f8fafb;
+      padding: 8px;
+      min-height: 58px;
+    }
+    .dock-summary strong {
+      display: block;
+      font-size: 13px;
+      margin-bottom: 3px;
+    }
     main {
       display: grid;
       grid-template-columns: minmax(280px, 360px) minmax(420px, 1fr) minmax(360px, 0.85fr);
@@ -1177,6 +1226,8 @@ INDEX_HTML = r"""<!doctype html>
       .command-bar { grid-template-columns: 1fr; position: static; }
       .command-actions { justify-content: stretch; }
       .command-actions button { flex: 1 1 140px; }
+      .control-dock { grid-template-columns: 1fr; position: static; }
+      .control-dock-actions { grid-template-columns: 1fr; min-width: 0; }
       main { grid-template-columns: 1fr; }
       section { border-right: 0; border-bottom: 1px solid var(--line); }
       .action-board { grid-template-columns: 1fr; }
@@ -1200,6 +1251,25 @@ INDEX_HTML = r"""<!doctype html>
       <button class="secondary" id="topStop" disabled>Stop</button>
       <button class="secondary" id="topPreviewNudge">Preview Steering</button>
       <button class="secondary" id="topApplyNudge">Run Corrected Pass</button>
+    </div>
+  </div>
+  <div class="control-dock" id="controlDock">
+    <div class="dock-summary" id="quickDockSummary">
+      <strong>Ready</strong>
+      <small>Choose a corpus, ask a question, review the plan, then run.</small>
+    </div>
+    <div>
+      <h2>Correction Or Steering</h2>
+      <textarea id="quickInstruction" placeholder="Write the correction here. Before a run, use it to fix the source plan. After a run, use it to steer the next pass."></textarea>
+      <small>Use this dock when the plan is wrong, a source should be pinned or ignored, or Irys needs to read a document more deeply.</small>
+    </div>
+    <div class="control-dock-actions">
+      <button class="secondary" id="quickApplyPlan">Apply To Source Plan</button>
+      <button class="secondary" id="quickPreviewNudge">Preview Next Pass</button>
+      <button id="quickRunNudge">Run Corrected Pass</button>
+      <button class="secondary" id="quickReviewSources">Review Sources</button>
+      <button class="secondary" id="quickReviewAnswer">Review Answer</button>
+      <button class="secondary" id="quickStop" disabled>Stop</button>
     </div>
   </div>
   <main>
@@ -1380,6 +1450,13 @@ INDEX_HTML = r"""<!doctype html>
     const topStop = $("topStop");
     const topPreviewNudge = $("topPreviewNudge");
     const topApplyNudge = $("topApplyNudge");
+    const quickInstruction = $("quickInstruction");
+    const quickApplyPlan = $("quickApplyPlan");
+    const quickPreviewNudge = $("quickPreviewNudge");
+    const quickRunNudge = $("quickRunNudge");
+    const quickReviewSources = $("quickReviewSources");
+    const quickReviewAnswer = $("quickReviewAnswer");
+    const quickStop = $("quickStop");
     const loadTrace = $("loadTrace");
     const rerunTrace = $("rerunTrace");
     const previewNudgePlan = $("previewNudgePlan");
@@ -1412,7 +1489,44 @@ INDEX_HTML = r"""<!doctype html>
     topStop.addEventListener("click", () => stopRun.click());
     topPreviewNudge.addEventListener("click", () => previewNudgePlan.click());
     topApplyNudge.addEventListener("click", () => rerunTrace.click());
+    quickApplyPlan.addEventListener("click", () => {
+      const text = quickInstruction.value.trim();
+      if (!text) {
+        quickInstruction.focus();
+        status.textContent = "Write the plan correction first";
+        return;
+      }
+      appendInstructionToTextarea("planNote", text);
+      setSourcePlanOpen(true);
+      $("sourcePlanDetails").scrollIntoView({behavior: "smooth", block: "start"});
+      applyPlanCorrection.click();
+    });
+    quickPreviewNudge.addEventListener("click", () => {
+      const text = quickInstruction.value.trim();
+      if (text) appendInstructionToTextarea("nudge", text);
+      if (!hasLoadedRunForCorrection()) {
+        status.textContent = "Load or finish a run before previewing a corrected next pass";
+        $("sourcePlanDetails").scrollIntoView({behavior: "smooth", block: "start"});
+        renderNextPassSetup();
+        return;
+      }
+      previewNudgePlan.click();
+    });
+    quickRunNudge.addEventListener("click", () => {
+      const text = quickInstruction.value.trim();
+      if (text) appendInstructionToTextarea("nudge", text);
+      if (!hasLoadedRunForCorrection()) {
+        status.textContent = "Load or finish a run before running a corrected pass";
+        renderNextPassSetup();
+        return;
+      }
+      rerunTrace.click();
+    });
+    quickReviewSources.addEventListener("click", () => $("sourceSummary").scrollIntoView({behavior: "smooth", block: "start"}));
+    quickReviewAnswer.addEventListener("click", () => $("answer").scrollIntoView({behavior: "smooth", block: "start"}));
+    quickStop.addEventListener("click", () => stopRun.click());
     syncCommandButtons();
+    updateQuickDock();
     renderNextPassSetup();
     renderActionBoard();
     $("clear").addEventListener("click", () => {
@@ -1422,6 +1536,7 @@ INDEX_HTML = r"""<!doctype html>
       $("chatHistory").innerHTML = "";
       $("tracepath").value = "";
       $("nudge").value = "";
+      quickInstruction.value = "";
       $("rerunPaths").value = "";
       setFirstReadPaths([], {dirty: false});
       $("planNote").value = "";
@@ -1457,6 +1572,7 @@ INDEX_HTML = r"""<!doctype html>
       lastRenderedTrace = null;
       updateCommandStep("Ready", "Choose a corpus, ask a question, review the source plan, then run.");
       syncCommandButtons();
+      updateQuickDock();
       renderNextPassSetup();
       renderActionBoard();
       status.textContent = "";
@@ -1707,10 +1823,42 @@ INDEX_HTML = r"""<!doctype html>
       topPlan.disabled = planRun.disabled;
       topPreviewNudge.disabled = previewNudgePlan.disabled;
       topApplyNudge.disabled = rerunTrace.disabled;
+      quickStop.disabled = stopRun.disabled;
+      quickPreviewNudge.disabled = previewNudgePlan.disabled;
+      quickRunNudge.disabled = rerunTrace.disabled;
     }
     function updateCommandStep(title, detail) {
       $("commandStepTitle").textContent = title || "Ready";
       $("commandStepDetail").textContent = detail || "Choose a corpus, ask a question, review the source plan, then run.";
+      updateQuickDock(title, detail);
+    }
+    function updateQuickDock(title = null, detail = null) {
+      const firstRead = pathPayload($("firstReadPaths").value);
+      const loaded = hasLoadedRunForCorrection();
+      const answerReady = Boolean($("answer").textContent.trim() || (lastRenderedTrace && (lastRenderedTrace.rendered_answer || lastRenderedTrace.draft_answer)));
+      const currentTitle = title || $("commandStepTitle").textContent || "Ready";
+      const currentDetail = detail || $("commandStepDetail").textContent || "Choose a corpus, ask a question, review the source plan, then run.";
+      const next = loaded || answerReady
+        ? "Use the dock to steer the next pass, pin or ignore sources, and rerun without starting over."
+        : firstRead.length
+          ? "The first-read plan is ready. Run it, or correct the source plan before reading."
+          : "Start by reviewing the source plan so Irys reads intentionally.";
+      $("quickDockSummary").innerHTML =
+        `<strong>${escapeHtml(currentTitle)}</strong>` +
+        `<small>${escapeHtml(currentDetail)}</small>` +
+        `<small>${escapeHtml(next)}</small>`;
+    }
+    function appendInstructionToTextarea(targetId, text) {
+      const clean = String(text || "").trim();
+      if (!clean) return;
+      const target = $(targetId);
+      const existing = target.value.trim();
+      if (!existing) {
+        target.value = clean;
+      } else if (!existing.toLowerCase().includes(clean.toLowerCase())) {
+        target.value = `${existing}\n${clean}`;
+      }
+      renderNextPassSetup();
     }
     function setSourcePlanOpen(open) {
       const details = $("sourcePlanDetails");
@@ -2385,6 +2533,7 @@ INDEX_HTML = r"""<!doctype html>
         : "";
       $("nextPassSetup").innerHTML =
         `<strong>Next Pass Setup</strong><small><pre>${escapeHtml(details.join("\n"))}</pre></small>${listHtml}${ignoredControls}`;
+      updateQuickDock();
       updateCommandForQueuedNextPass();
       renderActionBoard();
     }
@@ -2848,9 +2997,10 @@ INDEX_HTML = r"""<!doctype html>
     function renderCurrentStep(event) {
       const fields = event.fields || {};
       const title = fields.summary || friendlyEventTitle(event);
+      const coverageWarning = sourceCoverageWarning(fields.source_coverage);
       const details = isRunCompleteEvent(event)
         ? "Review the answer, sources, and trace."
-        : fields.next_step ? `Next: ${fields.next_step}` : "Waiting for the next update.";
+        : coverageWarning || (fields.next_step ? `Next: ${fields.next_step}` : "Waiting for the next update.");
       updateCommandStep(title, details);
       return `<strong>${escapeHtml(title)}</strong><small>${escapeHtml(details)}</small>`;
     }
@@ -2918,7 +3068,11 @@ INDEX_HTML = r"""<!doctype html>
       if (fields.selected_documents) lines.push(`Reading first: ${formatInlineList(fields.selected_documents, 12)}`);
       if (fields.pinned_documents) lines.push(`Pinned documents: ${formatInlineList(fields.pinned_documents, 12)}`);
       if (fields.skipped_document_count) lines.push(`Held back for now: ${fields.skipped_document_count} document(s).`);
-      if (fields.source_coverage) lines.push(`Source coverage: ${formatSourceCoverageSummary(fields.source_coverage)}`);
+      if (fields.source_coverage) {
+        const warning = sourceCoverageWarning(fields.source_coverage);
+        if (warning) lines.push(warning);
+        lines.push(`Source coverage: ${formatSourceCoverageSummary(fields.source_coverage)}`);
+      }
       if (fields.selected_sources) {
         lines.push("Sources selected:");
         for (const source of fields.selected_sources.slice(0, 12)) {
@@ -2967,6 +3121,16 @@ INDEX_HTML = r"""<!doctype html>
         parts.push("not retrieved: " + missingDocs.slice(0, 6).map(item => item.filename || item.doc_id || item.document || item).filter(Boolean).join(", "));
       }
       return parts.join("\n") || compactJsonForDisplay(coverage);
+    }
+    function sourceCoverageWarning(coverage) {
+      const rows = coverage && typeof coverage === "object" ? coverage : {};
+      const covered = Number(rows.represented_document_count || 0);
+      const uncovered = Number(rows.missing_document_count || 0);
+      const loaded = Number(rows.loaded_document_count || covered + uncovered || 0);
+      if (loaded > 1 && uncovered > 0) {
+        return `Coverage warning: ${uncovered} of ${loaded} loaded document(s) did not contribute retrieved evidence. Review Sources Used before accepting an absence claim.`;
+      }
+      return "";
     }
     function activeChatKey() {
       return `${$("matter").value || "local-matter"}::${$("chat").value || "main"}`;
