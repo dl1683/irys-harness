@@ -63,6 +63,33 @@ class HarveyAdapterTests(unittest.TestCase):
             self.assertEqual(task.answer_schema["deliverables"], ["memo.docx"])
             self.assertEqual(len(task.context_files), 1)
 
+    def test_load_task_recurses_nested_document_folders(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_dir = root / "tasks" / "area-one" / "nested-doc-task"
+            docs_dir = task_dir / "documents"
+            (docs_dir / "folder-a").mkdir(parents=True)
+            (docs_dir / "folder-b").mkdir(parents=True)
+            (docs_dir / "folder-a" / "source-a.docx").write_text("doc a", encoding="utf-8")
+            (docs_dir / "folder-b" / "source-b.pdf").write_text("doc b", encoding="utf-8")
+            (task_dir / "task.json").write_text(
+                json.dumps(
+                    {
+                        "title": "Nested docs",
+                        "instructions": "Make the thing. Output: `memo.docx`.",
+                        "criteria": [{"id": "C-001", "title": "Deliverable exists"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            task = HarveyLabAdapter(root=root).load_task("area-one/nested-doc-task")
+
+            self.assertEqual(
+                sorted(Path(path).name for path in task.context_files),
+                ["source-a.docx", "source-b.pdf"],
+            )
+
     def test_sample_split_uses_balanced_target_size(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

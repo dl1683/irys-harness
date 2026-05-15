@@ -77,7 +77,8 @@ class HarveyLabAdapter(BenchmarkAdapter):
         if not deliverables:
             deliverables = criteria_deliverables
             deliverables_source = "criteria"
-        documents = sorted((ref.task_dir / "documents").glob("*")) if (ref.task_dir / "documents").exists() else []
+        documents_dir = ref.task_dir / "documents"
+        documents = sorted(documents_dir.rglob("*")) if documents_dir.exists() else []
         return BenchmarkTask(
             benchmark=self.name,
             task_id=ref.task_id,
