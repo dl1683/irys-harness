@@ -137,6 +137,8 @@ class ProductMatterTests(unittest.TestCase):
         self.assertNotIn('<pre id="answer"></pre>', INDEX_HTML)
         self.assertIn('id="chat"', INDEX_HTML)
         self.assertIn("conversation_history", INDEX_HTML)
+        self.assertIn('id="chatHistory"', INDEX_HTML)
+        self.assertIn("function renderChatHistory", INDEX_HTML)
 
     def test_rerun_from_trace_links_parent_and_nudge(self) -> None:
         with TemporaryDirectory() as tmp:

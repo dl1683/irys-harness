@@ -507,6 +507,8 @@ INDEX_HTML = r"""<!doctype html>
       </div>
       <h2>Answer</h2>
       <div class="answer" id="answer"></div>
+      <h2 style="margin-top:16px">Chat History</h2>
+      <div class="list" id="chatHistory"></div>
     </section>
     <section>
       <h2>Trace</h2>
@@ -551,6 +553,7 @@ INDEX_HTML = r"""<!doctype html>
       $("objective").value = "";
       $("files").value = "";
       $("answer").innerHTML = "";
+      $("chatHistory").innerHTML = "";
       $("tracepath").value = "";
       $("nudge").value = "";
       $("rerunPaths").value = "";
@@ -672,6 +675,7 @@ INDEX_HTML = r"""<!doctype html>
       $("objective").value = (trace.task || {}).question || $("objective").value;
       $("answer").innerHTML = renderMarkdown(data.rendered_answer || trace.rendered_answer || "");
       updateConversationHistoryFromTrace(trace);
+      $("chatHistory").innerHTML = renderChatHistory(activeConversationHistory());
       $("diagnosis").innerHTML = Object.entries(trace.diagnosis || {}).map(([key, value]) => card(
         key,
         typeof value === "string" || typeof value === "number" ? String(value) : JSON.stringify(value, null, 2)
@@ -734,6 +738,13 @@ INDEX_HTML = r"""<!doctype html>
       const assistant = trace.rendered_answer || "";
       if (user || assistant) history.push({user, assistant});
       conversationByChat[key] = history;
+    }
+    function renderChatHistory(history) {
+      if (!Array.isArray(history) || !history.length) return "";
+      return history.map((turn, index) => card(
+        "Turn " + (index + 1),
+        "User: " + (turn.user || "") + "\n\nFinal answer: " + (turn.assistant || "")
+      )).join("");
     }
     function renderMarkdown(markdown) {
       const lines = String(markdown || "").split(/\r?\n/);
