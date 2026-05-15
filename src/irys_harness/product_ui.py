@@ -1111,6 +1111,45 @@ INDEX_HTML = r"""<!doctype html>
       font-size: 12px;
       line-height: 1.45;
     }
+    .investigation-map {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .map-card {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      padding: 10px;
+      min-height: 142px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      overflow-wrap: anywhere;
+    }
+    .map-card b {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+    .map-card strong {
+      display: block;
+      font-size: 15px;
+      line-height: 1.25;
+    }
+    .map-card small {
+      color: #2f3b46;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .map-card button {
+      margin-top: auto;
+      width: 100%;
+      padding: 8px 9px;
+      font-size: 12px;
+    }
     .action-board {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1296,6 +1335,7 @@ INDEX_HTML = r"""<!doctype html>
       main { grid-template-columns: 1fr; }
       section { border-right: 0; border-bottom: 1px solid var(--line); }
       .action-board { grid-template-columns: 1fr; }
+      .investigation-map { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -1397,6 +1437,10 @@ INDEX_HTML = r"""<!doctype html>
       <h2 style="margin-top:16px">Review Checklist</h2>
       <div class="audit-board" id="reviewChecklist">
         <div class="empty">After a plan or run, this checklist will show whether the answer has enough source support, what still needs review, and what to do next.</div>
+      </div>
+      <h2 style="margin-top:16px">Investigation Map</h2>
+      <div class="investigation-map" id="investigationMap">
+        <div class="empty">After planning or running, this will show the question, source choices, evidence coverage, worker review, held-back documents, and next correction path.</div>
       </div>
       <details class="workspace-details" id="sourcePlanDetails" open>
         <summary>Review And Edit Source Plan</summary>
@@ -1608,6 +1652,7 @@ INDEX_HTML = r"""<!doctype html>
       $("planPreview").innerHTML = emptyState("Choose a corpus and objective, then review the plan before running.");
       $("runBrief").innerHTML = emptyState("The brief will explain the current plan, what Irys is doing, and what you can change next.");
       $("reviewChecklist").innerHTML = emptyState("After a plan or run, this checklist will show whether the answer has enough source support, what still needs review, and what to do next.");
+      $("investigationMap").innerHTML = emptyState("After planning or running, this will show the question, source choices, evidence coverage, worker review, held-back documents, and next correction path.");
       $("candidateReview").innerHTML = emptyState("Review Plan will show the highest-ranked documents here. Check or uncheck what Irys should read first.");
       setSourcePlanOpen(true);
       currentPlan = null;
@@ -1996,6 +2041,7 @@ INDEX_HTML = r"""<!doctype html>
       renderCandidateReview(plan.top_candidates || [], firstRead);
       renderRunBrief({plan});
       renderReviewChecklist({plan});
+      renderInvestigationMap({plan});
       renderActionBoard();
       setSourcePlanOpen(true);
     }
@@ -2058,6 +2104,7 @@ INDEX_HTML = r"""<!doctype html>
       renderCandidateReview(scope.scored_paths || [], selected);
       renderRunBrief({plan: planLike});
       renderReviewChecklist({plan: planLike});
+      renderInvestigationMap({plan: planLike, trace});
     }
     function latestAnswerContract(trace) {
       const versions = trace && Array.isArray(trace.answer_contract_versions) ? trace.answer_contract_versions : [];
@@ -2154,7 +2201,7 @@ INDEX_HTML = r"""<!doctype html>
     document.addEventListener("click", (event) => {
       const target = event.target;
       if (!target || !target.matches) return;
-      if (target.matches(".action-board-action")) {
+      if (target.matches(".action-board-action, .map-action")) {
         const action = target.getAttribute("data-action") || "";
         if (action === "focus_objective") {
           $("objective").focus();
@@ -2169,6 +2216,8 @@ INDEX_HTML = r"""<!doctype html>
           stopRun.click();
         } else if (action === "review_sources") {
           $("sourceSummary").scrollIntoView({behavior: "smooth", block: "start"});
+        } else if (action === "review_answer") {
+          $("answer").scrollIntoView({behavior: "smooth", block: "start"});
         } else if (action === "preview_steering") {
           previewNudgePlan.click();
         } else if (action === "focus_steering") {
@@ -2259,6 +2308,7 @@ INDEX_HTML = r"""<!doctype html>
       renderNextPassSetup();
       renderRunBrief({trace, comparison: data.comparison});
       renderReviewChecklist({trace, comparison: data.comparison});
+      renderInvestigationMap({trace, comparison: data.comparison});
       $("answer").innerHTML = renderMarkdown(data.rendered_answer || trace.rendered_answer || "");
       renderActionBoard();
       updateConversationHistoryFromTrace(trace);
@@ -2904,6 +2954,231 @@ INDEX_HTML = r"""<!doctype html>
       }
       target.innerHTML = emptyState("After a plan or run, this checklist will show whether the answer has enough source support, what still needs review, and what to do next.");
     }
+    function renderInvestigationMap({plan = null, trace = null, events = null, comparison = null} = {}) {
+      const target = $("investigationMap");
+      if (!target) return;
+      const cards = [];
+      if (trace && Object.keys(trace).length) {
+        const packet = trace.final_packet || {};
+        const metadata = (trace.task || {}).metadata || {};
+        const scope = metadata.corpus_scope_decision || {};
+        const docs = Array.isArray(trace.documents) ? trace.documents : [];
+        const evidence = Array.isArray(packet.verified_evidence) ? packet.verified_evidence : [];
+        const answerSources = Array.isArray(packet.answer_source_map) ? packet.answer_source_map : [];
+        const unresolved = Array.isArray(packet.unresolved) ? packet.unresolved : [];
+        const packetReview = packet.packet_review || {};
+        const coverage = ((trace.diagnosis || {}).source_coverage) || packet.source_coverage || latestSourceCoverage(trace);
+        const selected = Array.isArray(scope.selected_paths) ? scope.selected_paths : [];
+        const objective = String((trace.task || {}).question || $("objective").value || "").trim();
+        cards.push(mapCard(
+          "Question",
+          "What Irys is answering",
+          objective || "No question was saved with this run.",
+          "Review Answer",
+          "review_answer"
+        ));
+        cards.push(mapCard(
+          "Source plan",
+          selected.length ? `${selected.length} first-read document(s)` : `${docs.length} loaded document(s)`,
+          [
+            scope.reason || "Irys used the active corpus and objective to decide what to read first.",
+            selected.length ? "Read first:\n" + formatPathList(selected, 8) : "",
+            scope.signals && scope.signals.requested_families ? "Likely source families: " + formatInlineList(scope.signals.requested_families, 8) : ""
+          ].filter(Boolean).join("\n\n"),
+          "Review Plan",
+          "review_plan"
+        ));
+        cards.push(mapCard(
+          "Evidence used",
+          `${evidence.length} evidence item(s)`,
+          formatEvidenceCoverageForMap(coverage, evidence, answerSources),
+          "Review Sources",
+          "review_sources"
+        ));
+        cards.push(mapCard(
+          "Worker review",
+          packetReviewTitle(packetReview),
+          formatPacketReviewForMap(packetReview, docs),
+          "Steer Next Pass",
+          "focus_steering"
+        ));
+        cards.push(mapCard(
+          "Held back",
+          heldBackTitle(scope),
+          formatHeldBackForMap(scope),
+          "Adjust Sources",
+          "review_plan"
+        ));
+        cards.push(mapCard(
+          "Next correction",
+          unresolved.length ? `${unresolved.length} open item(s)` : "Review and decide",
+          [
+            recommendedNextAction(trace, comparison),
+            comparison ? comparisonTakeaway(comparison) : "",
+            unresolved.length ? "Open items:\n" + formatSimpleList(unresolved, 5) : ""
+          ].filter(Boolean).join("\n\n"),
+          "Write Steering",
+          "focus_steering"
+        ));
+        target.innerHTML = cards.join("");
+        return;
+      }
+      if (plan) {
+        const firstRead = Array.isArray(plan.first_read_paths) ? plan.first_read_paths : [];
+        const planner = plan.source_planner || {};
+        cards.push(mapCard(
+          "Question",
+          "Planned answer target",
+          plan.interpreted_goal || $("objective").value || "Add the question or work product request.",
+          "Edit Question",
+          "focus_objective"
+        ));
+        cards.push(mapCard(
+          "First read",
+          `${firstRead.length} document(s) selected`,
+          firstRead.length ? formatPathList(firstRead, 10) : "No first-read documents were selected yet.",
+          "Review Plan",
+          "review_plan"
+        ));
+        cards.push(mapCard(
+          "Why these sources",
+          planner.status ? "Worker-planned" : "Path-ranked",
+          plan.document_strategy || planner.reason || "Irys ranked file names, paths, and source-role clues against the objective.",
+          "Correct Plan",
+          "review_plan"
+        ));
+        cards.push(mapCard(
+          "Needed information",
+          "What the answer must establish",
+          formatSimpleList(plan.needed_information || [], 8) || "No separate needed-information list was returned.",
+          "Edit Question",
+          "focus_objective"
+        ));
+        cards.push(mapCard(
+          "Held back",
+          `${plan.not_read_first_count || 0} document(s) held back`,
+          plan.not_read_first_count
+            ? "Held-back documents remain available for the next pass if the packet review finds a gap."
+            : "No held-back count was returned for this plan.",
+          "Review Plan",
+          "review_plan"
+        ));
+        cards.push(mapCard(
+          "Next correction",
+          "Approve or fix before reading",
+          "If this source focus matches the question, run the approved plan. If it missed the right source family, write one correction and preview again.",
+          "Correct Plan",
+          "review_plan"
+        ));
+        target.innerHTML = cards.join("");
+        return;
+      }
+      if (Array.isArray(events) && events.length) {
+        const latest = events[events.length - 1] || {};
+        target.innerHTML = mapCard(
+          "Current work",
+          friendlyEventTitle(latest),
+          formatUserEventFields(latest.fields || {}) || "Irys is working through the current run.",
+          "Steer",
+          "focus_steering"
+        );
+        return;
+      }
+      target.innerHTML = emptyState("After planning or running, this will show the question, source choices, evidence coverage, worker review, held-back documents, and next correction path.");
+    }
+    function mapCard(label, title, body, buttonText, action) {
+      const button = action
+        ? `<button class="secondary map-action" data-action="${escapeAttr(action)}">${escapeHtml(buttonText || "Open")}</button>`
+        : "";
+      return `<div class="map-card"><b>${escapeHtml(label || "")}</b>` +
+        `<strong>${escapeHtml(title || "")}</strong>` +
+        `<small>${formatPlainText(body || "")}</small>${button}</div>`;
+    }
+    function latestSourceCoverage(trace) {
+      const iterations = Array.isArray((trace || {}).retrieval_iterations) ? trace.retrieval_iterations : [];
+      for (let index = iterations.length - 1; index >= 0; index -= 1) {
+        if (iterations[index] && iterations[index].source_coverage) return iterations[index].source_coverage;
+      }
+      return {};
+    }
+    function formatPathList(paths, limit = 8) {
+      const rows = Array.isArray(paths) ? paths : [];
+      if (!rows.length) return "";
+      return rows.slice(0, limit).map(path => `- ${filenameFromPath(path)}`).join("\n") +
+        (rows.length > limit ? `\n- ... ${rows.length - limit} more` : "");
+    }
+    function formatDocRecordList(records, limit = 8) {
+      const rows = Array.isArray(records) ? records : [];
+      if (!rows.length) return "";
+      return rows.slice(0, limit).map(item => `- ${item.filename || (item.path ? filenameFromPath(item.path) : "") || item.doc_id || "source"}`).join("\n") +
+        (rows.length > limit ? `\n- ... ${rows.length - limit} more` : "");
+    }
+    function formatEvidenceCoverageForMap(coverage, evidence, answerSources) {
+      const rows = coverage && typeof coverage === "object" ? coverage : {};
+      const represented = Array.isArray(rows.represented_documents) ? rows.represented_documents : [];
+      const missing = Array.isArray(rows.missing_documents) ? rows.missing_documents : [];
+      const lines = [
+        `${(evidence || []).length} evidence item(s) reached the answer packet.`,
+        `${(answerSources || []).length} answer section link(s) connect final text back to sources.`
+      ];
+      if (represented.length) lines.push("Evidence came from:\n" + formatDocRecordList(represented, 7));
+      if (missing.length) {
+        const warning = sourceCoverageWarning(rows);
+        if (warning) lines.push(warning);
+        lines.push("Loaded but not represented in retrieved evidence:\n" + formatDocRecordList(missing, 5));
+      }
+      return lines.join("\n\n");
+    }
+    function packetReviewTitle(packetReview) {
+      const review = packetReview || {};
+      if (review.status === "not_run") return "No worker review";
+      if (review.status === "error") return "Worker review failed";
+      if (review.continue_retrieval === true) return "Worker requested more evidence";
+      if (review.sufficient === false) return "Worker flagged gaps";
+      if (review.status === "used") return "Worker cleared or narrowed packet";
+      return review.status || "Review unavailable";
+    }
+    function formatPacketReviewForMap(packetReview, docs) {
+      const review = packetReview || {};
+      const lines = [];
+      if (review.assessment) lines.push(String(review.assessment));
+      if (review.continue_retrieval !== undefined) {
+        lines.push(`Retrieval decision: ${review.continue_retrieval ? "look for more evidence before relying on the answer" : "current packet can proceed to drafting"}.`);
+      }
+      if (Array.isArray(review.missing_information) && review.missing_information.length) {
+        lines.push("Missing information:\n" + formatSimpleList(review.missing_information, 6));
+      }
+      if (Array.isArray(review.coverage_risks) && review.coverage_risks.length) {
+        lines.push("Coverage risks:\n" + formatSimpleList(review.coverage_risks, 6));
+      }
+      const relevant = sourceIdsToDocuments(review.relevant_source_ids || [], docs);
+      if (relevant.length) lines.push("Reviewer kept:\n" + formatDocRecordList(relevant, 6));
+      const lowValue = sourceIdsToDocuments(review.low_value_source_ids || [], docs);
+      if (lowValue.length) lines.push("Reviewer marked lower value:\n" + formatDocRecordList(lowValue, 6));
+      return lines.join("\n\n") || "No packet review details were saved for this run.";
+    }
+    function heldBackTitle(scope) {
+      const discovered = Array.isArray((scope || {}).discovered_paths) ? scope.discovered_paths : [];
+      const selected = Array.isArray((scope || {}).selected_paths) ? scope.selected_paths : [];
+      const count = Math.max(0, discovered.length - selected.length);
+      return count ? `${count} document(s) available later` : "No held-back inventory";
+    }
+    function formatHeldBackForMap(scope) {
+      const discovered = Array.isArray((scope || {}).discovered_paths) ? scope.discovered_paths : [];
+      const selected = new Set(((scope || {}).selected_paths || []).map(path => String(path || "").toLowerCase()));
+      const heldBack = discovered.filter(path => !selected.has(String(path || "").toLowerCase()));
+      if (!heldBack.length) return "No documents were held back from the first read.";
+      const scoreByPath = {};
+      for (const item of ((scope || {}).scored_paths || [])) {
+        scoreByPath[String(item.path || "").toLowerCase()] = item;
+      }
+      heldBack.sort((left, right) => {
+        const leftScore = Number((scoreByPath[String(left || "").toLowerCase()] || {}).score || 0);
+        const rightScore = Number((scoreByPath[String(right || "").toLowerCase()] || {}).score || 0);
+        return rightScore - leftScore || String(left || "").localeCompare(String(right || ""));
+      });
+      return formatPathList(heldBack, 8);
+    }
     function briefCard(title, body) {
       return `<div class="item brief-card"><strong>${escapeHtml(title)}</strong><small>${formatPlainText(body || "")}</small></div>`;
     }
@@ -3008,6 +3283,7 @@ INDEX_HTML = r"""<!doctype html>
         updateCommandStep("Ready", "Choose a corpus, ask a question, review the source plan, then run.");
         if (currentPlan) renderRunBrief({plan: currentPlan});
         if (currentPlan) renderReviewChecklist({plan: currentPlan});
+        if (currentPlan) renderInvestigationMap({plan: currentPlan});
         renderActionBoard();
         return;
       }
@@ -3017,6 +3293,7 @@ INDEX_HTML = r"""<!doctype html>
       $("liveEvents").innerHTML = renderRecentLiveEvents(events);
       renderRunBrief({plan: currentPlan, events});
       renderReviewChecklist({plan: currentPlan, events});
+      renderInvestigationMap({plan: currentPlan, trace: lastRenderedTrace, events});
       renderActionBoard();
     }
     function renderRecentLiveEvents(events) {
